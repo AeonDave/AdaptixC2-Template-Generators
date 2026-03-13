@@ -1,0 +1,17 @@
+.idea/
+cmake-build-*/
+*.iws
+out/
+.idea_modules/
+
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+go.work.sum
+.env
+AGENTS.md
