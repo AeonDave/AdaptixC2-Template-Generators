@@ -1,0 +1,19 @@
+extender_type: "agent"
+extender_file: "agent___NAME__.so"
+ax_file: "ax_config.axs"
+
+agent_name: "__NAME__"
+agent_watermark: "__WATERMARK__"
+
+# listeners: list of listener_name values this agent supports.
+# Names must match listener_name from a listener plugin (e.g. gopher_listener_tcp, beacon_listener_http).
+# The Adaptix UI shows only matching listeners when building this agent.
+# Examples:
+#   - Single protocol (like gopher_agent):  ["GopherTCP"]
+#   - Multi protocol  (like beacon_agent):  ["BeaconHTTP", "BeaconTCP", "BeaconSMB", "BeaconDNS"]
+listeners:
+  - "GopherTCP"
+
+# multi_listeners: true  = embed multiple listener profiles in one build
+# multi_listeners: false = one listener profile per build
+multi_listeners: true

@@ -1,0 +1,35 @@
+# Toolchain: go-garble
+# Garble obfuscator wrapping the Go compiler.
+# Install: go install mvdan.cc/garble@latest
+
+name: go-garble
+language: go
+description: "Garble obfuscator (symbol/string obfuscation)"
+
+compiler:
+  binary: garble
+  version_check: "garble version"
+
+build:
+  command: "garble -literals -tiny build"
+  env:
+    CGO_ENABLED: "0"
+    GOWORK: "off"
+  flags:
+    - "-trimpath"
+    - "-modfile=go.mod"
+  ldflags: "-s -w"
+
+targets:
+  - { goos: linux,   goarch: amd64, suffix: "_linux_amd64" }
+  - { goos: linux,   goarch: arm64, suffix: "_linux_arm64" }
+  - { goos: windows, goarch: amd64, suffix: "_windows_amd64.exe" }
+  - { goos: windows, goarch: arm64, suffix: "_windows_arm64.exe" }
+  - { goos: darwin,  goarch: amd64, suffix: "_darwin_amd64" }
+  - { goos: darwin,  goarch: arm64, suffix: "_darwin_arm64" }
+
+plugin:
+  # garble wraps go build, so -buildmode=plugin works normally
+  experiments: "jsonv2,greenteagc"
+  build_mode: plugin
+  note: "Plugin (.so) built with garble (symbols/strings obfuscated)"

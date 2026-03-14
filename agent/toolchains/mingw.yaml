@@ -1,0 +1,61 @@
+# Toolchain: mingw
+# MinGW-w64 cross-compiler for C++ implants targeting Windows.
+
+name: mingw
+language: cpp
+description: "MinGW-w64 cross-compiler (x86/x64 Windows targets)"
+
+compiler:
+  x64: x86_64-w64-mingw32-g++
+  x86: i686-w64-mingw32-g++
+  version_check: "x86_64-w64-mingw32-g++ --version"
+
+cxxflags:
+  - "-fno-stack-protector"
+  - "-fno-strict-overflow"
+  - "-fno-delete-null-pointer-checks"
+  - "-fno-strict-aliasing"
+  - "-fno-builtin"
+  - "-fno-exceptions"
+  - "-fno-unwind-tables"
+  - "-fno-asynchronous-unwind-tables"
+  - "-fpermissive"
+  - "-w"
+  - "-masm=intel"
+  - "-fPIC"
+
+# Per-format defines and linker options
+formats:
+  exe:
+    defines: []
+    ldflags: []
+    extension: ".exe"
+  dll:
+    defines:
+      - "BUILD_DLL"
+      - "_WIN32_WINNT=0x0600"
+    ldflags: ["-shared"]
+    extension: ".dll"
+  shellcode:
+    defines:
+      - "BUILD_SHELLCODE"
+    ldflags: []
+    extension: ".bin"
+  service:
+    defines:
+      - "BUILD_SVC"
+    ldflags: []
+    extension: ".exe"
+
+architectures:
+  - { name: x64, compiler_key: x64 }
+  - { name: x86, compiler_key: x86 }
+
+# Config injection strategy
+config_injection: preprocessor
+# -DPROFILE="\x..." -DPROFILE_SIZE=...
+
+plugin:
+  # Plugin is always Go
+  experiments: "jsonv2,greenteagc"
+  build_mode: plugin

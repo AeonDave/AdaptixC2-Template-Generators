@@ -1,0 +1,14 @@
+[package]
+name = "__NAME__"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[dependencies]
+# TODO: Add dependencies for your protocol/crypto implementation

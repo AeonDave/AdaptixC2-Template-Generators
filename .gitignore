@@ -1,8 +1,11 @@
 .idea/
+.idea_modules/
+
+out/
+output/
+
 cmake-build-*/
 *.iws
-out/
-.idea_modules/
 
 *.exe
 *.exe~
@@ -13,5 +16,11 @@ out/
 *.out
 go.work
 go.work.sum
+
 .env
 AGENTS.md
+
+# Ignore generated protocol directories except _scaffold and default
+protocols/*/
+!protocols/_scaffold/
+!protocols/default/

@@ -1,0 +1,27 @@
+# Toolchain: cargo
+# Rust/Cargo cross-compilation toolchain (scaffold — future use).
+
+name: cargo
+language: rust
+description: "Rust/Cargo compiler (cross-platform, future)"
+
+compiler:
+  binary: cargo
+  version_check: "cargo --version"
+
+build:
+  command: "cargo build --release"
+  flags: []
+
+targets:
+  - { triple: "x86_64-unknown-linux-gnu",    suffix: "_linux_amd64" }
+  - { triple: "aarch64-unknown-linux-gnu",    suffix: "_linux_arm64" }
+  - { triple: "x86_64-pc-windows-msvc",      suffix: "_windows_amd64.exe" }
+  - { triple: "x86_64-pc-windows-gnu",       suffix: "_windows_amd64_gnu.exe" }
+  - { triple: "x86_64-apple-darwin",         suffix: "_darwin_amd64" }
+  - { triple: "aarch64-apple-darwin",        suffix: "_darwin_arm64" }
+
+plugin:
+  experiments: "jsonv2,greenteagc"
+  build_mode: plugin
+  note: "Plugin (.so) is always Go. Rust is implant-only."

@@ -1,0 +1,32 @@
+# Toolchain: go-standard
+# Standard Go compiler with cross-compilation support.
+
+name: go-standard
+language: go
+description: "Standard Go compiler (CGO_ENABLED=0, cross-platform)"
+
+compiler:
+  binary: go
+  version_check: "go version"
+
+build:
+  command: "go build"
+  env:
+    CGO_ENABLED: "0"
+    GOWORK: "off"
+  flags:
+    - "-trimpath"
+    - "-modfile=go.mod"
+  ldflags: "-s -w"
+
+targets:
+  - { goos: linux,   goarch: amd64, suffix: "_linux_amd64" }
+  - { goos: linux,   goarch: arm64, suffix: "_linux_arm64" }
+  - { goos: windows, goarch: amd64, suffix: "_windows_amd64.exe" }
+  - { goos: windows, goarch: arm64, suffix: "_windows_arm64.exe" }
+  - { goos: darwin,  goarch: amd64, suffix: "_darwin_amd64" }
+  - { goos: darwin,  goarch: arm64, suffix: "_darwin_arm64" }
+
+plugin:
+  experiments: "jsonv2,greenteagc"
+  build_mode: plugin

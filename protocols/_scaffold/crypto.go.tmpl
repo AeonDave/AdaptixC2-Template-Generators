@@ -1,0 +1,27 @@
+package __PACKAGE__
+
+import (
+	"fmt"
+)
+
+// TODO: Implement your custom encryption.
+//
+// Both the listener (package main) and agent implant (package crypto)
+// will use this file. The __PACKAGE__ placeholder is replaced by the generator.
+//
+// Requirements:
+//   - EncryptData and DecryptData must be symmetric (what one encrypts, the other decrypts)
+//   - The output format must be self-contained (include nonce/IV if needed)
+//   - Must match on both listener and agent sides
+
+// EncryptData encrypts plaintext with the given key.
+func EncryptData(data, key []byte) ([]byte, error) {
+	// TODO: implement encryption
+	return nil, fmt.Errorf("EncryptData not implemented")
+}
+
+// DecryptData decrypts ciphertext with the given key.
+func DecryptData(data, key []byte) ([]byte, error) {
+	// TODO: implement decryption
+	return nil, fmt.Errorf("DecryptData not implemented")
+}

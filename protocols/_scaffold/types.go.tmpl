@@ -1,0 +1,99 @@
+package __PACKAGE__
+
+import (
+	"encoding/binary"
+	"fmt"
+	"net"
+)
+
+// ─── Codec ─────────────────────────────────────────────────────────────────────
+// Marshal/Unmarshal define the wire serialization used between agent and server.
+// Replace with your codec: msgpack, protobuf, positional bytes, etc.
+//
+// func Marshal(v interface{}) ([]byte, error) { /* TODO */ }
+// func Unmarshal(data []byte, v interface{}) error { /* TODO */ }
+
+// ─── Wire types ────────────────────────────────────────────────────────────────
+// TODO: Define your wire types for agent<->listener communication.
+// These must match on both sides. Use msgpack tags if using msgpack framing,
+// or define your own serialization.
+
+type Message struct {
+	Type   int8     `msgpack:"type"`
+	Object [][]byte `msgpack:"object"`
+}
+
+type Command struct {
+	Code uint   `msgpack:"code"`
+	Id   uint   `msgpack:"id"`
+	Data []byte `msgpack:"data"`
+}
+
+type SessionInfo struct {
+	Hostname    string `msgpack:"hostname"`
+	Username    string `msgpack:"username"`
+	Domain      string `msgpack:"domain"`
+	InternalIP  string `msgpack:"internal_ip"`
+	Os          string `msgpack:"os"`
+	OsVersion   string `msgpack:"os_version"`
+	OsArch      string `msgpack:"os_arch"`
+	Elevated    bool   `msgpack:"elevated"`
+	ProcessId   uint32 `msgpack:"process_id"`
+	ProcessName string `msgpack:"process_name"`
+	CodePage    uint32 `msgpack:"code_page"`
+	Sleep       string `msgpack:"sleep"`
+}
+
+// TODO: Add your custom request/response types here.
+// Example:
+//
+// type ParamsCustom struct {
+//     Target string `msgpack:"target"`
+// }
+//
+// type AnsCustom struct {
+//     Result string `msgpack:"result"`
+// }
+
+type AnsError struct {
+	Message string `msgpack:"message"`
+}
+
+// ─── Network framing ───────────────────────────────────────────────────────────
+// TODO: Implement your message framing. The default uses 4-byte BE length prefix.
+// Replace with your own framing if your protocol uses a different wire format.
+
+func ConnRead(conn net.Conn, size int) ([]byte, error) {
+	if size <= 0 {
+		return nil, fmt.Errorf("invalid size: %d", size)
+	}
+	buf := make([]byte, size)
+	total := 0
+	for total < size {
+		n, err := conn.Read(buf[total:])
+		if err != nil {
+			return nil, err
+		}
+		total += n
+	}
+	return buf, nil
+}
+
+func RecvMsg(conn net.Conn) ([]byte, error) {
+	hdr, err := ConnRead(conn, 4)
+	if err != nil {
+		return nil, err
+	}
+	size := binary.BigEndian.Uint32(hdr)
+	if size == 0 {
+		return nil, nil
+	}
+	return ConnRead(conn, int(size))
+}
+
+func SendMsg(conn net.Conn, data []byte) error {
+	hdr := make([]byte, 4)
+	binary.BigEndian.PutUint32(hdr, uint32(len(data)))
+	_, err := conn.Write(append(hdr, data...))
+	return err
+}

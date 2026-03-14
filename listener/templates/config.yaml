@@ -1,0 +1,6 @@
+extender_type: "listener"
+extender_file: "listener___NAME_____PROTOCOL__.so"
+ax_file: "ax_config.axs"
+listener_name: "__NAME_CAP____PROTOCOL_CAP__"
+listener_type: "__LISTENER_TYPE__"
+protocol: "__PROTOCOL__"

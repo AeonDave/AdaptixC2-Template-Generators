@@ -1,0 +1,5 @@
+name: "__PROTO_NAME__"
+version: "0.1"
+description: "TODO: describe your custom protocol"
+crypto: "TODO: e.g. ChaCha20-Poly1305, XOR, etc."
+framing: "TODO: e.g. msgpack + length-prefix, protobuf, custom binary"
