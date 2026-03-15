@@ -1,0 +1,26 @@
+// RC4 (wire-compatible with existing beacon agents/listeners)
+package __PACKAGE__
+
+import (
+	"crypto/rc4"
+)
+
+var SKey []byte
+
+func RC4Crypt(data, key []byte) ([]byte, error) {
+	c, err := rc4.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, len(data))
+	c.XORKeyStream(out, data)
+	return out, nil
+}
+
+func EncryptData(data, key []byte) ([]byte, error) {
+	return RC4Crypt(data, key)
+}
+
+func DecryptData(data, key []byte) ([]byte, error) {
+	return RC4Crypt(data, key)
+}

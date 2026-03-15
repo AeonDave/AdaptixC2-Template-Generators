@@ -1,0 +1,424 @@
+package __PACKAGE__
+
+import (
+	"bytes"
+	"compress/zlib"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"regexp"
+	"strconv"
+	"strings"
+
+	adaptix "github.com/Adaptix-Framework/axc2"
+)
+
+// ─── Packer (binary parser — reads Big-Endian) ────────────────────────────────
+
+type Packer struct {
+	buffer []byte
+}
+
+func CreatePacker(buffer []byte) *Packer {
+	return &Packer{
+		buffer: buffer,
+	}
+}
+
+func (p *Packer) Size() uint {
+	return uint(len(p.buffer))
+}
+
+func (p *Packer) CheckPacker(types []string) bool {
+	packerSize := p.Size()
+
+	for _, t := range types {
+		switch t {
+		case "byte":
+			if packerSize < 1 {
+				return false
+			}
+			packerSize -= 1
+
+		case "word":
+			if packerSize < 2 {
+				return false
+			}
+			packerSize -= 2
+
+		case "int":
+			if packerSize < 4 {
+				return false
+			}
+			packerSize -= 4
+
+		case "long":
+			if packerSize < 8 {
+				return false
+			}
+			packerSize -= 8
+
+		case "array":
+			if packerSize < 4 {
+				return false
+			}
+			index := p.Size() - packerSize
+			value := make([]byte, 4)
+			copy(value, p.buffer[index:index+4])
+			length := uint(binary.BigEndian.Uint32(value))
+			packerSize -= 4
+			if packerSize < length {
+				return false
+			}
+			packerSize -= length
+		}
+	}
+	return true
+}
+
+func (p *Packer) ParseInt8() uint8 {
+	var value = make([]byte, 1)
+	if p.Size() >= 1 {
+		if p.Size() == 1 {
+			copy(value, p.buffer[:p.Size()])
+			p.buffer = []byte{}
+		} else {
+			copy(value, p.buffer[:1])
+			p.buffer = p.buffer[1:]
+		}
+	} else {
+		return 0
+	}
+	return value[0]
+}
+
+func (p *Packer) ParseInt16() uint16 {
+	var value = make([]byte, 2)
+	if p.Size() >= 2 {
+		if p.Size() == 2 {
+			copy(value, p.buffer[:p.Size()])
+			p.buffer = []byte{}
+		} else {
+			copy(value, p.buffer[:2])
+			p.buffer = p.buffer[2:]
+		}
+	} else {
+		return 0
+	}
+	return binary.BigEndian.Uint16(value)
+}
+
+func (p *Packer) ParseInt32() uint {
+	var value = make([]byte, 4)
+	if p.Size() >= 4 {
+		if p.Size() == 4 {
+			copy(value, p.buffer[:p.Size()])
+			p.buffer = []byte{}
+		} else {
+			copy(value, p.buffer[:4])
+			p.buffer = p.buffer[4:]
+		}
+	} else {
+		return 0
+	}
+	return uint(binary.BigEndian.Uint32(value))
+}
+
+func (p *Packer) ParseInt64() uint64 {
+	var value = make([]byte, 8)
+	if p.Size() >= 8 {
+		if p.Size() == 8 {
+			copy(value, p.buffer[:p.Size()])
+			p.buffer = []byte{}
+		} else {
+			copy(value, p.buffer[:8])
+			p.buffer = p.buffer[8:]
+		}
+	} else {
+		return 0
+	}
+	return binary.BigEndian.Uint64(value)
+}
+
+func (p *Packer) ParseBytes() []byte {
+	size := p.ParseInt32()
+	if p.Size() < size {
+		return make([]byte, 0)
+	}
+	b := p.buffer[:size]
+	p.buffer = p.buffer[size:]
+	return b
+}
+
+func (p *Packer) ParseString() string {
+	size := p.ParseInt32()
+	if p.Size() < size {
+		return ""
+	}
+	b := p.buffer[:size]
+	p.buffer = p.buffer[size:]
+	return string(bytes.Trim(b, "\x00"))
+}
+
+// ─── PackArray (binary packer — writes Little-Endian) ──────────────────────────
+
+func PackArray(array []interface{}) ([]byte, error) {
+	var packData []byte
+
+	for i := range array {
+		switch array[i].(type) {
+		case []byte:
+			val := array[i].([]byte)
+			packData = append(packData, val...)
+
+		case string:
+			size := make([]byte, 4)
+			val := array[i].(string)
+			if len(val) != 0 {
+				if !strings.HasSuffix(val, "\x00") {
+					val += "\x00"
+				}
+			}
+			binary.LittleEndian.PutUint32(size, uint32(len(val)))
+			packData = append(packData, size...)
+			packData = append(packData, []byte(val)...)
+
+		case int:
+			num := make([]byte, 4)
+			val := array[i].(int)
+			binary.LittleEndian.PutUint32(num, uint32(val))
+			packData = append(packData, num...)
+
+		case bool:
+			b := array[i].(bool)
+			var bt = make([]byte, 1)
+			bt[0] = 0
+			if b {
+				bt[0] = 1
+			}
+			packData = append(packData, bt...)
+
+		default:
+			return nil, errors.New("PackArray unknown type")
+		}
+	}
+
+	return packData, nil
+}
+
+// ─── Zlib compression helpers ──────────────────────────────────────────────────
+
+func decompressZlibData(data []byte) ([]byte, bool) {
+	if len(data) < dnsFrameHeaderSize {
+		return data, false
+	}
+	flags := data[0]
+	origLen := int(data[1]) | int(data[2])<<8 | int(data[3])<<16 | int(data[4])<<24
+
+	if origLen <= 0 {
+		return data, false
+	}
+
+	payload := data[dnsFrameHeaderSize:]
+	if (flags & dnsCompressFlag) != 0 {
+		r, err := zlib.NewReader(bytes.NewReader(payload))
+		if err != nil {
+			return data, false
+		}
+		var buf bytes.Buffer
+		_, err = io.Copy(&buf, r)
+		_ = r.Close()
+		if err == nil && buf.Len() == origLen {
+			return buf.Bytes(), true
+		}
+		return data, false
+	}
+
+	if len(payload) == origLen {
+		return payload, true
+	}
+
+	return data, false
+}
+
+// ─── Network framing ───────────────────────────────────────────────────────────
+
+func ConnRead(conn net.Conn, size int) ([]byte, error) {
+	if size <= 0 {
+		return nil, fmt.Errorf("invalid size: %d", size)
+	}
+	buf := make([]byte, size)
+	total := 0
+	for total < size {
+		n, err := conn.Read(buf[total:])
+		if err != nil {
+			return nil, err
+		}
+		total += n
+	}
+	return buf, nil
+}
+
+func RecvMsg(conn net.Conn) ([]byte, error) {
+	hdr, err := ConnRead(conn, 4)
+	if err != nil {
+		return nil, err
+	}
+	size := binary.BigEndian.Uint32(hdr)
+	if size == 0 {
+		return nil, nil
+	}
+	return ConnRead(conn, int(size))
+}
+
+func SendMsg(conn net.Conn, data []byte) error {
+	hdr := make([]byte, 4)
+	binary.BigEndian.PutUint32(hdr, uint32(len(data)))
+	_, err := conn.Write(append(hdr, data...))
+	return err
+}
+
+// ─── OS version resolution ─────────────────────────────────────────────────────
+
+func GetOsVersion(majorVersion uint8, minorVersion uint8, buildNumber uint, isServer bool, systemArch string) (int, string) {
+	var (
+		desc string
+		os   = adaptix.OS_UNKNOWN
+	)
+
+	osVersion := "unknown"
+	if majorVersion == 10 && minorVersion == 0 && isServer && buildNumber >= 26100 {
+		osVersion = "Win 2025 Serv"
+	} else if majorVersion == 10 && minorVersion == 0 && isServer && buildNumber >= 19045 {
+		osVersion = "Win 2022 Serv"
+	} else if majorVersion == 10 && minorVersion == 0 && isServer && buildNumber >= 17763 {
+		osVersion = "Win 2019 Serv"
+	} else if majorVersion == 10 && minorVersion == 0 && !isServer && buildNumber >= 22000 {
+		osVersion = "Win 11"
+	} else if majorVersion == 10 && minorVersion == 0 && isServer {
+		osVersion = "Win 2016 Serv"
+	} else if majorVersion == 10 && minorVersion == 0 {
+		osVersion = "Win 10"
+	} else if majorVersion == 6 && minorVersion == 3 && isServer {
+		osVersion = "Win Serv 2012 R2"
+	} else if majorVersion == 6 && minorVersion == 3 {
+		osVersion = "Win 8.1"
+	} else if majorVersion == 6 && minorVersion == 2 && isServer {
+		osVersion = "Win Serv 2012"
+	} else if majorVersion == 6 && minorVersion == 2 {
+		osVersion = "Win 8"
+	} else if majorVersion == 6 && minorVersion == 1 && isServer {
+		osVersion = "Win Serv 2008 R2"
+	} else if majorVersion == 6 && minorVersion == 1 {
+		osVersion = "Win 7"
+	}
+
+	desc = osVersion + " " + systemArch
+	if strings.Contains(osVersion, "Win") {
+		os = adaptix.OS_WINDOWS
+	}
+	return os, desc
+}
+
+// ─── Utility functions ─────────────────────────────────────────────────────────
+
+func int32ToIPv4(ip uint) string {
+	b := []byte{
+		byte(ip),
+		byte(ip >> 8),
+		byte(ip >> 16),
+		byte(ip >> 24),
+	}
+	return net.IP(b).String()
+}
+
+func SizeBytesToFormat(bytes int64) string {
+	const (
+		KB = 1024.0
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+
+	size := float64(bytes)
+
+	if size >= GB {
+		return fmt.Sprintf("%.2f Gb", size/GB)
+	} else if size >= MB {
+		return fmt.Sprintf("%.2f Mb", size/MB)
+	}
+	return fmt.Sprintf("%.2f Kb", size/KB)
+}
+
+func parseDurationToSeconds(input string) (int, error) {
+	re := regexp.MustCompile(`(\d+)(h|m|s)`)
+	matches := re.FindAllStringSubmatch(input, -1)
+
+	totalSeconds := 0
+	for _, match := range matches {
+		value, err := strconv.Atoi(match[1])
+		if err != nil {
+			return 0, err
+		}
+
+		switch match[2] {
+		case "h":
+			totalSeconds += value * 3600
+		case "m":
+			totalSeconds += value * 60
+		case "s":
+			totalSeconds += value
+		}
+	}
+
+	return totalSeconds, nil
+}
+
+func parseStringToWorkingTime(WorkingTime string) (int, error) {
+	IntWorkingTime := 0
+	if WorkingTime != "" {
+		match, err := regexp.MatchString("^[012]?[0-9]:[0-6][0-9]-[012]?[0-9]:[0-6][0-9]$", WorkingTime)
+		if err != nil || match == false {
+			return IntWorkingTime, errors.New("Failed to parse working time: Invalid format")
+		}
+
+		startAndEnd := strings.Split(WorkingTime, "-")
+		startHourandMinutes := strings.Split(startAndEnd[0], ":")
+		endHourandMinutes := strings.Split(startAndEnd[1], ":")
+
+		startHour, _ := strconv.Atoi(startHourandMinutes[0])
+		startMin, _ := strconv.Atoi(startHourandMinutes[1])
+		endHour, _ := strconv.Atoi(endHourandMinutes[0])
+		endMin, _ := strconv.Atoi(endHourandMinutes[1])
+
+		if startHour < 0 || startHour > 24 || endHour < 0 || endHour > 24 || startMin < 0 || startMin > 60 || endMin < 0 || endMin > 60 {
+			return IntWorkingTime, errors.New("Failed to parse working time: Incorrectly defined time")
+		}
+
+		if endHour < startHour || (startHour == endHour && endMin <= startMin) {
+			return IntWorkingTime, errors.New("Failed to parse working time: The end hour cannot be earlier than the start hour")
+		}
+
+		IntWorkingTime |= startHour << 24
+		IntWorkingTime |= startMin << 16
+		IntWorkingTime |= endHour << 8
+		IntWorkingTime |= endMin << 0
+	}
+
+	return IntWorkingTime, nil
+}
+
+func formatBurstStatus(enabled int, sleepMs int, jitterPct int) string {
+	if enabled == 0 {
+		return "off"
+	}
+	return fmt.Sprintf("on (sleep=%dms, jitter=%d%%)", sleepMs, jitterPct)
+}
+
+func ensureNewline(s string) string {
+	if len(s) > 0 && s[len(s)-1] != '\n' {
+		return s + "\n"
+	}
+	return s
+}

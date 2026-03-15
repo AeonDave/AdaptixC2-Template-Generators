@@ -44,7 +44,7 @@ The generator asks for:
 |--------|-------------|---------|
 | **Agent name** | Lowercase alphanumeric identifier | `phantom` |
 | **Watermark** | 8-char hex (auto-generated if empty) | `a1b2c3d4` |
-| **Protocol** | Wire-format from `protocols/` | `default` |
+| **Protocol** | Wire-format from `protocols/` | `adaptix_default` |
 | **Language** | Implant language: go, cpp, rust | `go` |
 | **Toolchain** | Build toolchain (shown when multiple match) | `go-standard` |
 
@@ -104,14 +104,14 @@ When a protocol is selected, the generator overlays:
 
 ```powershell
 # Use a specific protocol
-.\generator.ps1 -Name phantom -Watermark a1b2c3d4 -Protocol default
+.\generator.ps1 -Name phantom -Watermark a1b2c3d4 -Protocol adaptix_default
 
 # With output directory
-.\generator.ps1 -Name phantom -Protocol default -OutputDir ..\..\AdaptixC2\AdaptixServer\extenders
+.\generator.ps1 -Name phantom -Protocol adaptix_default -OutputDir ..\..\AdaptixC2\AdaptixServer\extenders
 
 # Or via env var (bash)
-PROTOCOL=default bash generator.sh
-PROTOCOL=default OUTPUT_DIR=../../AdaptixC2/AdaptixServer/extenders bash generator.sh
+PROTOCOL=adaptix_default bash generator.sh
+PROTOCOL=adaptix_default OUTPUT_DIR=../../AdaptixC2/AdaptixServer/extenders bash generator.sh
 ```
 
 Agents and listeners using the **same protocol** share identical encryption and wire types, ensuring compatibility.

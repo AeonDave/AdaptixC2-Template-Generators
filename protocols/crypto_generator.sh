@@ -58,131 +58,106 @@ if [[ ! -d "$PROTO_DIR" ]]; then
     echo "[-] Protocol '$PROTOCOL' not found."; exit 1
 fi
 
-# ─── Select crypto ──────────────────────────────────────────────────────────────
+# ─── Discover crypto templates ──────────────────────────────────────────────────
 
-crypto_keys=("aes-gcm" "xchacha20")
-crypto_descs=("AES-256-GCM (standard, fast, widely supported)" "XChaCha20-Poly1305 (modern, nonce-misuse resistant)")
+CRYPTO_DIR="$SCRIPT_DIR/_crypto"
+crypto_keys=()
+crypto_descs=()
+crypto_files=()
+
+if [[ -d "$CRYPTO_DIR" ]]; then
+    for f in "$CRYPTO_DIR"/*.go.tmpl; do
+        [[ -f "$f" ]] || continue
+        key="$(basename "$f" .go.tmpl)"
+        desc=""
+        first_line="$(head -n1 "$f")"
+        if [[ "$first_line" =~ ^[[:space:]]*//(.*) ]]; then
+            desc="$(echo "${BASH_REMATCH[1]}" | sed 's/^[[:space:]]*//')"
+        fi
+        crypto_keys+=("$key")
+        crypto_descs+=("$desc")
+        crypto_files+=("$f")
+    done
+fi
+
+if [[ ${#crypto_keys[@]} -eq 0 ]]; then
+    echo "[-] No crypto templates found in _crypto/. Add .go.tmpl files there."
+    exit 1
+fi
+
+# ─── Select crypto ──────────────────────────────────────────────────────────────
 
 if [[ -z "$CRYPTO" ]]; then
     echo "Available crypto implementations:"
     for i in "${!crypto_keys[@]}"; do
-        echo "  [$((i+1))] ${crypto_keys[$i]} - ${crypto_descs[$i]}"
+        line="  [$((i+1))] ${crypto_keys[$i]}"
+        [[ -n "${crypto_descs[$i]}" ]] && line+=" - ${crypto_descs[$i]}"
+        echo "$line"
     done
+    create_idx=$(( ${#crypto_keys[@]} + 1 ))
+    echo "  [$create_idx] Create new..."
     echo ""
     read -rp "Select crypto [default: 1]: " choice
     [[ -z "$choice" ]] && choice="1"
     idx=$((choice - 1))
+
+    if [[ $choice -eq $create_idx ]]; then
+        # ── Create new crypto scaffold ──
+        read -rp "Enter new crypto name (lowercase, e.g. my-cipher): " new_name
+        new_name="$(echo "$new_name" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]//g')"
+        if [[ -z "$new_name" ]]; then echo "[-] Invalid name."; exit 1; fi
+        new_file="$CRYPTO_DIR/$new_name.go.tmpl"
+        if [[ -f "$new_file" ]]; then echo "[-] Crypto '$new_name' already exists."; exit 1; fi
+        read -rp "Short description (shown in menu): " new_desc
+        cat > "$new_file" << SCAFFOLD
+// $new_desc
+package __PACKAGE__
+
+var SKey []byte
+
+// EncryptData encrypts data with $new_name using key.
+// TODO: implement
+func EncryptData(data, key []byte) ([]byte, error) {
+	panic("$new_name EncryptData not implemented")
+}
+
+// DecryptData decrypts data with $new_name using key.
+// TODO: implement
+func DecryptData(data, key []byte) ([]byte, error) {
+	panic("$new_name DecryptData not implemented")
+}
+SCAFFOLD
+        echo ""
+        echo "[+] Created crypto scaffold: _crypto/$new_name.go.tmpl"
+        echo "    Implement EncryptData/DecryptData, then re-run this generator to apply it."
+        echo ""
+        exit 0
+    fi
+
     if [[ $idx -lt 0 || $idx -ge ${#crypto_keys[@]} ]]; then
         echo "[-] Invalid choice."; exit 1
     fi
     CRYPTO="${crypto_keys[$idx]}"
 fi
 
+# ─── Resolve crypto template file ───────────────────────────────────────────────
+
+SELECTED_FILE=""
+for i in "${!crypto_keys[@]}"; do
+    if [[ "${crypto_keys[$i]}" == "$CRYPTO" ]]; then
+        SELECTED_FILE="${crypto_files[$i]}"
+        break
+    fi
+done
+if [[ -z "$SELECTED_FILE" ]]; then
+    echo "[-] Unknown crypto: $CRYPTO. Available: ${crypto_keys[*]}"
+    exit 1
+fi
+
 # ─── Generate crypto template ───────────────────────────────────────────────────
 
 DEST_FILE="$PROTO_DIR/crypto.go.tmpl"
-
-case "$CRYPTO" in
-aes-gcm)
-cat > "$DEST_FILE" << 'TMPL'
-package __PACKAGE__
-
-import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"fmt"
-	"io"
-)
-
-// SKey is set from the embedded profile at startup (agent-side).
-var SKey []byte
-
-// EncryptData encrypts data with AES-256-GCM using key.
-// The nonce is prepended to the ciphertext.
-func EncryptData(data, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	return gcm.Seal(nonce, nonce, data, nil), nil
-}
-
-// DecryptData decrypts data with AES-256-GCM using key.
-// Expects nonce prepended as per EncryptData.
-func DecryptData(data, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	if len(data) < gcm.NonceSize() {
-		return nil, fmt.Errorf("ciphertext too short")
-	}
-	nonce, ct := data[:gcm.NonceSize()], data[gcm.NonceSize():]
-	return gcm.Open(nil, nonce, ct, nil)
-}
-TMPL
-;;
-xchacha20)
-cat > "$DEST_FILE" << 'TMPL'
-package __PACKAGE__
-
-import (
-	"crypto/rand"
-	"fmt"
-	"io"
-
-	"golang.org/x/crypto/chacha20poly1305"
-)
-
-// SKey is set from the embedded profile at startup (agent-side).
-var SKey []byte
-
-// EncryptData encrypts data with XChaCha20-Poly1305 using key.
-// The 24-byte nonce is prepended to the ciphertext.
-func EncryptData(data, key []byte) ([]byte, error) {
-	aead, err := chacha20poly1305.NewX(key)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, aead.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	return aead.Seal(nonce, nonce, data, nil), nil
-}
-
-// DecryptData decrypts data with XChaCha20-Poly1305 using key.
-// Expects 24-byte nonce prepended as per EncryptData.
-func DecryptData(data, key []byte) ([]byte, error) {
-	aead, err := chacha20poly1305.NewX(key)
-	if err != nil {
-		return nil, err
-	}
-	if len(data) < aead.NonceSize() {
-		return nil, fmt.Errorf("ciphertext too short")
-	}
-	nonce, ct := data[:aead.NonceSize()], data[aead.NonceSize():]
-	return aead.Open(nil, nonce, ct, nil)
-}
-TMPL
-;;
-*)
-    echo "[-] Unknown crypto: $CRYPTO"; exit 1
-;;
-esac
+cp "$SELECTED_FILE" "$DEST_FILE"
 
 # Update meta.yaml crypto field
 META_FILE="$PROTO_DIR/meta.yaml"

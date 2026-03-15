@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
@@ -11,13 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -57,60 +53,6 @@ type Connection struct {
 	conn         net.Conn
 	ctx          context.Context
 	handleCancel context.CancelFunc
-}
-
-// ─── Packet types ──────────────────────────────────────────────────────────────
-// These match the stock gopher wire format. Modify if using a custom protocol.
-
-const (
-	INIT_PACK     = 1
-	EXFIL_PACK    = 2
-	JOB_PACK      = 3
-	TUNNEL_PACK   = 4
-	TERMINAL_PACK = 5
-	BOF_PACK      = 6
-)
-
-type StartMsg struct {
-	Type int    `msgpack:"id"`
-	Data []byte `msgpack:"data"`
-}
-
-type InitPack struct {
-	Id   uint   `msgpack:"id"`
-	Type uint   `msgpack:"type"`
-	Data []byte `msgpack:"data"`
-}
-
-type ExfilPack struct {
-	Id   uint   `msgpack:"id"`
-	Type uint   `msgpack:"type"`
-	Task string `msgpack:"task"`
-}
-
-type JobPack struct {
-	Id   uint   `msgpack:"id"`
-	Type uint   `msgpack:"type"`
-	Task string `msgpack:"task"`
-}
-
-type TunnelPack struct {
-	Id        uint   `msgpack:"id"`
-	Type      uint   `msgpack:"type"`
-	ChannelId int    `msgpack:"channel_id"`
-	Key       []byte `msgpack:"key"`
-	Iv        []byte `msgpack:"iv"`
-	Alive     bool   `msgpack:"alive"`
-	Reason    byte   `msgpack:"reason"`
-}
-
-type TermPack struct {
-	Id     uint   `msgpack:"id"`
-	TermId int    `msgpack:"term_id"`
-	Key    []byte `msgpack:"key"`
-	Iv     []byte `msgpack:"iv"`
-	Alive  bool   `msgpack:"alive"`
-	Status string `msgpack:"status"`
 }
 
 // ─── Config validation ─────────────────────────────────────────────────────────
@@ -226,8 +168,9 @@ func (t *Transport__NAME_CAP__) Start(ts Teamserver) error {
 }
 
 // ─── Handle Connection ─────────────────────────────────────────────────────────
-// TODO: Customize this handler for your protocol's init handshake and data loop.
-// The default implementation follows the stock gopher wire format.
+// Beacon-compatible binary packing protocol.
+// Init message: RC4-encrypted [4B agent_type BE][4B agent_id BE][beat data]
+// Then enters a task exchange loop using the Teamserver's agent-level encryption.
 
 func (t *Transport__NAME_CAP__) handleConnection(conn net.Conn, ts Teamserver) {
 	var (
@@ -235,7 +178,6 @@ func (t *Transport__NAME_CAP__) handleConnection(conn net.Conn, ts Teamserver) {
 		recvData []byte
 		encKey   []byte
 		err      error
-		initMsg  StartMsg
 	)
 
 	if len(t.Config.TcpBanner) > 0 {
@@ -248,7 +190,7 @@ func (t *Transport__NAME_CAP__) handleConnection(conn net.Conn, ts Teamserver) {
 	connection.ctx, connection.handleCancel = context.WithCancel(context.Background())
 
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	recvData, err = recvMsg(conn)
+	recvData, err = RecvMsg(conn)
 	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		goto ERR
@@ -263,27 +205,19 @@ func (t *Transport__NAME_CAP__) handleConnection(conn net.Conn, ts Teamserver) {
 		goto ERR
 	}
 
-	err = Unmarshal(recvData, &initMsg)
-	if err != nil {
+	// Binary format: [4-byte BE agent_type][4-byte BE agent_id][beat data...]
+	if len(recvData) < 8 {
 		goto ERR
 	}
 
-	switch initMsg.Type {
-
-	case INIT_PACK:
-
-		var initPack InitPack
-		err := Unmarshal(initMsg.Data, &initPack)
-		if err != nil {
-			goto ERR
-		}
-
-		agentId := fmt.Sprintf("%08x", initPack.Id)
-		agentType := fmt.Sprintf("%08x", initPack.Type)
+	{
+		agentType := fmt.Sprintf("%08x", binary.BigEndian.Uint32(recvData[:4]))
+		agentId := fmt.Sprintf("%08x", binary.BigEndian.Uint32(recvData[4:8]))
+		beat := recvData[8:]
 		ExternalIP := strings.Split(conn.RemoteAddr().String(), ":")[0]
 
 		if !Ts.TsAgentIsExists(agentId) {
-			_, err = Ts.TsAgentCreate(agentType, agentId, initPack.Data, t.Name, ExternalIP, false)
+			_, err = Ts.TsAgentCreate(agentType, agentId, beat, t.Name, ExternalIP, false)
 			if err != nil {
 				goto ERR
 			}
@@ -304,12 +238,12 @@ func (t *Transport__NAME_CAP__) handleConnection(conn net.Conn, ts Teamserver) {
 			}
 
 			if sendData != nil && len(sendData) > 0 {
-				err = sendMsg(conn, sendData)
+				err = SendMsg(conn, sendData)
 				if err != nil {
 					break
 				}
 
-				recvData, err = recvMsg(conn)
+				recvData, err = RecvMsg(conn)
 				if err != nil {
 					break
 				}
@@ -330,213 +264,12 @@ func (t *Transport__NAME_CAP__) handleConnection(conn net.Conn, ts Teamserver) {
 		}{Mark: &disconnectMark})
 		t.AgentConnects.Delete(agentId)
 		_ = conn.Close()
-
-	case EXFIL_PACK:
-
-		var exfilPack ExfilPack
-		err := Unmarshal(initMsg.Data, &exfilPack)
-		if err != nil {
-			goto ERR
-		}
-
-		agentId := fmt.Sprintf("%08x", exfilPack.Id)
-
-		if !Ts.TsTaskRunningExists(agentId, exfilPack.Task) {
-			goto ERR
-		}
-
-		jcId := agentId + "-" + exfilPack.Task
-
-		t.JobConnects.Put(jcId, connection)
-
-		for {
-			recvData, err = recvMsg(conn)
-			if err != nil {
-				break
-			}
-			_ = Ts.TsAgentProcessData(agentId, recvData)
-		}
-
-		t.JobConnects.Delete(jcId)
-		_ = conn.Close()
-
-	case JOB_PACK, BOF_PACK:
-
-		var jobPack JobPack
-		err := Unmarshal(initMsg.Data, &jobPack)
-		if err != nil {
-			goto ERR
-		}
-
-		agentId := fmt.Sprintf("%08x", jobPack.Id)
-
-		if !Ts.TsTaskRunningExists(agentId, jobPack.Task) {
-			goto ERR
-		}
-
-		jcId := agentId + "-" + jobPack.Task
-
-		t.JobConnects.Put(jcId, connection)
-
-		for {
-			recvData, err = recvMsg(conn)
-			if err != nil {
-				break
-			}
-			_ = Ts.TsAgentProcessData(agentId, recvData)
-		}
-
-		t.JobConnects.Delete(jcId)
-		_ = conn.Close()
-
-	case TUNNEL_PACK:
-
-		var tunPack TunnelPack
-		err := Unmarshal(initMsg.Data, &tunPack)
-		if err != nil {
-			goto ERR
-		}
-
-		agentId := fmt.Sprintf("%08x", tunPack.Id)
-
-		if !Ts.TsTunnelChannelExists(tunPack.ChannelId) {
-			goto ERR
-		}
-
-		if !tunPack.Alive {
-			if tunPack.Reason < 1 || tunPack.Reason > 8 {
-				tunPack.Reason = 5
-			}
-			ts.TsTunnelConnectionHalt(tunPack.ChannelId, tunPack.Reason)
-			_ = conn.Close()
-			return
-		}
-
-		ts.TsTunnelConnectionResume(agentId, tunPack.ChannelId, true)
-
-		pr, pw, err := Ts.TsTunnelGetPipe(agentId, tunPack.ChannelId)
-		if err != nil {
-			goto ERR
-		}
-
-		blockEnc, _ := aes.NewCipher(tunPack.Key)
-		encStream := cipher.NewCTR(blockEnc, tunPack.Iv)
-		encWriter := &cipher.StreamWriter{S: encStream, W: conn}
-
-		decCipher, _ := aes.NewCipher(tunPack.Key)
-		decStream := cipher.NewCTR(decCipher, tunPack.Iv)
-		decReader := &cipher.StreamReader{S: decStream, R: conn}
-
-		_ = pw.Close()
-
-		var closeOnce sync.Once
-		closeAll := func() {
-			closeOnce.Do(func() {
-				_ = conn.Close()
-				_ = pr.Close()
-			})
-		}
-
-		var wg sync.WaitGroup
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, _ = io.Copy(encWriter, pr)
-			closeAll()
-		}()
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			buf := make([]byte, 0x8000)
-			for {
-				n, err := decReader.Read(buf)
-				if n > 0 {
-					data := make([]byte, n)
-					copy(data, buf[:n])
-					ts.TsTunnelConnectionData(tunPack.ChannelId, data)
-				}
-				if err != nil {
-					break
-				}
-			}
-			closeAll()
-		}()
-
-		wg.Wait()
-
-		ts.TsTunnelConnectionClose(tunPack.ChannelId, false)
-
-	case TERMINAL_PACK:
-
-		var termPack TermPack
-		err := Unmarshal(initMsg.Data, &termPack)
-		if err != nil {
-			goto ERR
-		}
-
-		agentId := fmt.Sprintf("%08x", termPack.Id)
-		terminalId := fmt.Sprintf("%08x", termPack.TermId)
-
-		if !Ts.TsTerminalConnExists(terminalId) {
-			goto ERR
-		}
-
-		if !termPack.Alive {
-			_ = ts.TsAgentTerminalCloseChannel(terminalId, termPack.Status)
-			_ = conn.Close()
-			return
-		}
-
-		ts.TsTerminalConnResume(agentId, terminalId, true)
-
-		pr, pw, err := Ts.TsTerminalGetPipe(agentId, terminalId)
-		if err != nil {
-			goto ERR
-		}
-
-		blockEnc, _ := aes.NewCipher(termPack.Key)
-		encStream := cipher.NewCTR(blockEnc, termPack.Iv)
-		encWriter := &cipher.StreamWriter{S: encStream, W: conn}
-
-		blockDec, _ := aes.NewCipher(termPack.Key)
-		decStream := cipher.NewCTR(blockDec, termPack.Iv)
-		decWriter := &cipher.StreamWriter{S: decStream, W: pw}
-
-		var closeOnce sync.Once
-		closeAll := func() {
-			closeOnce.Do(func() {
-				_ = conn.Close()
-				_ = pr.Close()
-			})
-		}
-
-		var wg sync.WaitGroup
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, _ = io.Copy(encWriter, pr)
-			closeAll()
-		}()
-
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, _ = io.Copy(decWriter, conn)
-			closeAll()
-		}()
-
-		wg.Wait()
-
-		_ = ts.TsAgentTerminalCloseChannel(terminalId, "killed")
 	}
 
 	return
 
 ERR:
-	_ = sendMsg(conn, []byte(t.Config.ErrorAnswer))
+	_ = SendMsg(conn, []byte(t.Config.ErrorAnswer))
 	_ = conn.Close()
 }
 
@@ -573,54 +306,6 @@ func (t *Transport__NAME_CAP__) Stop() error {
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
-
-func connRead(conn net.Conn, size int) ([]byte, error) {
-	if size <= 0 {
-		return nil, fmt.Errorf("invalid size: %d", size)
-	}
-
-	message := make([]byte, 0, size)
-	tmpBuff := make([]byte, 1024)
-	readSize := 0
-
-	for readSize < size {
-		toRead := size - readSize
-		if toRead < len(tmpBuff) {
-			tmpBuff = tmpBuff[:toRead]
-		}
-
-		n, err := conn.Read(tmpBuff)
-		if err != nil {
-			return nil, err
-		}
-
-		message = append(message, tmpBuff[:n]...)
-		readSize += n
-	}
-	return message, nil
-}
-
-func recvMsg(conn net.Conn) ([]byte, error) {
-	bufLen, err := connRead(conn, 4)
-	if err != nil {
-		return nil, err
-	}
-	msgLen := binary.BigEndian.Uint32(bufLen)
-
-	return connRead(conn, int(msgLen))
-}
-
-func sendMsg(conn net.Conn, data []byte) error {
-	if conn == nil {
-		return errors.New("conn is nil")
-	}
-
-	msgLen := make([]byte, 4)
-	binary.BigEndian.PutUint32(msgLen, uint32(len(data)))
-	message := append(msgLen, data...)
-	_, err := conn.Write(message)
-	return err
-}
 
 func isClientConnected(conn net.Conn, ssl bool) bool {
 	var err error = nil

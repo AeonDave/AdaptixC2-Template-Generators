@@ -275,7 +275,13 @@ substitute "$TEMPLATE_DIR/plugin/go.mod"       "$OUT_DIR/go.mod"
 substitute "$TEMPLATE_DIR/plugin/go.sum"       "$OUT_DIR/go.sum"
 substitute "$TEMPLATE_DIR/plugin/Makefile"     "$OUT_DIR/Makefile"
 substitute "$TEMPLATE_DIR/plugin/pl_utils.go"  "$OUT_DIR/pl_utils.go"
-substitute "$TEMPLATE_DIR/plugin/pl_main.go"   "$OUT_DIR/pl_main.go"
+# pl_main.go — protocol-specific override if present
+if [[ -n "$PROTOCOL" && -f "$PROTO_DIR/pl_main.go.tmpl" ]]; then
+    info "Using protocol-specific pl_main.go from '$PROTOCOL'"
+    substitute "$PROTO_DIR/pl_main.go.tmpl" "$OUT_DIR/pl_main.go"
+else
+    substitute "$TEMPLATE_DIR/plugin/pl_main.go" "$OUT_DIR/pl_main.go"
+fi
 
 # ax_config.axs — language-specific UI definition
 AX_CONFIG_VARIANT="ax_config.axs"

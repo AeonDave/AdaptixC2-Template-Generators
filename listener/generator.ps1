@@ -23,10 +23,10 @@
     .\generator.ps1
 
 .EXAMPLE
-    .\generator.ps1 -Name telegram -Protocol default -ListenerType external
+    .\generator.ps1 -Name telegram -Protocol adaptix_default -ListenerType external
 
 .EXAMPLE
-    .\generator.ps1 -Name telegram -Protocol default -OutputDir ..\my-adaptix\extenders
+    .\generator.ps1 -Name telegram -Protocol adaptix_default -OutputDir ..\my-adaptix\extenders
 #>
 param(
     [string]$Name         = "",
@@ -74,7 +74,7 @@ if (Test-Path $ProtocolsDir) {
 }
 if ($availableProtocols.Count -eq 0) {
     Write-Host "[-] No protocols found in $ProtocolsDir" -ForegroundColor Red
-    Write-Host "    Run with -NewProtocol <name> to create one, or create protocols/default/ manually." -ForegroundColor Yellow
+    Write-Host "    Run with -NewProtocol <name> to create one, or create a protocol directory manually." -ForegroundColor Yellow
     exit 1
 }
 
@@ -197,7 +197,16 @@ Substitute-Template (Join-Path $TemplateDir "go.mod")           (Join-Path $OutD
 Substitute-Template (Join-Path $TemplateDir "go.sum")           (Join-Path $OutDir "go.sum")
 Substitute-Template (Join-Path $TemplateDir "Makefile")         (Join-Path $OutDir "Makefile")
 Substitute-Template (Join-Path $TemplateDir "pl_main.go")       (Join-Path $OutDir "pl_main.go")
-Substitute-Template (Join-Path $TemplateDir "pl_transport.go")  (Join-Path $OutDir "pl_transport.go")
+
+# pl_transport.go: use protocol override if available, else base template
+$protoTransport = Join-Path $protoDir "pl_transport.go.tmpl"
+if (Test-Path $protoTransport) {
+    Write-Host "  [+] Using protocol transport override: pl_transport.go.tmpl" -ForegroundColor Green
+    Substitute-Template $protoTransport (Join-Path $OutDir "pl_transport.go")
+} else {
+    Substitute-Template (Join-Path $TemplateDir "pl_transport.go") (Join-Path $OutDir "pl_transport.go")
+}
+
 Substitute-Template (Join-Path $TemplateDir "map.go")           (Join-Path $OutDir "map.go")
 Substitute-Template (Join-Path $TemplateDir "ax_config.axs")    (Join-Path $OutDir "ax_config.axs")
 

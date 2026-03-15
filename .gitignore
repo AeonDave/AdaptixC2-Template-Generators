@@ -20,7 +20,12 @@ go.work.sum
 .env
 AGENTS.md
 
-# Ignore generated protocol directories except _scaffold and default
 protocols/*/
+protocols/_crypto/*/
+!protocols/_crypto/aes-gcm.go.tmpl
+!protocols/_crypto/rc4.go.tmpl
+!protocols/_crypto/xchacha20.tmpl
 !protocols/_scaffold/
-!protocols/default/
+!protocols/_crypto/
+!protocols/adaptix_default/
+!protocols/gopher/

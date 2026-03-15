@@ -13,7 +13,7 @@
     8-char hex watermark. Skips interactive prompt when provided.
 
 .PARAMETER Protocol
-    Protocol from protocols/ (default: "default"). Overrides crypto, constants, and wire types.
+    Protocol from protocols/ (default: "adaptix_default"). Overrides crypto, constants, and wire types.
 
 .PARAMETER Language
     Implant language: go, cpp, rust. Default: go.
@@ -31,7 +31,7 @@
     .\generator.ps1
 
 .EXAMPLE
-    .\generator.ps1 -Name phantom -Watermark a1b2c3d4 -Protocol default
+    .\generator.ps1 -Name phantom -Watermark a1b2c3d4 -Protocol adaptix_default
 
 .EXAMPLE
     .\generator.ps1 -Name phantom -Watermark a1b2c3d4 -Language cpp -Toolchain mingw
@@ -329,7 +329,14 @@ Substitute-Template (Join-Path $TemplateDir "plugin\go.mod")        (Join-Path $
 Substitute-Template (Join-Path $TemplateDir "plugin\go.sum")        (Join-Path $OutDir "go.sum")
 Substitute-Template (Join-Path $TemplateDir "plugin\Makefile")      (Join-Path $OutDir "Makefile")
 Substitute-Template (Join-Path $TemplateDir "plugin\pl_utils.go")   (Join-Path $OutDir "pl_utils.go")
-Substitute-Template (Join-Path $TemplateDir "plugin\pl_main.go")    (Join-Path $OutDir "pl_main.go")
+# pl_main.go — protocol-specific override if present
+$protoMain = if ($Protocol) { Join-Path $ProtoDir "pl_main.go.tmpl" } else { $null }
+if ($protoMain -and (Test-Path $protoMain)) {
+    Write-Host "  -> Using protocol-specific pl_main.go from '$Protocol'" -ForegroundColor Yellow
+    Substitute-Template $protoMain (Join-Path $OutDir "pl_main.go")
+} else {
+    Substitute-Template (Join-Path $TemplateDir "plugin\pl_main.go") (Join-Path $OutDir "pl_main.go")
+}
 
 # ax_config.axs — language-specific UI definition
 $AxConfigVariant = "ax_config.axs"

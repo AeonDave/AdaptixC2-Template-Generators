@@ -1,0 +1,41 @@
+// XChaCha20-Poly1305 (modern, nonce-misuse resistant)
+package __PACKAGE__
+
+import (
+	"crypto/rand"
+	"fmt"
+	"io"
+
+	"golang.org/x/crypto/chacha20poly1305"
+)
+
+// SKey is set from the embedded profile at startup (agent-side).
+var SKey []byte
+
+// EncryptData encrypts data with XChaCha20-Poly1305 using key.
+// The 24-byte nonce is prepended to the ciphertext.
+func EncryptData(data, key []byte) ([]byte, error) {
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	return aead.Seal(nonce, nonce, data, nil), nil
+}
+
+// DecryptData decrypts data with XChaCha20-Poly1305 using key.
+// Expects 24-byte nonce prepended as per EncryptData.
+func DecryptData(data, key []byte) ([]byte, error) {
+	aead, err := chacha20poly1305.NewX(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) < aead.NonceSize() {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	nonce, ct := data[:aead.NonceSize()], data[aead.NonceSize():]
+	return aead.Open(nil, nonce, ct, nil)
+}

@@ -1,0 +1,29 @@
+package __PACKAGE__
+
+import (
+	"crypto/rc4"
+	"errors"
+)
+
+// SKey is set from the embedded profile at startup (agent-side).
+var SKey []byte
+
+// EncryptData encrypts data with RC4.
+func EncryptData(data, key []byte) ([]byte, error) {
+	return RC4Crypt(data, key)
+}
+
+// DecryptData decrypts data with RC4 (symmetric — same as encrypt).
+func DecryptData(data, key []byte) ([]byte, error) {
+	return RC4Crypt(data, key)
+}
+
+func RC4Crypt(data []byte, key []byte) ([]byte, error) {
+	rc4crypt, errcrypt := rc4.NewCipher(key)
+	if errcrypt != nil {
+		return nil, errors.New("rc4 crypt error")
+	}
+	decryptData := make([]byte, len(data))
+	rc4crypt.XORKeyStream(decryptData, data)
+	return decryptData, nil
+}

@@ -67,135 +67,73 @@ if (-not (Test-Path $ProtoDir)) {
     Write-Host "[-] Protocol '$Protocol' not found." -ForegroundColor Red; exit 1
 }
 
-# ─── Select crypto ──────────────────────────────────────────────────────────────
+# ─── Discover crypto templates ──────────────────────────────────────────────────
 
-$cryptoOptions = @(
-    @{ Key = "aes-gcm";    Desc = "AES-256-GCM (standard, fast, widely supported)" },
-    @{ Key = "xchacha20";  Desc = "XChaCha20-Poly1305 (modern, nonce-misuse resistant)" }
-)
+$cryptoDir = Join-Path $ScriptDir "_crypto"
+$cryptoOptions = @()
+if (Test-Path $cryptoDir) {
+    Get-ChildItem -Path $cryptoDir -Filter "*.go.tmpl" | Sort-Object Name | ForEach-Object {
+        $key  = $_.BaseName -replace '\.go$', ''
+        $desc = ""
+        $firstLine = (Get-Content -Path $_.FullName -TotalCount 1 -Encoding UTF8)
+        if ($firstLine -match '^\s*//\s*(.+)$') { $desc = $Matches[1].Trim() }
+        $cryptoOptions += @{ Key = $key; Desc = $desc; File = $_.FullName }
+    }
+}
+if ($cryptoOptions.Count -eq 0) {
+    Write-Host "[-] No crypto templates found in _crypto/. Add .go.tmpl files there." -ForegroundColor Red
+    exit 1
+}
+
+# ─── Select crypto ──────────────────────────────────────────────────────────────
 
 if ([string]::IsNullOrEmpty($Crypto)) {
     Write-Host "Available crypto implementations:" -ForegroundColor Cyan
     for ($i = 0; $i -lt $cryptoOptions.Count; $i++) {
-        Write-Host "  [$($i+1)] $($cryptoOptions[$i].Key) - $($cryptoOptions[$i].Desc)"
+        $line = "  [$($i+1)] $($cryptoOptions[$i].Key)"
+        if ($cryptoOptions[$i].Desc) { $line += " - $($cryptoOptions[$i].Desc)" }
+        Write-Host $line
     }
+    $createIdx = $cryptoOptions.Count + 1
+    Write-Host "  [$createIdx] Create new..." -ForegroundColor Yellow
     Write-Host ""
     $choice = Read-Host "Select crypto [default: 1]"
     if ([string]::IsNullOrEmpty($choice)) { $choice = "1" }
     $idx = [int]$choice
+    if ($idx -eq $createIdx) {
+        # ── Create new crypto scaffold ──
+        $newName = Read-Host "Enter new crypto name (lowercase, e.g. my-cipher)"
+        $newName = $newName.Trim().ToLower() -replace '[^a-z0-9_-]', ''
+        if ([string]::IsNullOrEmpty($newName)) { Write-Host "[-] Invalid name." -ForegroundColor Red; exit 1 }
+        $newFile = Join-Path $cryptoDir "$newName.go.tmpl"
+        if (Test-Path $newFile) { Write-Host "[-] Crypto '$newName' already exists." -ForegroundColor Red; exit 1 }
+        $newDesc = Read-Host "Short description (shown in menu)"
+        $scaffold = "// $newDesc`npackage __PACKAGE__`n`nvar SKey []byte`n`n// EncryptData encrypts data with $newName using key.`n// TODO: implement`nfunc EncryptData(data, key []byte) ([]byte, error) {`n`tpanic(`"$newName EncryptData not implemented`")`n}`n`n// DecryptData decrypts data with $newName using key.`n// TODO: implement`nfunc DecryptData(data, key []byte) ([]byte, error) {`n`tpanic(`"$newName DecryptData not implemented`")`n}"
+        [System.IO.File]::WriteAllText($newFile, $scaffold, [System.Text.UTF8Encoding]::new($false))
+        Write-Host ""
+        Write-Host "[+] Created crypto scaffold: _crypto/$newName.go.tmpl" -ForegroundColor Green
+        Write-Host "    Implement EncryptData/DecryptData, then re-run this generator to apply it." -ForegroundColor Cyan
+        Write-Host ""
+        exit 0
+    }
     if ($idx -lt 1 -or $idx -gt $cryptoOptions.Count) {
         Write-Host "[-] Invalid choice." -ForegroundColor Red; exit 1
     }
     $Crypto = $cryptoOptions[$idx - 1].Key
 }
 
+# ─── Resolve crypto template file ───────────────────────────────────────────────
+
+$selectedOption = $cryptoOptions | Where-Object { $_.Key -eq $Crypto } | Select-Object -First 1
+if (-not $selectedOption) {
+    Write-Host "[-] Unknown crypto: $Crypto. Available: $($cryptoOptions | ForEach-Object { $_.Key }) " -ForegroundColor Red
+    exit 1
+}
+
 # ─── Generate crypto template ───────────────────────────────────────────────────
 
 $destFile = Join-Path $ProtoDir "crypto.go.tmpl"
-
-switch ($Crypto) {
-    "aes-gcm" {
-        $content = @'
-package __PACKAGE__
-
-import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"fmt"
-	"io"
-)
-
-// SKey is set from the embedded profile at startup (agent-side).
-var SKey []byte
-
-// EncryptData encrypts data with AES-256-GCM using key.
-// The nonce is prepended to the ciphertext.
-func EncryptData(data, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	return gcm.Seal(nonce, nonce, data, nil), nil
-}
-
-// DecryptData decrypts data with AES-256-GCM using key.
-// Expects nonce prepended as per EncryptData.
-func DecryptData(data, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, err
-	}
-	if len(data) < gcm.NonceSize() {
-		return nil, fmt.Errorf("ciphertext too short")
-	}
-	nonce, ct := data[:gcm.NonceSize()], data[gcm.NonceSize():]
-	return gcm.Open(nil, nonce, ct, nil)
-}
-'@
-    }
-    "xchacha20" {
-        $content = @'
-package __PACKAGE__
-
-import (
-	"crypto/rand"
-	"fmt"
-	"io"
-
-	"golang.org/x/crypto/chacha20poly1305"
-)
-
-// SKey is set from the embedded profile at startup (agent-side).
-var SKey []byte
-
-// EncryptData encrypts data with XChaCha20-Poly1305 using key.
-// The 24-byte nonce is prepended to the ciphertext.
-func EncryptData(data, key []byte) ([]byte, error) {
-	aead, err := chacha20poly1305.NewX(key)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, aead.NonceSize())
-	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
-		return nil, err
-	}
-	return aead.Seal(nonce, nonce, data, nil), nil
-}
-
-// DecryptData decrypts data with XChaCha20-Poly1305 using key.
-// Expects 24-byte nonce prepended as per EncryptData.
-func DecryptData(data, key []byte) ([]byte, error) {
-	aead, err := chacha20poly1305.NewX(key)
-	if err != nil {
-		return nil, err
-	}
-	if len(data) < aead.NonceSize() {
-		return nil, fmt.Errorf("ciphertext too short")
-	}
-	nonce, ct := data[:aead.NonceSize()], data[aead.NonceSize():]
-	return aead.Open(nil, nonce, ct, nil)
-}
-'@
-    }
-    default {
-        Write-Host "[-] Unknown crypto: $Crypto" -ForegroundColor Red
-        exit 1
-    }
-}
-
+$content  = Get-Content -Path $selectedOption.File -Raw -Encoding UTF8
 [System.IO.File]::WriteAllText($destFile, $content, [System.Text.UTF8Encoding]::new($false))
 
 # Update meta.yaml crypto field

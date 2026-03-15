@@ -6,7 +6,7 @@
 #
 # Usage:
 #   ./generator.sh
-#   OUTPUT_DIR=/path/to/extenders PROTOCOL=default ./generator.sh
+#   OUTPUT_DIR=/path/to/extenders PROTOCOL=adaptix_default ./generator.sh
 #
 set -euo pipefail
 
@@ -158,7 +158,16 @@ substitute "$TEMPLATE_DIR/go.mod"           "$OUT_DIR/go.mod"
 substitute "$TEMPLATE_DIR/go.sum"           "$OUT_DIR/go.sum"
 substitute "$TEMPLATE_DIR/Makefile"         "$OUT_DIR/Makefile"
 substitute "$TEMPLATE_DIR/pl_main.go"       "$OUT_DIR/pl_main.go"
-substitute "$TEMPLATE_DIR/pl_transport.go"  "$OUT_DIR/pl_transport.go"
+
+# pl_transport.go: use protocol override if available, else base template
+PROTO_TRANSPORT="$PROTO_DIR/pl_transport.go.tmpl"
+if [[ -f "$PROTO_TRANSPORT" ]]; then
+    ok "Using protocol transport override: pl_transport.go.tmpl"
+    substitute "$PROTO_TRANSPORT" "$OUT_DIR/pl_transport.go"
+else
+    substitute "$TEMPLATE_DIR/pl_transport.go"  "$OUT_DIR/pl_transport.go"
+fi
+
 substitute "$TEMPLATE_DIR/map.go"           "$OUT_DIR/map.go"
 substitute "$TEMPLATE_DIR/ax_config.axs"    "$OUT_DIR/ax_config.axs"
 

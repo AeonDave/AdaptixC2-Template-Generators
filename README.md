@@ -28,6 +28,7 @@ The developer fills in the platform-specific and protocol-specific logic.
   - [Service Generator](#service-generator)
   - [Protocol Generator](#protocol-generator)
   - [Crypto Swap](#crypto-swap)
+  - [Delete](#delete)
 - [Multi-Language Support](#multi-language-support)
 - [Protocols](#protocols)
   - [Bundled Protocols](#bundled-protocols)
@@ -127,8 +128,14 @@ This toolkit automates that scaffolding so you can focus on implementation.
     |-- generator.sh
     |-- crypto_generator.ps1   Crypto implementation swap tool
     |-- crypto_generator.sh
-    |-- default/               AES-256-GCM + msgpack (stock protocol)
-    +-- _scaffold/             Empty template for new protocols
+    |-- _crypto/               Crypto template library (discovered at runtime)
+    |   |-- aes-gcm.go.tmpl
+    |   |-- xchacha20.go.tmpl
+    |   |-- rc4.go.tmpl
+    |   +-- xor_custom.go.tmpl  (scaffold -- implement yourself)
+    |-- _scaffold/             Empty starting point for new protocols
+    |-- gopher/                AES-256-GCM + msgpack (gopher-agent compatible)
+    +-- adaptix_default/       RC4 + binary packing (wire-compatible with beacon)
 ```
 
 ---
@@ -149,7 +156,7 @@ Run the root dispatcher without arguments. A numbered menu lets you pick the ope
 ./generator.sh
 ```
 
-The menu presents five options:
+The menu presents six options:
 
 ```
 1) Generate Agent     - Scaffold a new agent extender
@@ -157,6 +164,7 @@ The menu presents five options:
 3) Generate Service   - Scaffold a new service extender
 4) Create Protocol    - Create a new wire-protocol definition
 5) Swap Crypto        - Generate or replace the crypto template for a protocol
+6) Delete             - Remove a crypto template, protocol, or generated output
 ```
 
 Each option launches the corresponding sub-generator and prompts for the required parameters
@@ -174,6 +182,7 @@ Sub-generator parameters can be passed inline.
 .\generator.ps1 -Mode service
 .\generator.ps1 -Mode protocol
 .\generator.ps1 -Mode crypto
+.\generator.ps1 -Mode delete
 ```
 
 **Bash:**
@@ -183,6 +192,7 @@ MODE=listener ./generator.sh
 MODE=service  ./generator.sh
 MODE=protocol ./generator.sh
 MODE=crypto   ./generator.sh
+MODE=delete   ./generator.sh
 ```
 
 ### Output Directory
@@ -233,7 +243,7 @@ interface stubs for every supported OS.
 |-----------|-----------|-------------|----------|---------|
 | Name | `-Name` | `NAME` | Yes (prompted if empty) | -- |
 | Watermark | `-Watermark` | `WATERMARK` | No | Auto-generated 8-char hex |
-| Protocol | `-Protocol` | `PROTOCOL` | No | Prompted (default: `default`) |
+| Protocol | `-Protocol` | `PROTOCOL` | No | Prompted (default: `adaptix_default`) |
 | Language | `-Language` | `LANGUAGE` | No | Prompted (default: `go`) |
 | Toolchain | `-Toolchain` | `TOOLCHAIN` | No | Prompted when multiple available |
 | Output dir | `-OutputDir` | `OUTPUT_DIR` | No | `./output/` |
@@ -267,7 +277,7 @@ Supported languages: `go`, `cpp`, `rust`
 
 ```powershell
 # Fully non-interactive
-.\generator.ps1 -Mode agent -Name phantom -Watermark a1b2c3d4 -Protocol default
+.\generator.ps1 -Mode agent -Name phantom -Watermark a1b2c3d4 -Protocol adaptix_default
 
 # C++ agent with MinGW
 .\generator.ps1 -Mode agent -Name beacon -Language cpp
@@ -280,11 +290,11 @@ Supported languages: `go`, `cpp`, `rust`
 
 # Via sub-generator directly
 cd agent
-.\generator.ps1 -Name phantom -Protocol default -OutputDir ..\..\my-adaptix\extenders
+.\generator.ps1 -Name phantom -Protocol adaptix_default -OutputDir ..\..\my-adaptix\extenders
 ```
 
 ```bash
-MODE=agent NAME=phantom WATERMARK=a1b2c3d4 PROTOCOL=default ./generator.sh
+MODE=agent NAME=phantom WATERMARK=a1b2c3d4 PROTOCOL=adaptix_default ./generator.sh
 MODE=agent NAME=beacon LANGUAGE=cpp ./generator.sh
 MODE=agent NAME=stealth LANGUAGE=rust ./generator.sh
 ```
@@ -298,16 +308,16 @@ Scaffolds a listener plugin with transport loop, crypto, and wire-type definitio
 | Parameter | PowerShell | Bash env var | Required | Default |
 |-----------|-----------|-------------|----------|---------|
 | Name | `-Name` | `NAME` | Yes (prompted if empty) | -- |
-| Protocol | `-Protocol` | `PROTOCOL` | No | `default` |
+| Protocol | `-Protocol` | `PROTOCOL` | No | `adaptix_default` |
 | Listener type | `-ListenerType` | `LISTENER_TYPE` | No | `external` |
 | Output dir | `-OutputDir` | `OUTPUT_DIR` | No | `./output/` |
 
 ```powershell
-.\generator.ps1 -Mode listener -Name telegram -Protocol default -ListenerType external
+.\generator.ps1 -Mode listener -Name telegram -Protocol adaptix_default -ListenerType external
 ```
 
 ```bash
-MODE=listener NAME=telegram PROTOCOL=default LISTENER_TYPE=external ./generator.sh
+MODE=listener NAME=telegram PROTOCOL=adaptix_default LISTENER_TYPE=external ./generator.sh
 ```
 
 ### Protocol Generator
@@ -351,12 +361,33 @@ MODE=service NAME=telegram ./generator.sh
 
 Generates or replaces the crypto implementation (`.go.tmpl`) of an existing protocol.
 
-**Bundled crypto implementations:**
+Crypto templates are **discovered dynamically** from `protocols/_crypto/*.go.tmpl`.
+The first-line `//` comment in each file is used as the menu description.
+Adding a new `.go.tmpl` file to `_crypto/` makes it appear automatically on the next run.
+
+**Bundled crypto templates:**
 
 | Key | Algorithm | Notes |
 |-----|-----------|-------|
 | `aes-gcm` | AES-256-GCM | Standard, hardware-accelerated on most platforms |
 | `xchacha20` | XChaCha20-Poly1305 | 24-byte nonce, requires `golang.org/x/crypto` |
+| `rc4` | RC4 | Wire-compatible with existing beacon agents/listeners |
+| `xor_custom` | XOR (scaffold) | Stub -- implement `EncryptData`/`DecryptData` yourself |
+
+**Interactive menu:**
+
+```
+Available crypto implementations:
+  [1] aes-gcm    - AES-256-GCM (standard, fast, widely supported)
+  [2] rc4        - RC4 (wire-compatible with existing beacon agents/listeners)
+  [3] xchacha20  - XChaCha20-Poly1305 (modern, nonce-misuse resistant)
+  [4] xor_custom - XOR Custom (TODO: implement your custom XOR-based crypto)
+  [5] Create new...
+```
+
+Selecting **Create new...** prompts for a name and description, then scaffolds a new
+`.go.tmpl` in `_crypto/` with stub `EncryptData`/`DecryptData` functions.
+On the next run the new crypto appears in the menu automatically.
 
 ```powershell
 .\generator.ps1 -Mode crypto
@@ -368,6 +399,49 @@ cd protocols
 ```bash
 MODE=crypto PROTOCOL=myprotobuf CRYPTO=xchacha20 ./generator.sh
 ```
+
+**Adding a custom crypto (manual):**
+
+Create `protocols/_crypto/<name>.go.tmpl` with this structure:
+
+```go
+// Short description shown in menu
+package __PACKAGE__
+
+var SKey []byte
+
+func EncryptData(data, key []byte) ([]byte, error) { /* ... */ }
+func DecryptData(data, key []byte) ([]byte, error) { /* ... */ }
+```
+
+### Delete
+
+Interactively remove a crypto template, protocol definition, or generated output project.
+All deletions require explicit `y` confirmation.
+
+```powershell
+.\generator.ps1 -Mode delete
+```
+
+```bash
+MODE=delete ./generator.sh
+```
+
+**Sub-menu:**
+
+```
+What do you want to delete?
+
+  [1] Crypto template  - Remove a crypto .go.tmpl from _crypto/
+  [2] Protocol         - Remove an entire protocol definition
+  [3] Generated output - Remove a generated project from output/
+```
+
+| Target | What is removed | Protected items |
+|--------|----------------|-----------------|
+| Crypto template | Single `.go.tmpl` from `protocols/_crypto/` | None |
+| Protocol | Entire `protocols/<name>/` directory | `_scaffold`, `_crypto` (hidden from list) |
+| Generated output | Entire `output/<name>/` directory | None |
 
 ---
 
@@ -428,7 +502,8 @@ are guaranteed to be wire-compatible.
 
 | Name | Crypto | Framing | Description |
 |------|--------|---------|-------------|
-| `default` | AES-256-GCM | msgpack + 4-byte BE length prefix | Compatible with stock gopher-style agents |
+| `gopher` | AES-256-GCM | msgpack + 4-byte BE length prefix | Gopher-agent compatible |
+| `adaptix_default` | RC4 | Binary packing + 4-byte length prefix | Wire-compatible with existing beacon agents/listeners |
 | `_scaffold` | (stub) | (stub) | Empty starting point for custom protocols |
 
 ### Creating a Custom Protocol
@@ -644,7 +719,7 @@ Generate, implement, build, and deploy a Linux agent (Go, the default):
 
 ```powershell
 # 1. Generate the scaffold
-.\generator.ps1 -Mode agent -Name phoenix -Protocol default
+.\generator.ps1 -Mode agent -Name phoenix -Protocol adaptix_default
 
 # 2. Implement platform methods
 cd output\phoenix_agent\src_phoenix\impl
@@ -689,18 +764,18 @@ cd output\spectre_agent\src_spectre
 Generate a matched agent and listener that share the same wire format:
 
 ```powershell
-# Both use protocol "default" -- guaranteed wire-compatible
-.\generator.ps1 -Mode agent    -Name falcon -Protocol default
-.\generator.ps1 -Mode listener -Name falcon -Protocol default -ListenerType external
+# Both use protocol "adaptix_default" -- guaranteed wire-compatible
+.\generator.ps1 -Mode agent    -Name falcon -Protocol adaptix_default
+.\generator.ps1 -Mode listener -Name falcon -Protocol adaptix_default -ListenerType external
 ```
 
 After implementing both, link them in the agent's `config.yaml`:
 
 ```yaml
-listeners: ["FalconDefault"]
+listeners: ["FalconAdaptix_default"]
 ```
 
-The name `FalconDefault` must match the `listener_name` field in the listener's `config.yaml`.
+The name `FalconAdaptix_default` must match the `listener_name` field in the listener's `config.yaml`.
 
 ### Example 5 -- Custom Protocol with Protobuf
 

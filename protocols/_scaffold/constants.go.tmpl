@@ -1,22 +1,103 @@
 package __PACKAGE__
 
 // ─── Command codes ─────────────────────────────────────────────────────────────
-// TODO: Define your command and response codes.
-// These must match between the agent implant and the listener plugin.
+// These constants are referenced by pl_main.go. Assign wire values that match
+// your agent implant. The names MUST stay the same; the numeric values are yours.
 
 const (
-	COMMAND_EXIT    = 0
-	COMMAND_UNKNOWN = 1
+	COMMAND_ERROR      = 0  // TODO: set your wire value
+	COMMAND_PWD        = 1  // TODO: set your wire value
+	COMMAND_CD         = 2  // TODO: set your wire value
+	COMMAND_SHELL      = 3  // TODO: set your wire value
+	COMMAND_EXIT       = 4  // TODO: set your wire value
+	COMMAND_DOWNLOAD   = 5  // TODO: set your wire value
+	COMMAND_UPLOAD     = 6  // TODO: set your wire value
+	COMMAND_CAT        = 7  // TODO: set your wire value
+	COMMAND_CP         = 8  // TODO: set your wire value
+	COMMAND_MV         = 9  // TODO: set your wire value
+	COMMAND_MKDIR      = 10 // TODO: set your wire value
+	COMMAND_RM         = 11 // TODO: set your wire value
+	COMMAND_LS         = 12 // TODO: set your wire value
+	COMMAND_PS         = 13 // TODO: set your wire value
+	COMMAND_KILL       = 14 // TODO: set your wire value
+	COMMAND_ZIP        = 15 // TODO: set your wire value
+	COMMAND_SCREENSHOT = 16 // TODO: set your wire value
+	COMMAND_RUN        = 17 // TODO: set your wire value
+	COMMAND_JOB_LIST   = 18 // TODO: set your wire value
+	COMMAND_JOB_KILL   = 19 // TODO: set your wire value
+	COMMAND_REV2SELF   = 20 // TODO: set your wire value
 
-	// TODO: add your command codes here
-	// COMMAND_CUSTOM = 100
+	COMMAND_DISKS      = 21 // TODO: set your wire value
+	COMMAND_EXFIL      = 22 // TODO: set your wire value
+	COMMAND_GETUID     = 23 // TODO: set your wire value
+	COMMAND_LINK       = 24 // TODO: set your wire value
+	COMMAND_PROFILE    = 25 // TODO: set your wire value
+	COMMAND_SLEEP      = 26 // TODO: set your wire value
+	COMMAND_BURST      = 27 // TODO: set your wire value
+	COMMAND_TERMINATE  = 28 // TODO: set your wire value
+	COMMAND_UNLINK     = 29 // TODO: set your wire value
+	COMMAND_PIVOT_EXEC = 30 // TODO: set your wire value
 
-	RESP_COMPLETE = 0
-	RESP_ERROR    = 1
+	COMMAND_TUNNEL_START   = 31 // TODO: set your wire value
+	COMMAND_TUNNEL_STOP    = 32 // TODO: set your wire value
+	COMMAND_TUNNEL_PAUSE   = 33 // TODO: set your wire value
+	COMMAND_TUNNEL_RESUME  = 34 // TODO: set your wire value
+	COMMAND_TUNNEL_REVERSE = 41 // TODO: set your wire value
 
-	// TODO: add your response codes here
-	// RESP_CUSTOM = 100
+	COMMAND_TERMINAL_START = 35 // TODO: set your wire value
+	COMMAND_TERMINAL_STOP  = 36 // TODO: set your wire value
 
-	EXFIL_PACK = 100
-	JOB_PACK   = 101
+	COMMAND_LPORTFWD_START = 37 // TODO: set your wire value
+	COMMAND_LPORTFWD_STOP  = 38 // TODO: set your wire value
+	COMMAND_RPORTFWD_START = 39 // TODO: set your wire value
+	COMMAND_RPORTFWD_STOP  = 40 // TODO: set your wire value
+
+	COMMAND_EXEC_BOF       = 50 // TODO: set your wire value
+	COMMAND_EXEC_BOF_OUT   = 51 // TODO: set your wire value
+	COMMAND_EXEC_BOF_ASYNC = 52 // TODO: set your wire value
+)
+
+// ─── Download states ───────────────────────────────────────────────────────────
+
+const (
+	DOWNLOAD_STATE_START    = 1
+	DOWNLOAD_STATE_CONTINUE = 2
+	DOWNLOAD_STATE_FINISH   = 3
+)
+
+// ─── Job types & states ────────────────────────────────────────────────────────
+
+const (
+	JOB_TYPE_LOCAL   = 0x1
+	JOB_TYPE_REMOTE  = 0x2
+	JOB_TYPE_PROCESS = 0x3
+	JOB_TYPE_SHELL   = 0x4
+	JOB_TYPE_BOF     = 0x5
+)
+
+const (
+	JOB_STATE_STARTING = 0x0
+	JOB_STATE_RUNNING  = 0x1
+	JOB_STATE_FINISHED = 0x2
+	JOB_STATE_KILLED   = 0x3
+)
+
+// ─── BOF callback & error codes ────────────────────────────────────────────────
+
+const (
+	CALLBACK_OUTPUT      = 0x0
+	CALLBACK_OUTPUT_OEM  = 0x1e
+	CALLBACK_OUTPUT_UTF8 = 0x20
+	CALLBACK_ERROR       = 0x0d
+	CALLBACK_CUSTOM      = 0x1000
+	CALLBACK_CUSTOM_LAST = 0x13ff
+
+	CALLBACK_AX_SCREENSHOT   = 0x81
+	CALLBACK_AX_DOWNLOAD_MEM = 0x82
+
+	BOF_ERROR_PARSE     = 0x101
+	BOF_ERROR_SYMBOL    = 0x102
+	BOF_ERROR_MAX_FUNCS = 0x103
+	BOF_ERROR_ENTRY     = 0x104
+	BOF_ERROR_ALLOC     = 0x105
 )

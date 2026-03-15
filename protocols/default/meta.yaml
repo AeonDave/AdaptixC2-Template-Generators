@@ -1,5 +1,0 @@
-name: "default"
-version: "1.0"
-description: "AES-256-GCM encryption + msgpack framing (stock gopher-compatible)"
-crypto: "AES-256-GCM"
-framing: "msgpack + length-prefix (4-byte BE)"

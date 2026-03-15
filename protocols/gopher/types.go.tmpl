@@ -8,24 +8,21 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // ─── Codec ─────────────────────────────────────────────────────────────────────
-// TODO: Implement Marshal/Unmarshal for your wire format.
-// Examples: msgpack, protobuf, JSON, positional binary, etc.
-// Both functions are called throughout pl_main.go for every request/response.
 
 func Marshal(v interface{}) ([]byte, error) {
-	return nil, fmt.Errorf("Marshal not implemented — choose a codec")
+	return msgpack.Marshal(v)
 }
 
 func Unmarshal(data []byte, v interface{}) error {
-	return fmt.Errorf("Unmarshal not implemented — choose a codec")
+	return msgpack.Unmarshal(data, v)
 }
 
-// ─── Wire types ────────────────────────────────────────────────────────────────
-// All types below are referenced by pl_main.go. Field names MUST stay the same.
-// Struct tags are protocol-dependent — change them to match your codec.
+// ─── Wire types (gopher protocol — must match real gopher_agent) ───────────────
 
 type Profile struct {
 	Type        uint     `msgpack:"type"`

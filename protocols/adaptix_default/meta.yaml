@@ -1,0 +1,5 @@
+name: "adaptix_default"
+version: "1.0"
+description: "RC4 + binary packing — wire-compatible with existing beacon agents/listeners"
+crypto: "rc4"
+framing: "binary packing (LE pack / BE parse) with optional zlib compression"

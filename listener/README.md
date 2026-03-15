@@ -26,10 +26,10 @@ cd listener
 .\generator.ps1
 
 # Non-interactive
-.\generator.ps1 -Name telegram -Protocol default -ListenerType external
+.\generator.ps1 -Name telegram -Protocol adaptix_default -ListenerType external
 
 # With output dir
-.\generator.ps1 -Name telegram -Protocol default -ListenerType external -OutputDir ..\..\AdaptixC2\AdaptixServer\extenders
+.\generator.ps1 -Name telegram -Protocol adaptix_default -ListenerType external -OutputDir ..\..\AdaptixC2\AdaptixServer\extenders
 ```
 
 ```bash
@@ -39,10 +39,10 @@ cd listener
 bash generator.sh
 
 # Non-interactive (env vars)
-PROTOCOL=default LISTENER_TYPE=external bash generator.sh
+PROTOCOL=adaptix_default LISTENER_TYPE=external bash generator.sh
 
 # With output dir
-PROTOCOL=default LISTENER_TYPE=external OUTPUT_DIR=../../AdaptixC2/AdaptixServer/extenders bash generator.sh
+PROTOCOL=adaptix_default LISTENER_TYPE=external OUTPUT_DIR=../../AdaptixC2/AdaptixServer/extenders bash generator.sh
 ```
 
 ## Protocols
@@ -51,7 +51,8 @@ Protocols live in `protocols/<name>/` and define crypto, constants, and wire typ
 
 | Directory | Description |
 |-----------|-------------|
-| `protocols/default/` | AES-256-GCM + msgpack — compatible with stock gopher |
+| `protocols/gopher/` | AES-256-GCM + msgpack — gopher-agent compatible |
+| `protocols/adaptix_default/` | RC4 + binary packing — wire-compatible with beacon agents/listeners |
 | `protocols/_scaffold/` | Empty template for new protocols |
 
 ### Creating a custom protocol
@@ -128,8 +129,8 @@ The `__PACKAGE__` placeholder is replaced with the target Go package during gene
 |---|---|---|
 | `__NAME__` | Listener name (lowercase) | `telegram` |
 | `__NAME_CAP__` | Name capitalised | `Telegram` |
-| `__PROTOCOL__` | Protocol name (lowercase) | `default` |
-| `__PROTOCOL_CAP__` | Protocol capitalised | `Default` |
+| `__PROTOCOL__` | Protocol name (lowercase) | `adaptix_default` |
+| `__PROTOCOL_CAP__` | Protocol capitalised | `Adaptix_default` |
 | `__LISTENER_TYPE__` | `external` or `internal` | `external` |
 
 ## Build & Deploy
@@ -156,11 +157,11 @@ To pair a custom agent with this listener, generate both with the same protocol:
 ```powershell
 # Listener
 cd listener
-.\generator.ps1 -Name myc2 -Protocol default
+.\generator.ps1 -Name myc2 -Protocol adaptix_default
 
 # Agent
 cd ..\agent
-.\generator.ps1 -Name myc2 -Protocol default
+.\generator.ps1 -Name myc2 -Protocol adaptix_default
 ```
 
-Both will use the same crypto and wire types from `protocols/default/`.
+Both will use the same crypto and wire types from `protocols/adaptix_default/`.

