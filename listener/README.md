@@ -4,109 +4,23 @@ Scaffold new AdaptixC2 **listener** plugins from templates, with selectable wire
 
 ## Quick Start
 
-### Via Root Dispatcher (recommended)
-
 ```powershell
-.\generator.ps1             # then select "2) Generate Listener"
-.\generator.ps1 -Mode listener  # or skip the menu
-.\generator.ps1 -Mode listener -OutputDir ..\AdaptixC2\AdaptixServer\extenders
-```
-```bash
-./generator.sh              # then select "2) Generate Listener"
-MODE=listener ./generator.sh  # or skip the menu
-MODE=listener OUTPUT_DIR=../AdaptixC2/AdaptixServer/extenders ./generator.sh
-```
-
-### Direct
-
-```powershell
-cd listener
-
-# Interactive — prompts for name, protocol, type
-.\generator.ps1
-
-# Non-interactive
-.\generator.ps1 -Name telegram -Protocol adaptix_default -ListenerType external
-
-# With output dir
-.\generator.ps1 -Name telegram -Protocol adaptix_default -ListenerType external -OutputDir ..\..\AdaptixC2\AdaptixServer\extenders
+.\generator.ps1 -Mode listener -Name telegram -Protocol adaptix_default -ListenerType external
 ```
 
 ```bash
-cd listener
-
-# Interactive
-bash generator.sh
-
-# Non-interactive (env vars)
-PROTOCOL=adaptix_default LISTENER_TYPE=external bash generator.sh
-
-# With output dir
-PROTOCOL=adaptix_default LISTENER_TYPE=external OUTPUT_DIR=../../AdaptixC2/AdaptixServer/extenders bash generator.sh
+MODE=listener NAME=telegram PROTOCOL=adaptix_default LISTENER_TYPE=external ./generator.sh
 ```
+
+Or run interactively: `.\generator.ps1 -Mode listener` (prompts for name, protocol, type).
+Direct: `cd listener && .\generator.ps1`
 
 ## Protocols
 
-Protocols live in `protocols/<name>/` and define crypto, constants, and wire types shared by both agents and listeners.
+Protocols define shared crypto, constants, and wire types between agents and listeners.
+Bundled: `gopher` (AES-256-GCM + msgpack), `adaptix_default` (RC4 + binary packing).
 
-| Directory | Description |
-|-----------|-------------|
-| `protocols/gopher/` | AES-256-GCM + msgpack — gopher-agent compatible |
-| `protocols/adaptix_default/` | RC4 + binary packing — wire-compatible with beacon agents/listeners |
-| `protocols/_scaffold/` | Empty template for new protocols |
-
-### Creating a custom protocol
-
-Use the dedicated protocol generator:
-
-```powershell
-cd protocols
-.\generator.ps1 -Name myproto
-```
-
-```bash
-cd protocols
-NAME=myproto bash generator.sh
-```
-
-Or via root dispatcher:
-
-```powershell
-.\generator.ps1 -Mode protocol
-```
-
-This copies `_scaffold/` into `protocols/myproto/`. Edit the `.tmpl` files to implement your own crypto and framing.
-
-### Swapping crypto on an existing protocol
-
-```powershell
-.\generator.ps1 -Mode crypto
-```
-
-Or directly:
-
-```powershell
-cd protocols
-.\crypto_generator.ps1 -Protocol myproto -Crypto xchacha20
-```
-
-This generates or replaces `crypto.go.tmpl` in the protocol directory. Regenerate
-your listener after swapping to pick up the new crypto.
-
-### Protocol file layout
-
-```
-protocols/<name>/
-├── meta.yaml           # Protocol metadata (name, version, description)
-├── crypto.go.tmpl      # EncryptData / DecryptData functions
-├── constants.go.tmpl   # COMMAND_*, RESP_* constants
-└── types.go.tmpl       # Wire types, framing helpers, zip utilities
-```
-
-The `__PACKAGE__` placeholder is replaced with the target Go package during generation:
-- `main` for listener code (flat package)
-- `crypto` for agent crypto package
-- `protocol` for agent protocol package
+See the root README for protocol creation, crypto swap, and file layout docs.
 
 ## Generated Listener Structure
 

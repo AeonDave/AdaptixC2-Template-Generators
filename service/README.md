@@ -109,28 +109,10 @@ pipeline documentation and examples.
 
 ## Modular addons
 
-The wrapper is the first **addon** — future service diversifications (e.g. alerting
-pipelines, C2 bridges) can follow the same pattern:
-
-```
-service/templates/
-├── pl_main.go          # Base service template
-├── ax_config.axs
-├── config.yaml
-├── go.mod
-├── Makefile
-└── wrapper/            # Wrapper addon overrides
-    ├── pl_main.go
-    ├── pl_wrapper.go
-    ├── ax_config.axs
-    ├── config.yaml
-    ├── go.mod
-    └── Makefile
-```
-
-When an addon is active, the generator checks the addon subdirectory first for
-each template file. If the addon provides an override, it is used; otherwise
-the base template is used. This keeps addons self-contained and composable.
+The wrapper is the first **addon**. The generator checks the addon subdirectory
+first for each template file -- if the addon provides an override, it is used;
+otherwise the base template is used. Future addons (alerting, C2 bridges, etc.)
+follow the same pattern under `service/templates/<addon>/`.
 
 ## Placeholders
 

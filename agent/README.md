@@ -48,45 +48,11 @@ The generator asks for:
 | **Language** | Implant language: go, cpp, rust | `go` |
 | **Toolchain** | Build toolchain (shown when multiple match) | `go-standard` |
 
-### Interactive language and toolchain selection
+### Languages and Toolchains
 
-When `-Language` / `-Toolchain` are not passed on the command line, the generator
-presents numbered menus:
-
-```
-Select implant language:
-  [1] go (default)   - Go implant
-  [2] cpp            - C/C++ implant
-  [3] rust           - Rust implant
-
-Select language [default: 1]:
-```
-
-After choosing a language, if more than one toolchain is available for that language,
-the toolchain menu appears:
-
-```
-Available toolchains for 'go':
-  [1] go-standard (default)  - Standard Go compiler (CGO_ENABLED=0, cross-platform)
-  [2] go-garble              - Garble obfuscator (symbol/string obfuscation)
-
-Select toolchain [default: 1]:
-```
-
-If only one toolchain matches the selected language (e.g. `mingw` for `cpp`, `cargo`
-for `rust`), it is auto-selected without prompting.
-
-Languages are discovered dynamically from `agent/templates/implant/` subdirectories.
-Toolchains are discovered from `agent/toolchains/*.yaml`, filtered by the `language:` field.
-
-Non-interactive parameters (passed via CLI or env vars):
-
-| Parameter | PowerShell | Bash env var | Default |
-|-----------|-----------|-------------|----------|
-| Language | `-Language` | `LANGUAGE` | Prompted (default: `go`) |
-| Toolchain | `-Toolchain` | `TOOLCHAIN` | Prompted or auto-detected |
-
-Supported languages: `go`, `cpp`, `rust`
+When `-Language` / `-Toolchain` are omitted, the generator presents interactive menus.
+Languages are discovered from `agent/templates/implant/`; toolchains from `agent/toolchains/*.yaml`.
+If only one toolchain matches the language, it is auto-selected.
 
 | Language | Default toolchain | Alternatives |
 |----------|------------------|--------------|
@@ -102,22 +68,8 @@ When a protocol is selected, the generator overlays:
 - `protocol/protocol.go` — merged from `protocols/<name>/types.go.tmpl` + `constants.go.tmpl`
 - `pl_utils.go` — merged from the same protocol templates (server-side)
 
-```powershell
-# Use a specific protocol
-.\generator.ps1 -Name phantom -Watermark a1b2c3d4 -Protocol adaptix_default
-
-# With output directory
-.\generator.ps1 -Name phantom -Protocol adaptix_default -OutputDir ..\..\AdaptixC2\AdaptixServer\extenders
-
-# Or via env var (bash)
-PROTOCOL=adaptix_default bash generator.sh
-PROTOCOL=adaptix_default OUTPUT_DIR=../../AdaptixC2/AdaptixServer/extenders bash generator.sh
-```
-
-Agents and listeners using the **same protocol** share identical encryption and wire types, ensuring compatibility.
-
-Output: `<OutputDir>/<name>_agent/` — a fully scaffolded agent ready to implement.
-Default output: `./output/<name>_agent/` when no `-OutputDir` is specified.
+Agents and listeners using the **same protocol** share identical encryption and wire types.
+See the root README for protocol creation and crypto swap documentation.
 
 ---
 
