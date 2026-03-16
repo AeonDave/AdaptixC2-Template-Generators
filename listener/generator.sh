@@ -101,8 +101,8 @@ while true; do
         warn "Name cannot be empty."
         continue
     fi
-    if [[ -d "$EXTENDERS_DIR/${LISTENER_NAME}_listener_${PROTOCOL}" ]]; then
-        warn "Directory ${LISTENER_NAME}_listener_${PROTOCOL} already exists!"
+    if [[ -d "$EXTENDERS_DIR/${LISTENER_NAME}_listener" ]]; then
+        warn "Directory ${LISTENER_NAME}_listener already exists!"
         continue
     fi
     break
@@ -123,15 +123,15 @@ if [[ "$LISTENER_TYPE" != "external" && "$LISTENER_TYPE" != "internal" ]]; then
 fi
 
 echo ""
-info "Creating listener: ${LISTENER_NAME}_listener_${PROTOCOL}"
+info "Creating listener: ${LISTENER_NAME}_listener"
 info "  Protocol    : ${PROTOCOL}"
 info "  Type        : ${LISTENER_TYPE}"
-info "  Directory   : ${EXTENDERS_DIR}/${LISTENER_NAME}_listener_${PROTOCOL}/"
+info "  Directory   : ${EXTENDERS_DIR}/${LISTENER_NAME}_listener/"
 echo ""
 
 # ─── Create directory ───────────────────────────────────────────────────────────
 
-OUT_DIR="$EXTENDERS_DIR/${LISTENER_NAME}_listener_${PROTOCOL}"
+OUT_DIR="$EXTENDERS_DIR/${LISTENER_NAME}_listener"
 mkdir -p "$OUT_DIR"
 
 # ─── Substitute functions ───────────────────────────────────────────────────────
@@ -194,7 +194,7 @@ if [[ -f "$CONSTANTS_TMPL" && -f "$TYPES_TMPL" ]]; then
         cat "$TYPES_TMPL"
         echo ""
         # Strip the package line from constants
-        sed '1{/^package /d}' "$CONSTANTS_TMPL"
+        sed '/^package /d' "$CONSTANTS_TMPL"
     } | sed "s|__PACKAGE__|main|g" > "$OUT_DIR/pl_utils.go"
 else
     warn "Protocol missing constants/types templates, using template default."
@@ -204,11 +204,11 @@ fi
 # ─── Summary ────────────────────────────────────────────────────────────────────
 
 echo ""
-ok "Listener '${LISTENER_NAME}_listener_${PROTOCOL}' scaffolded successfully!"
+ok "Listener '${LISTENER_NAME}_listener' scaffolded successfully!"
 echo ""
 echo -e "${CYAN}Directory structure:${NC}"
 echo ""
-echo "  ${LISTENER_NAME}_listener_${PROTOCOL}/"
+echo "  ${LISTENER_NAME}_listener/"
 echo "  ├── config.yaml          # Listener manifest"
 echo "  ├── go.mod               # Go module"
 echo "  ├── Makefile             # Build targets"
@@ -220,7 +220,7 @@ echo "  ├── map.go               # Thread-safe concurrent map"
 echo "  └── ax_config.axs        # Listener UI form"
 echo ""
 echo -e "${YELLOW}Next steps:${NC}"
-echo "  1. cd ${EXTENDERS_DIR}/${LISTENER_NAME}_listener_${PROTOCOL}"
+echo "  1. cd ${EXTENDERS_DIR}/${LISTENER_NAME}_listener"
 echo "  2. Edit pl_transport.go to customize handleConnection for your transport"
 echo "  3. Edit ax_config.axs if you need different UI fields"
 echo "  4. go mod tidy"

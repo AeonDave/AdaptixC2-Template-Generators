@@ -60,7 +60,7 @@ type Connection struct {
 }
 
 // ─── Packet types ──────────────────────────────────────────────────────────────
-// These match the stock gopher wire format. Modify if using a custom protocol.
+// These match the stock adaptix_gopher wire format. Modify if using a custom protocol.
 
 const (
 	INIT_PACK     = 1
@@ -227,7 +227,7 @@ func (t *Transport__NAME_CAP__) Start(ts Teamserver) error {
 
 // ─── Handle Connection ─────────────────────────────────────────────────────────
 // TODO: Customize this handler for your protocol's init handshake and data loop.
-// The default implementation follows the stock gopher wire format.
+// The default implementation follows the stock adaptix_gopher wire format.
 
 func (t *Transport__NAME_CAP__) handleConnection(conn net.Conn, ts Teamserver) {
 	var (

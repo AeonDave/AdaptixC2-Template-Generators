@@ -12,7 +12,7 @@ import (
 )
 
 // ─── Teamserver interface ──────────────────────────────────────────────────────
-// Full interface used by stock gopher listener. Use only the methods you need.
+// Full interface used by stock adaptix_gopher listener. Use only the methods you need.
 
 type Teamserver interface {
 	TsAgentIsExists(agentId string) bool

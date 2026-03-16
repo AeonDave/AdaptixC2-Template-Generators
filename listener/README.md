@@ -18,14 +18,14 @@ Direct: `cd listener && .\generator.ps1`
 ## Protocols
 
 Protocols define shared crypto, constants, and wire types between agents and listeners.
-Bundled: `gopher` (AES-256-GCM + msgpack), `adaptix_default` (RC4 + binary packing).
+Bundled: `adaptix_gopher` (AES-256-GCM + msgpack), `adaptix_default` (RC4 + binary packing), `spectre` (ASCON-128 + binary reflection).
 
 See the root README for protocol creation, crypto swap, and file layout docs.
 
 ## Generated Listener Structure
 
 ```
-<name>_listener_<protocol>/
+<name>_listener/
 ├── config.yaml          # Listener manifest
 ├── go.mod               # Go module (axc2 v1.2.0)
 ├── Makefile             # Build targets: plugin, dist
@@ -50,13 +50,13 @@ See the root README for protocol creation, crypto swap, and file layout docs.
 ## Build & Deploy
 
 ```bash
-cd <name>_listener_<protocol>/
+cd <name>_listener/
 go mod tidy
 make plugin        # builds .so
 make dist          # copies .so + config.yaml + ax_config.axs to dist/
 ```
 
-Copy the `dist/` contents into `AdaptixServer/data/extenders/<name>_listener_<protocol>/`.
+Copy the `dist/` contents into `AdaptixServer/data/extenders/<name>_listener/`.
 Alternatively, generate directly into the extenders directory with `-OutputDir`.
 
 ## Agent Compatibility

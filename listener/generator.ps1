@@ -3,7 +3,7 @@
     Scaffold a new AdaptixC2 listener.
 
 .DESCRIPTION
-    Creates <name>_listener_<protocol>/ with all files ready to implement.
+    Creates <name>_listener/ with all files ready to implement.
     Output goes to -OutputDir (or ADAPTIX_OUTPUT_DIR env var, or ./output).
 
 .PARAMETER Name
@@ -16,7 +16,7 @@
     "external" (default) or "internal". External = agents connect in; internal = agent binds.
 
 .PARAMETER OutputDir
-    Directory where <name>_listener_<protocol>/ will be created.
+    Directory where <name>_listener/ will be created.
     Default: ADAPTIX_OUTPUT_DIR env var, or ./output.
 
 .EXAMPLE
@@ -116,9 +116,9 @@ if (-not (Test-Path $protoDir)) {
 
 if (-not [string]::IsNullOrEmpty($Name)) {
     $ListenerName = ($Name.ToLower() -replace '[^a-z0-9_]', '')
-    $OutDir = Join-Path $ExtendersDir "${ListenerName}_listener_${Protocol}"
+    $OutDir = Join-Path $ExtendersDir "${ListenerName}_listener"
     if ([string]::IsNullOrEmpty($ListenerName)) { Write-Host "[-] Invalid name." -ForegroundColor Red; exit 1 }
-    if (Test-Path $OutDir) { Write-Host "[-] Directory ${ListenerName}_listener_${Protocol} already exists!" -ForegroundColor Red; exit 1 }
+    if (Test-Path $OutDir) { Write-Host "[-] Directory ${ListenerName}_listener already exists!" -ForegroundColor Red; exit 1 }
 } else {
     while ($true) {
         $ListenerName = Read-Host "Listener name (lowercase, e.g. telegram)"
@@ -127,9 +127,9 @@ if (-not [string]::IsNullOrEmpty($Name)) {
             Write-Host "[!] Name cannot be empty." -ForegroundColor Yellow
             continue
         }
-        $OutDir = Join-Path $ExtendersDir "${ListenerName}_listener_${Protocol}"
+        $OutDir = Join-Path $ExtendersDir "${ListenerName}_listener"
         if (Test-Path $OutDir) {
-            Write-Host "[!] Directory ${ListenerName}_listener_${Protocol} already exists!" -ForegroundColor Yellow
+            Write-Host "[!] Directory ${ListenerName}_listener already exists!" -ForegroundColor Yellow
             continue
         }
         break
@@ -152,7 +152,7 @@ if ($ListenerType -ne "external" -and $ListenerType -ne "internal") {
 }
 
 Write-Host ""
-Write-Host "[*] Creating listener: ${ListenerName}_listener_${Protocol}" -ForegroundColor Cyan
+Write-Host "[*] Creating listener: ${ListenerName}_listener" -ForegroundColor Cyan
 Write-Host "      Protocol    : $Protocol" -ForegroundColor Cyan
 Write-Host "      Type        : $ListenerType" -ForegroundColor Cyan
 Write-Host "      Directory   : $OutDir\" -ForegroundColor Cyan
@@ -247,11 +247,11 @@ if ((Test-Path $constantsTmpl) -and (Test-Path $typesTmpl)) {
 # ─── Summary ────────────────────────────────────────────────────────────────────
 
 Write-Host ""
-Write-Host "[+] Listener '${ListenerName}_listener_${Protocol}' scaffolded successfully!" -ForegroundColor Green
+Write-Host "[+] Listener '${ListenerName}_listener' scaffolded successfully!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Directory structure:" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  ${ListenerName}_listener_${Protocol}\"
+Write-Host "  ${ListenerName}_listener\"
 Write-Host "  |-- config.yaml          # Listener manifest"
 Write-Host "  |-- go.mod               # Go module"
 Write-Host "  |-- Makefile             # Build targets"

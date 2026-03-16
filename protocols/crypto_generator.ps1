@@ -151,4 +151,18 @@ if ($Crypto -eq "xchacha20") {
     Write-Host ""
     Write-Host "[!] Remember: add 'golang.org/x/crypto' to go.mod in generated projects." -ForegroundColor Yellow
 }
+# Remind about C++/Rust overlay stubs
+$implantDir = Join-Path $ProtoDir "implant"
+if (Test-Path $implantDir) {
+    Write-Host ""
+    Write-Host "[!] C++/Rust implant crypto stubs also need updating:" -ForegroundColor Yellow
+    $cppCrypto = Join-Path $implantDir "cpp\crypto"
+    if (Test-Path $cppCrypto) {
+        Write-Host "      implant\cpp\crypto\crypto.{h,cpp}.tmpl" -ForegroundColor Yellow
+    }
+    $rustCrypto = Join-Path $implantDir "rust\src\crypto.rs.tmpl"
+    if (Test-Path $rustCrypto) {
+        Write-Host "      implant\rust\src\crypto.rs.tmpl" -ForegroundColor Yellow
+    }
+}
 Write-Host ""

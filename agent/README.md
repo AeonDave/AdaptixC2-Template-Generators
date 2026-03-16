@@ -68,6 +68,9 @@ When a protocol is selected, the generator overlays:
 - `protocol/protocol.go` — merged from `protocols/<name>/types.go.tmpl` + `constants.go.tmpl`
 - `pl_utils.go` — merged from the same protocol templates (server-side)
 
+For **C++ and Rust** implants, protocols can also provide language-specific overlays in `protocols/<name>/implant/cpp/` and `protocols/<name>/implant/rust/`. These override the base implant templates for protocol structs, wire format, and tasks.
+
+Bundled: `adaptix_default` (RC4 + binary), `adaptix_gopher` (AES-GCM + msgpack), `spectre` (ASCON-128 + binary reflection).
 Agents and listeners using the **same protocol** share identical encryption and wire types.
 See the root README for protocol creation and crypto swap documentation.
 

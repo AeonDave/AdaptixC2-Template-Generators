@@ -53,10 +53,11 @@ Generators produce **interface stubs and template structures** -- you fill in th
 |   +-- README.md                   Service + wrapper pipeline docs
 |   +-- templates/wrapper/          Wrapper addon overrides
 +-- protocols/                      Wire-protocol definitions + crypto templates
-    |-- _crypto/                    Crypto library (aes-gcm, rc4, xchacha20)
-    |-- _scaffold/                  Empty starting point for new protocols
-    |-- gopher/                     AES-256-GCM + msgpack
-    +-- adaptix_default/            RC4 + binary packing
+    |-- _crypto/                    Crypto library (aes-gcm, rc4, xchacha20, spectre-ascon)
+    |-- _scaffold/                  Empty starting point (incl. C++/Rust implant stubs)
+    |-- adaptix_gopher/             AES-256-GCM + msgpack
+    |-- adaptix_default/            RC4 + binary packing
+    +-- spectre/                    ASCON-128 AEAD + binary reflection codec
 ```
 
 ---
@@ -127,7 +128,7 @@ Scaffolds a server-side Go plugin + cross-platform implant (Go/C++/Rust) with in
 ```powershell
 .\generator.ps1 -Mode agent -Name phantom -Protocol adaptix_default
 .\generator.ps1 -Mode agent -Name beacon -Language cpp
-.\generator.ps1 -Mode agent -Name xxx -Language rust -Protocol gopher
+.\generator.ps1 -Mode agent -Name xxx -Language rust -Protocol adaptix_gopher
 .\generator.ps1 -Mode agent -Name phantom -Language go -Toolchain go-garble
 ```
 
@@ -191,6 +192,7 @@ Bundled crypto templates in `protocols/_crypto/`:
 | `aes-gcm.go.tmpl` | AES-256-GCM (authenticated) |
 | `rc4.go.tmpl` | RC4 stream cipher |
 | `xchacha20.go.tmpl` | XChaCha20-Poly1305 (authenticated) |
+| `spectre-ascon.go.tmpl` | ASCON-128 AEAD (lightweight) |
 
 You can also create custom `.go.tmpl` files in `_crypto/` -- they are discovered automatically.
 
@@ -203,7 +205,7 @@ Remove generated output, protocols, or crypto templates:
 ```
 
 Presents options to delete: generated output directories, custom protocols, or crypto templates.
-Built-in protocols (`gopher`, `adaptix_default`) and the scaffold are protected from deletion.
+The `_scaffold` and `_crypto` directories are protected from deletion. User-created and bundled protocols can be deleted.
 
 ---
 
@@ -216,8 +218,9 @@ When both are generated with the same `-Protocol`, they are guaranteed wire-comp
 
 | Name | Crypto | Framing | Description |
 |------|--------|---------|-------------|
-| `gopher` | AES-256-GCM | msgpack + 4-byte BE length prefix | Gopher-agent compatible |
+| `adaptix_gopher` | AES-256-GCM | msgpack + 4-byte BE length prefix | Gopher-agent compatible |
 | `adaptix_default` | RC4 | Binary packing + 4-byte length prefix | Wire-compatible with beacon agents/listeners |
+| `spectre` | ASCON-128 AEAD | Binary reflection + SPZ1 compression | Padded ASCON envelope + masked obfuscation tag |
 | `_scaffold` | (stub) | (stub) | Empty starting point for custom protocols |
 
 ### Protocol File Layout
@@ -227,10 +230,15 @@ protocols/<name>/
 |-- meta.yaml           Protocol metadata
 |-- crypto.go.tmpl      EncryptData / DecryptData
 |-- constants.go.tmpl   COMMAND_* and RESP_* constants
-+-- types.go.tmpl       Wire types, framing, serialization
+|-- types.go.tmpl       Wire types, framing, serialization
++-- implant/            Language-specific implant overrides (optional)
+    |-- *.go.tmpl       Go implant overrides (root = Go)
+    |-- cpp/            C++ implant overlay files
+    +-- rust/           Rust implant overlay files
 ```
 
 Optional overrides: `pl_main.go.tmpl` (replaces plugin logic) and `pl_transport.go.tmpl` (replaces listener transport) for protocols that need different command packing or framing.
+The `implant/` directory provides per-language source overrides for the implant side (protocol structs, tasks, main loop, etc.).
 
 The `__PACKAGE__` placeholder is context-dependent:
 
@@ -242,10 +250,11 @@ The `__PACKAGE__` placeholder is context-dependent:
 
 ### Creating a Custom Protocol
 
-1. `.\generator.ps1 -Mode protocol` -- copies `_scaffold/` to `protocols/<name>/`
+1. `.\generator.ps1 -Mode protocol` -- copies `_scaffold/` to `protocols/<name>/` (includes C++/Rust implant stubs)
 2. Implement `crypto.go.tmpl`, `constants.go.tmpl`, `types.go.tmpl`
-3. Update `meta.yaml`
-4. Generate with `-Protocol <name>` and validate with `go vet`
+3. Add language-specific implant overrides in `implant/` if needed (Go at root, `cpp/`, `rust/`)
+4. Update `meta.yaml`
+5. Generate with `-Protocol <name>` and validate with `go vet`
 
 ---
 
@@ -385,7 +394,7 @@ C++ uses MinGW cross-compilation. Rust requires `rustup target add` for cross-co
 ### Listener
 
 ```bash
-cd <name>_listener_<protocol>/
+cd <name>_listener/
 go mod tidy && make plugin
 ```
 
@@ -404,8 +413,8 @@ Copy built artifacts to the AdaptixC2 server extenders directory:
 AdaptixServer/data/extenders/<name>_agent/
     agent_<name>.so, config.yaml, ax_config.axs
 
-AdaptixServer/data/extenders/<name>_listener_<protocol>/
-    listener_<name>_<protocol>.so, config.yaml, ax_config.axs
+AdaptixServer/data/extenders/<name>_listener/
+    listener_<name>.so, config.yaml, ax_config.axs
 
 AdaptixServer/data/extenders/<name>_service/   (or <name>_wrapper/)
     service_<name>.so, config.yaml, ax_config.axs

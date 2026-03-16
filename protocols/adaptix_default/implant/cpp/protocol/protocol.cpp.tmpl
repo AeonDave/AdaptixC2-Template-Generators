@@ -1,0 +1,168 @@
+// __NAME__ Agent — Wire Protocol (adaptix_default: RC4 + binary packing)
+//
+// ReaderLE: Little-Endian reader (server → agent)
+// WriterBE: Big-Endian writer (agent → server)
+
+#include "protocol.h"
+#include <stdlib.h>
+#include <string.h>
+
+// ─── Internal helpers ──────────────────────────────────────────────────────────
+
+static void writerEnsure(WriterBE* w, uint32_t need)
+{
+    while (w->size + need > w->capacity) {
+        w->capacity = (w->capacity == 0) ? 256 : w->capacity * 2;
+        w->data = (uint8_t*)realloc(w->data, w->capacity);
+    }
+}
+
+// ─── ReaderLE implementation ───────────────────────────────────────────────────
+
+void ReaderLEInit(ReaderLE* r, const uint8_t* data, uint32_t size)
+{
+    r->data   = data;
+    r->size   = size;
+    r->offset = 0;
+}
+
+uint8_t ReaderLEReadUint8(ReaderLE* r)
+{
+    if (r->offset + 1 > r->size) return 0;
+    return r->data[r->offset++];
+}
+
+uint16_t ReaderLEReadUint16(ReaderLE* r)
+{
+    if (r->offset + 2 > r->size) return 0;
+    uint16_t v = (uint16_t)r->data[r->offset]
+               | ((uint16_t)r->data[r->offset+1] << 8);
+    r->offset += 2;
+    return v;
+}
+
+uint32_t ReaderLEReadUint32(ReaderLE* r)
+{
+    if (r->offset + 4 > r->size) return 0;
+    uint32_t v = (uint32_t)r->data[r->offset]
+               | ((uint32_t)r->data[r->offset+1] << 8)
+               | ((uint32_t)r->data[r->offset+2] << 16)
+               | ((uint32_t)r->data[r->offset+3] << 24);
+    r->offset += 4;
+    return v;
+}
+
+uint64_t ReaderLEReadUint64(ReaderLE* r)
+{
+    if (r->offset + 8 > r->size) return 0;
+    uint64_t lo = ReaderLEReadUint32(r);
+    uint64_t hi = ReaderLEReadUint32(r);
+    return lo | (hi << 32);
+}
+
+char* ReaderLEReadString(ReaderLE* r)
+{
+    uint32_t len = ReaderLEReadUint32(r);
+    if (len == 0 || r->offset + len > r->size) {
+        char* s = (char*)malloc(1);
+        s[0] = '\0';
+        return s;
+    }
+    char* s = (char*)malloc(len + 1);
+    memcpy(s, r->data + r->offset, len);
+    s[len] = '\0';
+    r->offset += len;
+    return s;
+}
+
+uint8_t* ReaderLEReadBytes(ReaderLE* r, uint32_t* outLen)
+{
+    uint32_t len = ReaderLEReadUint32(r);
+    if (len == 0 || r->offset + len > r->size) {
+        *outLen = 0;
+        return NULL;
+    }
+    *outLen = len;
+    uint8_t* ptr = (uint8_t*)(r->data + r->offset);
+    r->offset += len;
+    return ptr;
+}
+
+// ─── WriterBE implementation ───────────────────────────────────────────────────
+
+WriterBE* WriterBEInit(uint32_t initialCap)
+{
+    WriterBE* w = (WriterBE*)malloc(sizeof(WriterBE));
+    w->capacity = initialCap > 0 ? initialCap : 256;
+    w->data     = (uint8_t*)malloc(w->capacity);
+    w->size     = 0;
+    return w;
+}
+
+void WriterBEFree(WriterBE* w)
+{
+    if (!w) return;
+    free(w->data);
+    free(w);
+}
+
+void WriterBEWriteUint8(WriterBE* w, uint8_t val)
+{
+    writerEnsure(w, 1);
+    w->data[w->size++] = val;
+}
+
+void WriterBEWriteUint16(WriterBE* w, uint16_t val)
+{
+    writerEnsure(w, 2);
+    w->data[w->size++] = (uint8_t)(val >> 8);
+    w->data[w->size++] = (uint8_t)(val);
+}
+
+void WriterBEWriteUint32(WriterBE* w, uint32_t val)
+{
+    writerEnsure(w, 4);
+    w->data[w->size++] = (uint8_t)(val >> 24);
+    w->data[w->size++] = (uint8_t)(val >> 16);
+    w->data[w->size++] = (uint8_t)(val >> 8);
+    w->data[w->size++] = (uint8_t)(val);
+}
+
+void WriterBEWriteUint64(WriterBE* w, uint64_t val)
+{
+    writerEnsure(w, 8);
+    w->data[w->size++] = (uint8_t)(val >> 56);
+    w->data[w->size++] = (uint8_t)(val >> 48);
+    w->data[w->size++] = (uint8_t)(val >> 40);
+    w->data[w->size++] = (uint8_t)(val >> 32);
+    w->data[w->size++] = (uint8_t)(val >> 24);
+    w->data[w->size++] = (uint8_t)(val >> 16);
+    w->data[w->size++] = (uint8_t)(val >> 8);
+    w->data[w->size++] = (uint8_t)(val);
+}
+
+void WriterBEWriteString(WriterBE* w, const char* str)
+{
+    uint32_t len = str ? (uint32_t)strlen(str) : 0;
+    WriterBEWriteUint32(w, len);
+    if (len > 0) {
+        writerEnsure(w, len);
+        memcpy(w->data + w->size, str, len);
+        w->size += len;
+    }
+}
+
+void WriterBEWriteBytes(WriterBE* w, const uint8_t* buf, uint32_t len)
+{
+    WriterBEWriteUint32(w, len);
+    if (len > 0 && buf) {
+        writerEnsure(w, len);
+        memcpy(w->data + w->size, buf, len);
+        w->size += len;
+    }
+}
+
+void WriterBEWriteBool(WriterBE* w, bool val)
+{
+    WriterBEWriteUint8(w, val ? 1 : 0);
+}

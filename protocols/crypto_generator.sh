@@ -172,4 +172,12 @@ if [[ "$CRYPTO" == "xchacha20" ]]; then
     echo ""
     echo "[!] Remember: add 'golang.org/x/crypto' to go.mod in generated projects."
 fi
+# Remind about C++/Rust overlay stubs
+IMPLANT_DIR="$PROTO_DIR/implant"
+if [[ -d "$IMPLANT_DIR" ]]; then
+    echo ""
+    echo "[!] C++/Rust implant crypto stubs also need updating:"
+    [[ -d "$IMPLANT_DIR/cpp/crypto" ]] && echo "      implant/cpp/crypto/crypto.{h,cpp}.tmpl"
+    [[ -f "$IMPLANT_DIR/rust/src/crypto.rs.tmpl" ]] && echo "      implant/rust/src/crypto.rs.tmpl"
+fi
 echo ""

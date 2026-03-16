@@ -1,0 +1,10 @@
+// __NAME__ Agent — Crypto (adaptix_default: RC4)
+#pragma once
+
+#include <stdint.h>
+
+// EncryptData encrypts plaintext using RC4. Caller must free() returned buffer.
+uint8_t* EncryptData(const uint8_t* data, uint32_t dataLen, const uint8_t* key, uint32_t keyLen, uint32_t* outLen);
+
+// DecryptData decrypts ciphertext using RC4. Caller must free() returned buffer.
+uint8_t* DecryptData(const uint8_t* data, uint32_t dataLen, const uint8_t* key, uint32_t keyLen, uint32_t* outLen);

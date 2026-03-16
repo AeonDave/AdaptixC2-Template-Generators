@@ -4,6 +4,7 @@
 
 #include "Agent.h"
 #include "Commander.h"
+// __EVASION_INCLUDE__
 
 Agent::Agent()
 {
@@ -12,6 +13,8 @@ Agent::Agent()
     // Generate random session key (16 bytes)
     sessionKey = (BYTE*)LocalAlloc(LPTR, 16);
     // TODO: Fill with cryptographic random bytes
+
+    // __EVASION_CTOR__
 }
 
 Agent::~Agent()

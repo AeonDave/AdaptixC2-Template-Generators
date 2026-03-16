@@ -3,8 +3,10 @@ package __PACKAGE__
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,7 +24,7 @@ func Unmarshal(data []byte, v interface{}) error {
 	return msgpack.Unmarshal(data, v)
 }
 
-// ─── Wire types (gopher protocol — must match real gopher_agent) ───────────────
+// ─── Wire types (adaptix_gopher protocol — must match real gopher_agent) ──────
 
 type Profile struct {
 	Type        uint     `msgpack:"type"`
@@ -34,6 +36,11 @@ type Profile struct {
 	SslCert     []byte   `msgpack:"ssl_cert"`
 	SslKey      []byte   `msgpack:"ssl_key"`
 	CaCert      []byte   `msgpack:"ca_cert"`
+	Sleep       int      `msgpack:"sleep"`
+	Jitter      int      `msgpack:"jitter"`
+	KillDate    int64    `msgpack:"kill_date"`
+	WorkStart   int      `msgpack:"work_start"`
+	WorkEnd     int      `msgpack:"work_end"`
 }
 
 type SessionInfo struct {
@@ -512,4 +519,38 @@ func formatBurstStatus(enabled, sleep, jitter int) string {
 		return "disabled"
 	}
 	return fmt.Sprintf("enabled (sleep: %dms, jitter: %d%%)", sleep, jitter)
+}
+
+// ─── TCP framing (4-byte BE length prefix) ─────────────────────────────────────
+
+func ConnRead(conn net.Conn, size int) ([]byte, error) {
+	buf := make([]byte, size)
+	total := 0
+	for total < size {
+		n, err := conn.Read(buf[total:])
+		if err != nil {
+			return nil, err
+		}
+		total += n
+	}
+	return buf, nil
+}
+
+func RecvMsg(conn net.Conn) ([]byte, error) {
+	hdr, err := ConnRead(conn, 4)
+	if err != nil {
+		return nil, err
+	}
+	size := binary.BigEndian.Uint32(hdr)
+	if size == 0 {
+		return nil, nil
+	}
+	return ConnRead(conn, int(size))
+}
+
+func SendMsg(conn net.Conn, data []byte) error {
+	hdr := make([]byte, 4)
+	binary.BigEndian.PutUint32(hdr, uint32(len(data)))
+	_, err := conn.Write(append(hdr, data...))
+	return err
 }

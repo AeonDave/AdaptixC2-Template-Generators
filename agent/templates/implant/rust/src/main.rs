@@ -8,6 +8,7 @@ mod crypto;
 mod protocol;
 mod agent;
 mod bof;
+// __EVASION_MOD__
 
 fn main() {
     // TODO: Parse config::ENC_PROFILES, decrypt, connect, and enter agent loop.

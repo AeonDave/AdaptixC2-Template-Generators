@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"__NAME__/protocol"
+	// __EVASION_IMPORT__
 )
 
 // Compile-time check: Agent must satisfy AgentImpl.
@@ -16,6 +17,7 @@ var _ AgentImpl = (*Agent)(nil)
 // Add any state your agent needs as struct fields.
 type Agent struct {
 	// Example: add fields for custom config, state, channels, etc.
+	// __EVASION_FIELD__
 }
 
 // New creates a new Agent instance.

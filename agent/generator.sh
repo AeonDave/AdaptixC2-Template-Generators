@@ -18,6 +18,7 @@ PROTOCOLS_DIR="$TEMPLATES_ROOT/protocols"
 # Language & toolchain (env-based for non-interactive)
 LANGUAGE="${LANGUAGE:-}"
 TOOLCHAIN="${TOOLCHAIN:-}"
+EVASION="${EVASION:-}"
 
 # Resolve output directory
 OUTPUT_DIR="${OUTPUT_DIR:-${ADAPTIX_OUTPUT_DIR:-}}"
@@ -90,6 +91,9 @@ fi
 
 if [[ ${#AVAILABLE_PROTOCOLS[@]} -eq 0 ]]; then
     warn "No protocols found in $PROTOCOLS_DIR. Using template defaults."
+    PROTOCOL=""
+elif [[ "$PROTOCOL" == "none" ]]; then
+    # Explicit 'none' sentinel: skip overlay
     PROTOCOL=""
 elif [[ -z "$PROTOCOL" ]]; then
     echo -e "${CYAN}Available protocols:${NC}"
@@ -230,11 +234,25 @@ if [[ ! -f "$TOOLCHAIN_FILE" ]]; then
     TOOLCHAIN_FILE=""
 fi
 
+# ─── Evasion gate prompt ─────────────────────────────────────────────────────
+
+ENABLE_EVASION=0
+if [[ -n "$EVASION" && "$EVASION" =~ ^(1|true|yes|y)$ ]]; then
+    ENABLE_EVASION=1
+elif [[ -z "$EVASION" ]]; then
+    echo -e "${CYAN}Include evasion gate scaffold? (syscall/stack-spoof abstraction)${NC}"
+    read -rp "Enable evasion [y/N]: " ev_choice
+    if [[ "$ev_choice" =~ ^[Yy] ]]; then
+        ENABLE_EVASION=1
+    fi
+fi
+
 echo ""
 info "Creating agent: ${AGENT_NAME}"
 info "  Language  : ${LANGUAGE}"
 info "  Toolchain : ${TOOLCHAIN}"
 info "  Watermark : ${WATERMARK}"
+[[ "$ENABLE_EVASION" -eq 1 ]] && info "  Evasion   : enabled"
 [[ -n "$PROTOCOL" ]] && info "  Protocol  : ${PROTOCOL}"
 info "  Directory : ${EXTENDERS_DIR}/${AGENT_NAME}_agent/"
 echo ""
@@ -249,6 +267,9 @@ mkdir -p "$SRC_DIR"
 [[ -d "$IMPLANT_LANG_DIR/impl" ]]     && mkdir -p "$SRC_DIR/impl"
 [[ -d "$IMPLANT_LANG_DIR/crypto" ]]   && mkdir -p "$SRC_DIR/crypto"
 [[ -d "$IMPLANT_LANG_DIR/protocol" ]] && mkdir -p "$SRC_DIR/protocol"
+if [[ "$ENABLE_EVASION" -eq 1 && -d "$IMPLANT_LANG_DIR/evasion" ]]; then
+    mkdir -p "$SRC_DIR/evasion"
+fi
 
 # ─── Parse toolchain ────────────────────────────────────────────────────────────
 
@@ -328,8 +349,14 @@ if [[ "$LANGUAGE" == "go" && -n "$PROTOCOL" && -f "$PROTO_DIR/types.go.tmpl" && 
     {
         cat "$PROTO_DIR/types.go.tmpl"
         echo ""
-        sed '1{/^package /d}' "$PROTO_DIR/constants.go.tmpl"
+        sed '/^package /d' "$PROTO_DIR/constants.go.tmpl"
     } | sed "s|__PACKAGE__|protocol|g" > "$SRC_DIR/protocol/protocol.go"
+    # Also copy base protocol files that are NOT protocol.go (e.g. agent_types.go)
+    for f in "$IMPLANT_LANG_DIR"/protocol/*; do
+        [[ -f "$f" ]] || continue
+        [[ "$(basename "$f")" == "protocol.go" ]] && continue
+        substitute "$f" "$SRC_DIR/protocol/$(basename "$f")"
+    done
 else
     for f in "$IMPLANT_LANG_DIR"/protocol/*; do
         [[ -f "$f" ]] || continue
@@ -343,24 +370,144 @@ if [[ -n "$PROTOCOL" && -f "$PROTO_DIR/types.go.tmpl" && -f "$PROTO_DIR/constant
     {
         cat "$PROTO_DIR/types.go.tmpl"
         echo ""
-        sed '1{/^package /d}' "$PROTO_DIR/constants.go.tmpl"
+        sed '/^package /d' "$PROTO_DIR/constants.go.tmpl"
     } | sed "s|__PACKAGE__|main|g" > "$OUT_DIR/pl_utils.go"
 fi
 
-# Impl stubs — copy all subdirectories recursively (except crypto/ and protocol/)
+# Impl stubs — copy all subdirectories recursively (except crypto/, protocol/, evasion/)
 info "Generating interface stubs..."
 for sub_dir in "$IMPLANT_LANG_DIR"/*/; do
     [[ -d "$sub_dir" ]] || continue
     dname="$(basename "$sub_dir")"
-    [[ "$dname" == "crypto" || "$dname" == "protocol" ]] && continue
+    [[ "$dname" == "crypto" || "$dname" == "protocol" || "$dname" == "evasion" ]] && continue
     mkdir -p "$SRC_DIR/$dname"
     find "$sub_dir" -type f | while IFS= read -r f; do
         rel="${f#$sub_dir}"
+        # Skip evasion/ subdirectory files unless evasion is enabled
+        if [[ "$rel" == evasion/* ]] && [[ "$ENABLE_EVASION" -ne 1 ]]; then continue; fi
         dest="$SRC_DIR/$dname/$rel"
         mkdir -p "$(dirname "$dest")"
         substitute "$f" "$dest"
     done
 done
+
+# ─── Protocol-specific implant overrides ─────────────────────────────────────────
+
+if [[ -n "$PROTOCOL" ]]; then
+    # Language-aware implant override directory.
+    # Go:        use implant/ root (backward compat), skip cpp/ and rust/ subdirs.
+    # C++/Rust:  use implant/<language>/ if it exists.
+    if [[ "$LANGUAGE" == "go" ]]; then
+        implant_overrides="$PROTO_DIR/implant"
+    else
+        implant_overrides="$PROTO_DIR/implant/$LANGUAGE"
+    fi
+
+    if [[ -d "$implant_overrides" ]]; then
+        info "Applying protocol '$PROTOCOL' implant overrides ($LANGUAGE)..."
+        find "$implant_overrides" -name '*.tmpl' -type f | while IFS= read -r f; do
+            rel="${f#$implant_overrides/}"
+            # For Go, skip files under cpp/ and rust/ subdirectories
+            if [[ "$LANGUAGE" == "go" ]] && [[ "$rel" == cpp/* || "$rel" == rust/* ]]; then
+                continue
+            fi
+            target="${rel%.tmpl}"
+            echo -e "  -> ${YELLOW}$target${NC}"
+            mkdir -p "$(dirname "$SRC_DIR/$target")"
+            substitute "$f" "$SRC_DIR/$target"
+        done
+    fi
+fi
+
+# ─── Evasion gate scaffold ──────────────────────────────────────────────────────
+
+if [[ "$ENABLE_EVASION" -eq 1 && -d "$IMPLANT_LANG_DIR/evasion" ]]; then
+    info "Generating evasion gate scaffold..."
+    evasion_src="$IMPLANT_LANG_DIR/evasion"
+    evasion_dest="$SRC_DIR/evasion"
+    mkdir -p "$evasion_dest"
+    find "$evasion_src" -type f | while IFS= read -r f; do
+        rel="${f#$evasion_src/}"
+        dest="$evasion_dest/$rel"
+        mkdir -p "$(dirname "$dest")"
+        substitute "$f" "$dest"
+    done
+fi
+
+# ─── Evasion marker post-processing ─────────────────────────────────────────────
+
+process_evasion_markers() {
+    local dir="$1"
+    find "$dir" -type f \( -name '*.go' -o -name '*.h' -o -name '*.cpp' -o -name '*.rs' -o -name '*.toml' -o -name 'Makefile' -o -name 'go.mod' \) | while IFS= read -r f; do
+        if [[ "$ENABLE_EVASION" -eq 1 ]]; then
+            case "$LANGUAGE" in
+                go)
+                    sed -i \
+                        -e 's|// __EVASION_IMPORT__|"'"${AGENT_NAME}"'/evasion"|' \
+                        -e 's|// __EVASION_MAIN_IMPORT__|"'"${AGENT_NAME}"'/evasion"|' \
+                        -e 's|// __EVASION_FIELD__|Gate evasion.Gate|' \
+                        "$f"
+                    if grep -q '// __EVASION_INIT__' "$f"; then
+                        sed -i '/\/\/ __EVASION_INIT__/{
+                            s|// __EVASION_INIT__||
+                            a\\t// Initialize evasion gate (syscall/stack-spoof abstraction).\
+\tgate := evasion.Default()\
+\tif err := gate.Init(); err != nil {\
+\t\tos.Exit(1)\
+\t}\
+\t_ = gate // TODO: pass gate to agent or store globally
+                        }' "$f"
+                    fi
+                    if grep -q '// __EVASION_GOMOD__' "$f"; then
+                        sed -i '/\/\/ __EVASION_GOMOD__/{
+                            s|// __EVASION_GOMOD__||
+                            a\\
+// Uncomment and adjust the path below to import your evasion module:\
+// require evasion v0.0.0\
+// replace evasion => ../path/to/evasion
+                        }' "$f"
+                    fi
+                    ;;
+                cpp)
+                    sed -i \
+                        -e 's|// __EVASION_FORWARD_DECL__|class IEvasionGate;|' \
+                        -e 's|// __EVASION_MEMBER__|IEvasionGate* gate = nullptr;|' \
+                        -e 's|// __EVASION_INCLUDE__|#include "../evasion/DefaultGate.h"|' \
+                        -e 's|# __EVASION_SOURCES__|SOURCES += $(wildcard evasion/*.cpp)|' \
+                        "$f"
+                    if grep -q '// __EVASION_CTOR__' "$f"; then
+                        sed -i '/\/\/ __EVASION_CTOR__/{
+                            s|// __EVASION_CTOR__||
+                            a\\
+    // Initialize evasion gate (syscall/stack-spoof abstraction)\
+    gate = new DefaultGate();\
+    gate->Init();
+                        }' "$f"
+                    fi
+                    ;;
+                rust)
+                    sed -i \
+                        -e 's|// __EVASION_MOD__|mod evasion;|' \
+                        "$f"
+                    if grep -q '# __EVASION_FEATURES__' "$f"; then
+                        sed -i '/# __EVASION_FEATURES__/{
+                            s|# __EVASION_FEATURES__||
+                            a\\
+[features]\
+evasion = []
+                        }' "$f"
+                    fi
+                    ;;
+            esac
+        else
+            # Strip all evasion markers
+            sed -i -e '/^[[:space:]]*\/\/ __EVASION_[A-Z_]*__[[:space:]]*$/d' \
+                   -e '/^[[:space:]]*# __EVASION_[A-Z_]*__[[:space:]]*$/d' "$f"
+        fi
+    done
+}
+
+process_evasion_markers "$SRC_DIR"
 
 # ─── Summary ────────────────────────────────────────────────────────────────────
 
@@ -370,6 +517,7 @@ if [[ -n "$PROTOCOL" ]]; then
 else
     ok "Agent '${AGENT_NAME}' scaffolded successfully (${LANGUAGE})!"
 fi
+[[ "$ENABLE_EVASION" -eq 1 ]] && ok "Evasion gate scaffold included."
 echo ""
 echo -e "${CYAN}Directory structure:${NC}"
 echo ""

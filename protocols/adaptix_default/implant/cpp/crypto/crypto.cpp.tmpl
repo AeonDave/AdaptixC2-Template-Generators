@@ -1,0 +1,37 @@
+// __NAME__ Agent — Crypto (adaptix_default: RC4)
+
+#include "crypto.h"
+#include <string.h>
+#include <stdlib.h>
+
+static void rc4_crypt(uint8_t* out, const uint8_t* data, uint32_t len, const uint8_t* key, uint32_t keyLen)
+{
+    uint8_t S[256];
+    for (int i = 0; i < 256; i++) S[i] = (uint8_t)i;
+    int j = 0;
+    for (int i = 0; i < 256; i++) {
+        j = (j + S[i] + key[i % keyLen]) % 256;
+        uint8_t tmp = S[i]; S[i] = S[j]; S[j] = tmp;
+    }
+    int ii = 0; j = 0;
+    for (uint32_t k = 0; k < len; k++) {
+        ii = (ii + 1) % 256;
+        j  = (j + S[ii]) % 256;
+        uint8_t tmp = S[ii]; S[ii] = S[j]; S[j] = tmp;
+        out[k] = data[k] ^ S[(S[ii] + S[j]) % 256];
+    }
+}
+
+uint8_t* EncryptData(const uint8_t* data, uint32_t dataLen, const uint8_t* key, uint32_t keyLen, uint32_t* outLen)
+{
+    uint8_t* buf = (uint8_t*)malloc(dataLen);
+    if (!buf) return NULL;
+    rc4_crypt(buf, data, dataLen, key, keyLen);
+    *outLen = dataLen;
+    return buf;
+}
+
+uint8_t* DecryptData(const uint8_t* data, uint32_t dataLen, const uint8_t* key, uint32_t keyLen, uint32_t* outLen)
+{
+    return EncryptData(data, dataLen, key, keyLen, outLen);
+}

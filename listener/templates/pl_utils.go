@@ -23,7 +23,7 @@ func Unmarshal(data []byte, v interface{}) error {
 }
 
 // ─── Command codes ─────────────────────────────────────────────────────────────
-// Default values (gopher-compatible). A protocol overlay replaces this file.
+// Default values (adaptix_gopher-compatible). A protocol overlay replaces this file.
 
 const (
 	COMMAND_ERROR      = 0

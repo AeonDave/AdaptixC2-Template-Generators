@@ -1,0 +1,9 @@
+package protocol
+
+// ─── Compatibility aliases ─────────────────────────────────────────────────────
+// These aliases let impl/interfaces.go compile against adaptix_gopher/spectre protocol
+// types. The underlying types are defined in the overlay protocol.go.
+
+type DirEntry = FileInfo
+
+type ProcessEntry = PsInfo

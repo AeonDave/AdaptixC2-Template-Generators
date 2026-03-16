@@ -12,6 +12,9 @@ import (
 // SKey is set from the embedded profile at startup (agent-side).
 var SKey []byte
 
+// KeySize is the expected key length in bytes (AES-128-GCM).
+const KeySize = 16
+
 // EncryptData encrypts data with AES-256-GCM using key.
 // The nonce is prepended to the ciphertext.
 func EncryptData(data, key []byte) ([]byte, error) {

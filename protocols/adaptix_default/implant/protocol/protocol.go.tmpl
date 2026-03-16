@@ -1,0 +1,277 @@
+package protocol
+
+import (
+	"bytes"
+	"compress/zlib"
+	"encoding/binary"
+	"errors"
+	"io"
+	"net"
+	"strings"
+)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Binary protocol helpers for the adaptix_default wire format.
+//
+// Wire asymmetry (matches the server implementation):
+//   Server → Implant: Little-Endian via PackArray
+//   Implant → Server: Big-Endian via WriterBE (server reads with Packer)
+//
+// The implant uses ReaderLE to parse incoming tasks and WriterBE to build
+// responses (beat, command answers).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── ReaderLE — parse Little-Endian data from server ───────────────────────────
+
+type ReaderLE struct {
+	buf []byte
+	pos int
+}
+
+func NewReaderLE(data []byte) *ReaderLE {
+	return &ReaderLE{buf: data}
+}
+
+func (r *ReaderLE) Remaining() int {
+	return len(r.buf) - r.pos
+}
+
+func (r *ReaderLE) ReadUint8() (uint8, error) {
+	if r.Remaining() < 1 {
+		return 0, errors.New("underflow")
+	}
+	v := r.buf[r.pos]
+	r.pos++
+	return v, nil
+}
+
+func (r *ReaderLE) ReadBool() (bool, error) {
+	v, err := r.ReadUint8()
+	return v != 0, err
+}
+
+func (r *ReaderLE) ReadUint16() (uint16, error) {
+	if r.Remaining() < 2 {
+		return 0, errors.New("underflow")
+	}
+	v := binary.LittleEndian.Uint16(r.buf[r.pos:])
+	r.pos += 2
+	return v, nil
+}
+
+func (r *ReaderLE) ReadUint32() (uint32, error) {
+	if r.Remaining() < 4 {
+		return 0, errors.New("underflow")
+	}
+	v := binary.LittleEndian.Uint32(r.buf[r.pos:])
+	r.pos += 4
+	return v, nil
+}
+
+func (r *ReaderLE) ReadUint64() (uint64, error) {
+	if r.Remaining() < 8 {
+		return 0, errors.New("underflow")
+	}
+	v := binary.LittleEndian.Uint64(r.buf[r.pos:])
+	r.pos += 8
+	return v, nil
+}
+
+// ReadString reads a PackArray-encoded string: [LE uint32 len][bytes].
+func (r *ReaderLE) ReadString() (string, error) {
+	sz, err := r.ReadUint32()
+	if err != nil {
+		return "", err
+	}
+	if r.Remaining() < int(sz) {
+		return "", errors.New("underflow")
+	}
+	s := string(bytes.Trim(r.buf[r.pos:r.pos+int(sz)], "\x00"))
+	r.pos += int(sz)
+	return s, nil
+}
+
+// ReadRawBytes reads exactly n bytes without a length prefix.
+func (r *ReaderLE) ReadRawBytes(n int) ([]byte, error) {
+	if r.Remaining() < n {
+		return nil, errors.New("underflow")
+	}
+	b := make([]byte, n)
+	copy(b, r.buf[r.pos:r.pos+n])
+	r.pos += n
+	return b, nil
+}
+
+// ─── WriterBE — build Big-Endian data for server ──────────────────────────────
+
+type WriterBE struct {
+	buf bytes.Buffer
+}
+
+func NewWriterBE() *WriterBE {
+	return &WriterBE{}
+}
+
+func (w *WriterBE) Len() int {
+	return w.buf.Len()
+}
+
+func (w *WriterBE) Bytes() []byte {
+	return w.buf.Bytes()
+}
+
+func (w *WriterBE) WriteUint8(v uint8) {
+	w.buf.WriteByte(v)
+}
+
+func (w *WriterBE) WriteUint16(v uint16) {
+	b := make([]byte, 2)
+	binary.BigEndian.PutUint16(b, v)
+	w.buf.Write(b)
+}
+
+func (w *WriterBE) WriteUint32(v uint32) {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, v)
+	w.buf.Write(b)
+}
+
+func (w *WriterBE) WriteUint64(v uint64) {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, v)
+	w.buf.Write(b)
+}
+
+// WriteBytes writes [BE uint32 len][raw bytes] — matches server Packer.ParseBytes.
+func (w *WriterBE) WriteBytes(data []byte) {
+	w.WriteUint32(uint32(len(data)))
+	w.buf.Write(data)
+}
+
+// WriteString writes [BE uint32 len][null-terminated string] — matches server Packer.ParseString.
+func (w *WriterBE) WriteString(s string) {
+	if len(s) > 0 && !strings.HasSuffix(s, "\x00") {
+		s += "\x00"
+	}
+	w.WriteUint32(uint32(len(s)))
+	w.buf.Write([]byte(s))
+}
+
+// WriteRaw appends raw bytes without any framing.
+func (w *WriterBE) WriteRaw(data []byte) {
+	w.buf.Write(data)
+}
+
+// ─── Zlib compression ──────────────────────────────────────────────────────────
+// The server's ProcessData runs decompressZlibData on implant responses.
+// Use CompressZlib when sending large responses.
+
+const (
+	zlibFrameHeaderSize = 5
+	zlibCompressFlag    = 0x1
+)
+
+func CompressZlib(data []byte) ([]byte, error) {
+	var compressed bytes.Buffer
+	zw := zlib.NewWriter(&compressed)
+	if _, err := zw.Write(data); err != nil {
+		_ = zw.Close()
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+
+	// Build the 5-byte header: flags(1) + origLen(4 LE)
+	hdr := make([]byte, zlibFrameHeaderSize)
+	hdr[0] = zlibCompressFlag
+	hdr[1] = byte(len(data))
+	hdr[2] = byte(len(data) >> 8)
+	hdr[3] = byte(len(data) >> 16)
+	hdr[4] = byte(len(data) >> 24)
+
+	return append(hdr, compressed.Bytes()...), nil
+}
+
+// DecompressZlib decompresses a zlib-framed blob (flags + origLen + payload).
+func DecompressZlib(data []byte) ([]byte, bool) {
+	if len(data) < zlibFrameHeaderSize {
+		return data, false
+	}
+	flags := data[0]
+	origLen := int(data[1]) | int(data[2])<<8 | int(data[3])<<16 | int(data[4])<<24
+	if origLen <= 0 {
+		return data, false
+	}
+	payload := data[zlibFrameHeaderSize:]
+	if (flags & zlibCompressFlag) != 0 {
+		r, err := zlib.NewReader(bytes.NewReader(payload))
+		if err != nil {
+			return data, false
+		}
+		var buf bytes.Buffer
+		_, err = io.Copy(&buf, r)
+		_ = r.Close()
+		if err == nil && buf.Len() == origLen {
+			return buf.Bytes(), true
+		}
+		return data, false
+	}
+	if len(payload) == origLen {
+		return payload, true
+	}
+	return data, false
+}
+
+// ─── Network framing ───────────────────────────────────────────────────────────
+// 4-byte Big-Endian length prefix — shared by all adaptix protocols.
+
+func ConnRead(conn net.Conn, size int) ([]byte, error) {
+	if size <= 0 {
+		return nil, errors.New("invalid size")
+	}
+	buf := make([]byte, size)
+	total := 0
+	for total < size {
+		n, err := conn.Read(buf[total:])
+		if err != nil {
+			return nil, err
+		}
+		total += n
+	}
+	return buf, nil
+}
+
+func RecvMsg(conn net.Conn) ([]byte, error) {
+	hdr, err := ConnRead(conn, 4)
+	if err != nil {
+		return nil, err
+	}
+	size := binary.BigEndian.Uint32(hdr)
+	if size == 0 {
+		return nil, nil
+	}
+	return ConnRead(conn, int(size))
+}
+
+func SendMsg(conn net.Conn, data []byte) error {
+	hdr := make([]byte, 4)
+	binary.BigEndian.PutUint32(hdr, uint32(len(data)))
+	_, err := conn.Write(append(hdr, data...))
+	return err
+}
+
+// ─── IPv4 utility ──────────────────────────────────────────────────────────────
+
+// IPv4ToUint32 converts a dotted-quad string to a uint32 (LE byte order for beat).
+func IPv4ToUint32(ip string) uint32 {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return 0
+	}
+	v4 := parsed.To4()
+	if v4 == nil {
+		return 0
+	}
+	return uint32(v4[0]) | uint32(v4[1])<<8 | uint32(v4[2])<<16 | uint32(v4[3])<<24
+}

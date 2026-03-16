@@ -46,7 +46,8 @@ param(
     [ValidateSet("go","cpp","rust","")]
     [string]$Language  = "",
     [string]$Toolchain = "",
-    [string]$OutputDir = ""
+    [string]$OutputDir = "",
+    [switch]$Evasion
 )
 
 $ErrorActionPreference = "Stop"
@@ -125,6 +126,9 @@ if (Test-Path $ProtocolsDir) {
 }
 if ($AvailableProtocols.Count -eq 0) {
     Write-Host "[!] No protocols found in $ProtocolsDir. Using template defaults." -ForegroundColor Yellow
+    $Protocol = ""
+} elseif ($Protocol -eq 'none') {
+    # Explicit 'none' sentinel: skip overlay
     $Protocol = ""
 } elseif ([string]::IsNullOrEmpty($Protocol)) {
     Write-Host "Available protocols:" -ForegroundColor Cyan
@@ -266,10 +270,27 @@ if (-not (Test-Path $ToolchainFile)) {
     $ToolchainFile = $null
 }
 
+# ─── Evasion gate prompt ─────────────────────────────────────────────────────
+
+$EnableEvasion = $false
+if ($Evasion) {
+    $EnableEvasion = $true
+} elseif ([string]::IsNullOrEmpty($Name)) {
+    # Interactive mode — ask the user
+    Write-Host "Include evasion gate scaffold? (syscall/stack-spoof abstraction)" -ForegroundColor Cyan
+    $choice = Read-Host "Enable evasion [y/N]"
+    if ($choice -match '^[Yy]') {
+        $EnableEvasion = $true
+    }
+}
+
 Write-Host "[*] Creating agent: $AgentName" -ForegroundColor Cyan
 Write-Host "      Language  : $Language" -ForegroundColor Cyan
 Write-Host "      Toolchain : $Toolchain" -ForegroundColor Cyan
 Write-Host "      Watermark : $Watermark" -ForegroundColor Cyan
+if ($EnableEvasion) {
+    Write-Host "      Evasion   : enabled" -ForegroundColor Cyan
+}
 if (-not [string]::IsNullOrEmpty($Protocol)) {
     Write-Host "      Protocol  : $Protocol" -ForegroundColor Cyan
 }
@@ -290,6 +311,9 @@ if (Test-Path (Join-Path $ImplantLangDir "crypto")) {
 }
 if (Test-Path (Join-Path $ImplantLangDir "protocol")) {
     New-Item -ItemType Directory -Path (Join-Path $SrcDir "protocol") -Force | Out-Null
+}
+if ($EnableEvasion -and (Test-Path (Join-Path $ImplantLangDir "evasion"))) {
+    New-Item -ItemType Directory -Path (Join-Path $SrcDir "evasion") -Force | Out-Null
 }
 
 # ─── Parse toolchain ────────────────────────────────────────────────────────────
@@ -400,6 +424,11 @@ if ($Language -eq 'go' -and -not [string]::IsNullOrEmpty($Protocol)) {
         $merged = $typesContent + "`n`n" + $constFiltered
         $merged = $merged -replace '__PACKAGE__', 'protocol'
         [System.IO.File]::WriteAllText((Join-Path $SrcDir "protocol\protocol.go"), $merged, [System.Text.UTF8Encoding]::new($false))
+        # Also copy base protocol files that are NOT protocol.go (e.g. agent_types.go)
+        foreach ($f in (Get-ChildItem -Path (Join-Path $ImplantLangDir "protocol") -File)) {
+            if ($f.Name -eq 'protocol.go') { continue }
+            Substitute-Template $f.FullName (Join-Path $SrcDir "protocol\$($f.Name)")
+        }
     } else {
         foreach ($f in (Get-ChildItem -Path (Join-Path $ImplantLangDir "protocol") -File)) {
             Substitute-Template $f.FullName (Join-Path $SrcDir "protocol\$($f.Name)")
@@ -434,14 +463,16 @@ if (-not [string]::IsNullOrEmpty($Protocol)) {
 # Impl stubs — copy all subdirectories recursively
 Write-Host "[*] Generating interface stubs..." -ForegroundColor Cyan
 foreach ($subDir in (Get-ChildItem -Path $ImplantLangDir -Directory)) {
-    # Skip crypto/ and protocol/ (already handled above)
-    if ($subDir.Name -eq 'crypto' -or $subDir.Name -eq 'protocol') { continue }
+    # Skip crypto/, protocol/, and evasion/ (handled separately)
+    if ($subDir.Name -eq 'crypto' -or $subDir.Name -eq 'protocol' -or $subDir.Name -eq 'evasion') { continue }
     $destSubDir = Join-Path $SrcDir $subDir.Name
     if (-not (Test-Path $destSubDir)) {
         New-Item -ItemType Directory -Path $destSubDir -Force | Out-Null
     }
     foreach ($f in (Get-ChildItem -Path $subDir.FullName -File -Recurse)) {
         $relPath = $f.FullName.Substring($subDir.FullName.Length + 1)
+        # Skip evasion/ subdirectory files unless evasion is enabled
+        if ($relPath -match '(^|[\\/])evasion[\\/]' -and -not $EnableEvasion) { continue }
         $destFile = Join-Path $destSubDir $relPath
         $destFileDir = Split-Path -Parent $destFile
         if (-not (Test-Path $destFileDir)) {
@@ -451,6 +482,172 @@ foreach ($subDir in (Get-ChildItem -Path $ImplantLangDir -Directory)) {
     }
 }
 
+# ─── Protocol-specific implant overrides ─────────────────────────────────────────
+# If the protocol provides implant/ overrides (e.g. tasks.go.tmpl, protocol/agent_types.go.tmpl),
+# apply them on top of the base templates. This lets each protocol override any
+# implant source file while keeping the base as a fallback.
+
+if (-not [string]::IsNullOrEmpty($Protocol)) {
+    # Language-aware implant override directory.
+    # Go:        use implant/ root (backward compat), skip cpp/ and rust/ subdirs.
+    # C++/Rust:  use implant/<language>/ if it exists.
+    if ($Language -eq 'go') {
+        $implantOverrides = Join-Path $ProtoDir "implant"
+    } else {
+        $implantOverrides = Join-Path $ProtoDir "implant\$Language"
+    }
+
+    if (Test-Path $implantOverrides) {
+        Write-Host "[*] Applying protocol '$Protocol' implant overrides ($Language)..." -ForegroundColor Cyan
+        foreach ($f in (Get-ChildItem -Path $implantOverrides -File -Recurse -Filter "*.tmpl")) {
+            $relToOverrides = $f.FullName.Substring($implantOverrides.Length + 1)
+            # For Go, skip files under cpp/ and rust/ subdirectories
+            if ($Language -eq 'go' -and $relToOverrides -match '^(cpp|rust)[\\/]') { continue }
+            $relPath = $relToOverrides -replace '\.tmpl$', ''
+            $targetPath = Join-Path $SrcDir $relPath
+            $tgtDir = Split-Path -Parent $targetPath
+            if (-not (Test-Path $tgtDir)) {
+                New-Item -ItemType Directory -Path $tgtDir -Force | Out-Null
+            }
+            Write-Host "  -> $relPath" -ForegroundColor Yellow
+            Substitute-Template $f.FullName $targetPath
+        }
+    }
+}
+
+# ─── Evasion gate scaffold ──────────────────────────────────────────────────────
+
+if ($EnableEvasion) {
+    $evasionSrcDir = Join-Path $ImplantLangDir "evasion"
+    if (Test-Path $evasionSrcDir) {
+        Write-Host "[*] Generating evasion gate scaffold..." -ForegroundColor Cyan
+        $evasionDestDir = Join-Path $SrcDir "evasion"
+        if (-not (Test-Path $evasionDestDir)) {
+            New-Item -ItemType Directory -Path $evasionDestDir -Force | Out-Null
+        }
+        foreach ($f in (Get-ChildItem -Path $evasionSrcDir -File -Recurse)) {
+            $relPath = $f.FullName.Substring($evasionSrcDir.Length + 1)
+            $destFile = Join-Path $evasionDestDir $relPath
+            $destFileDir = Split-Path -Parent $destFile
+            if (-not (Test-Path $destFileDir)) {
+                New-Item -ItemType Directory -Path $destFileDir -Force | Out-Null
+            }
+            Substitute-Template $f.FullName $destFile
+        }
+    }
+}
+
+# ─── Evasion marker post-processing ─────────────────────────────────────────────
+
+# Process all generated source files to replace or strip evasion markers.
+# When evasion is enabled → inject real code. When disabled → remove markers.
+
+function Process-EvasionMarkers {
+    param([string]$Dir)
+
+    foreach ($f in (Get-ChildItem -Path $Dir -File -Recurse -Include *.go, *.h, *.cpp, *.rs, *.toml, *Makefile, go.mod)) {
+        $content = Get-Content -Path $f.FullName -Raw -Encoding UTF8
+        $modified = $false
+
+        if ($EnableEvasion) {
+            switch ($Language) {
+                "go" {
+                    if ($content -match '// __EVASION_IMPORT__') {
+                        $content = $content -replace '(\s*)// __EVASION_IMPORT__', "`$1`"__NAME__/evasion`""
+                        $modified = $true
+                    }
+                    if ($content -match '// __EVASION_MAIN_IMPORT__') {
+                        $content = $content -replace '(\s*)// __EVASION_MAIN_IMPORT__', "`$1`"__NAME__/evasion`""
+                        $modified = $true
+                    }
+                    if ($content -match '// __EVASION_FIELD__') {
+                        $content = $content -replace '(\s*)// __EVASION_FIELD__', "`$1Gate evasion.Gate"
+                        $modified = $true
+                    }
+                    if ($content -match '// __EVASION_INIT__') {
+                        $initBlock = @"
+	// Initialize evasion gate (syscall/stack-spoof abstraction).
+	gate := evasion.Default()
+	if err := gate.Init(); err != nil {
+		os.Exit(1)
+	}
+	_ = gate // TODO: pass gate to agent or store globally
+"@
+                        $content = $content -replace '\s*// __EVASION_INIT__', "`n$initBlock"
+                        $modified = $true
+                    }
+                    if ($content -match '// __EVASION_GOMOD__') {
+                        $gomodBlock = @"
+
+// Uncomment and adjust the path below to import your evasion module:
+// require evasion v0.0.0
+// replace evasion => ../path/to/evasion
+"@
+                        $content = $content -replace '\s*// __EVASION_GOMOD__', $gomodBlock
+                        $modified = $true
+                    }
+                }
+                "cpp" {
+                    if ($content -match '// __EVASION_FORWARD_DECL__') {
+                        $content = $content -replace '// __EVASION_FORWARD_DECL__', "class IEvasionGate;"
+                        $modified = $true
+                    }
+                    if ($content -match '// __EVASION_MEMBER__') {
+                        $content = $content -replace '(\s*)// __EVASION_MEMBER__', "`$1IEvasionGate* gate = nullptr;"
+                        $modified = $true
+                    }
+                    if ($content -match '// __EVASION_INCLUDE__') {
+                        $content = $content -replace '// __EVASION_INCLUDE__', "#include `"../evasion/DefaultGate.h`""
+                        $modified = $true
+                    }
+                    if ($content -match '// __EVASION_CTOR__') {
+                        $ctorBlock = @"
+    // Initialize evasion gate (syscall/stack-spoof abstraction)
+    gate = new DefaultGate();
+    gate->Init();
+"@
+                        $content = $content -replace '\s*// __EVASION_CTOR__', "`n$ctorBlock"
+                        $modified = $true
+                    }
+                    if ($content -match '# __EVASION_SOURCES__') {
+                        $content = $content -replace '# __EVASION_SOURCES__', "SOURCES += `$(wildcard evasion/*.cpp)"
+                        $modified = $true
+                    }
+                }
+                "rust" {
+                    if ($content -match '// __EVASION_MOD__') {
+                        $content = $content -replace '// __EVASION_MOD__', "mod evasion;"
+                        $modified = $true
+                    }
+                    if ($content -match '# __EVASION_FEATURES__') {
+                        $featBlock = @"
+
+[features]
+evasion = []
+"@
+                        $content = $content -replace '\s*# __EVASION_FEATURES__', $featBlock
+                        $modified = $true
+                    }
+                }
+            }
+        } else {
+            # Strip all evasion markers
+            $content = $content -replace '(?m)^\s*// __EVASION_[A-Z_]+__\s*\r?\n', ''
+            $content = $content -replace '(?m)^\s*# __EVASION_[A-Z_]+__\s*\r?\n', ''
+            $modified = $true
+        }
+
+        if ($modified) {
+            # Re-apply name substitution (for injected code that may contain __NAME__)
+            $content = $content -replace '__NAME_CAP__', $AgentNameCap
+            $content = $content -replace '__NAME__', $AgentName
+            [System.IO.File]::WriteAllText($f.FullName, $content, [System.Text.UTF8Encoding]::new($false))
+        }
+    }
+}
+
+Process-EvasionMarkers $SrcDir
+
 # ─── Summary ────────────────────────────────────────────────────────────────────
 
 Write-Host ""
@@ -458,6 +655,9 @@ if (-not [string]::IsNullOrEmpty($Protocol)) {
     Write-Host "[+] Agent '$AgentName' scaffolded with protocol '$Protocol' ($Language)!" -ForegroundColor Green
 } else {
     Write-Host "[+] Agent '$AgentName' scaffolded successfully ($Language)!" -ForegroundColor Green
+}
+if ($EnableEvasion) {
+    Write-Host "    Evasion gate scaffold included." -ForegroundColor Green
 }
 Write-Host ""
 Write-Host "Directory structure:" -ForegroundColor Cyan

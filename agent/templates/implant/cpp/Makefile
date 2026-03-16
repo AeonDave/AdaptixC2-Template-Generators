@@ -52,6 +52,7 @@ endif
 
 # Source files
 SOURCES := $(wildcard impl/*.cpp) crypto/crypto.cpp protocol/protocol.cpp config.cpp main.cpp
+# __EVASION_SOURCES__
 
 .PHONY: all x64 x86 clean
 

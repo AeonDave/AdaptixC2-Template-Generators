@@ -71,11 +71,31 @@ Write-Host ""
 # ─── Scaffold ───────────────────────────────────────────────────────────────────
 
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+
+# Copy top-level scaffold files (Go templates + meta.yaml)
 foreach ($f in Get-ChildItem -Path $ScaffoldDir -File) {
     $content = Get-Content -Path $f.FullName -Raw -Encoding UTF8
     $content = $content -replace '__PROTO_NAME__', $ProtoName
     $dest = Join-Path $OutDir $f.Name
     [System.IO.File]::WriteAllText($dest, $content, [System.Text.UTF8Encoding]::new($false))
+}
+
+# Copy implant overlay stubs (C++ and Rust) if present in scaffold
+$ImplantScaffold = Join-Path $ScaffoldDir "implant"
+if (Test-Path $ImplantScaffold) {
+    $ImplantOut = Join-Path $OutDir "implant"
+    foreach ($tmplFile in Get-ChildItem -Path $ImplantScaffold -Recurse -File) {
+        $relPath = $tmplFile.FullName.Substring($ImplantScaffold.Length)
+        $destPath = Join-Path $ImplantOut $relPath
+        $destDir  = Split-Path -Parent $destPath
+        if (-not (Test-Path $destDir)) {
+            New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        }
+        $content = Get-Content -Path $tmplFile.FullName -Raw -Encoding UTF8
+        $content = $content -replace '__PROTO_NAME__', $ProtoName
+        [System.IO.File]::WriteAllText($destPath, $content, [System.Text.UTF8Encoding]::new($false))
+    }
+    Write-Host "[+] C++ and Rust implant overlay stubs created." -ForegroundColor Green
 }
 
 # ─── Summary ────────────────────────────────────────────────────────────────────
@@ -85,14 +105,23 @@ Write-Host "[+] Protocol '$ProtoName' created!" -ForegroundColor Green
 Write-Host ""
 Write-Host "Files:" -ForegroundColor Cyan
 Write-Host "  $ProtoName\"
-Write-Host "  |-- meta.yaml           # Protocol metadata"
-Write-Host "  |-- crypto.go.tmpl      # EncryptData / DecryptData"
-Write-Host "  |-- constants.go.tmpl   # COMMAND_* / RESP_* constants"
-Write-Host "  \-- types.go.tmpl       # Wire types, framing helpers"
+Write-Host "  |-- meta.yaml                           # Protocol metadata"
+Write-Host "  |-- crypto.go.tmpl                      # Go EncryptData / DecryptData"
+Write-Host "  |-- constants.go.tmpl                   # Go COMMAND_* / RESP_* constants"
+Write-Host "  |-- types.go.tmpl                       # Go wire types, framing helpers"
+Write-Host "  \-- implant\"
+Write-Host "      |-- cpp\crypto\crypto.{h,cpp}.tmpl  # C++ crypto stubs"
+Write-Host "      |-- cpp\protocol\protocol.{h,cpp}.tmpl"
+Write-Host "      |-- rust\src\crypto.rs.tmpl         # Rust crypto stub"
+Write-Host "      \-- rust\src\protocol.rs.tmpl"
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
-Write-Host "  1. Edit crypto.go.tmpl    - implement your encryption"
-Write-Host "  2. Edit types.go.tmpl     - define wire types and framing"
-Write-Host "  3. Edit constants.go.tmpl - add command/response constants"
-Write-Host "  4. Use with: generator.ps1 -Protocol $ProtoName"
+Write-Host "  1. Edit crypto.go.tmpl                - Go encryption (listener + Go agent)"
+Write-Host "  2. Edit types.go.tmpl                 - Go wire types and framing"
+Write-Host "  3. Edit constants.go.tmpl             - Go command/response constants"
+Write-Host "  4. Edit implant\cpp\crypto\*          - C++ encryption (must match Go)"
+Write-Host "  5. Edit implant\cpp\protocol\*        - C++ constants + wire types"
+Write-Host "  6. Edit implant\rust\src\crypto.rs    - Rust encryption (must match Go)"
+Write-Host "  7. Edit implant\rust\src\protocol.rs  - Rust constants + wire types"
+Write-Host "  8. Use with: generator.ps1 -Protocol $ProtoName"
 Write-Host ""
