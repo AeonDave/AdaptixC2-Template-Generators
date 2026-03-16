@@ -25,7 +25,5 @@ protocols/_crypto/*/
 !protocols/_crypto/aes-gcm.go.tmpl
 !protocols/_crypto/rc4.go.tmpl
 !protocols/_crypto/xchacha20.tmpl
-!protocols/_scaffold/
-!protocols/_crypto/
 !protocols/adaptix_default/
 !protocols/gopher/

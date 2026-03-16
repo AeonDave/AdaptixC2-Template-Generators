@@ -163,7 +163,7 @@ The menu presents six options:
 2) Generate Listener  - Scaffold a new listener extender
 3) Generate Service   - Scaffold a new service extender
 4) Create Protocol    - Create a new wire-protocol definition
-5) Swap Crypto        - Generate or replace the crypto template for a protocol
+5) Create Crypto      - Generate or replace the crypto template for a protocol
 6) Delete             - Remove a crypto template, protocol, or generated output
 ```
 
