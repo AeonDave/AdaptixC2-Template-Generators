@@ -1,9 +1,9 @@
-/// __NAME_CAP__ service
+/// __NAME_CAP__ wrapper service
 
 /// ─── Metadata ──────────────────────────────────────────────────────────────────
 let meta = {
     "name":        "__NAME_CAP__",
-    "description": "__NAME_CAP__ service plugin",
+    "description": "__NAME_CAP__ post-build wrapper pipeline",
     "version":     "1.0.0"
 };
 
@@ -13,26 +13,26 @@ let serviceName = "__NAME__";
 
 function InitService()
 {
-    /// START CODE HERE — runs when the service is loaded
-    /// Example: ax.service_command(serviceName, "load_settings", null);
-    /// END CODE HERE
+    ax.service_command(serviceName, "load_config", null);
 }
 
 /// ─── Service UI ────────────────────────────────────────────────────────────────
 
 function ServiceUI()
 {
-    let labelInfo = form.create_label("__NAME_CAP__ Service");
+    let labelInfo = form.create_label("__NAME_CAP__ Wrapper");
 
-    let labelFunction = form.create_label("Function:");
+    let labelFunction = form.create_label("Action:");
     let comboFunction = form.create_combo();
-    comboFunction.addItem("ping");
+    comboFunction.addItem("status");
+    comboFunction.addItem("save_config");
+    comboFunction.addItem("load_config");
     /// START CODE HERE — add your functions to the combo
     /// END CODE HERE
 
     let labelArgs = form.create_label("Arguments:");
     let texteditArgs = form.create_textmulti();
-    texteditArgs.setPlaceholder("Optional JSON arguments...");
+    texteditArgs.setPlaceholder("JSON config or arguments...");
 
     let layout = form.create_gridlayout();
     layout.addWidget(labelInfo,       0, 0, 1, 4);
@@ -51,16 +51,19 @@ function ServiceUI()
 }
 
 /// ─── Data handler ──────────────────────────────────────────────────────────────
-/// Receives JSON data pushed from the server via TsServiceSendDataClient.
 
 function data_handler(data)
 {
     let msg = JSON.parse(data);
 
-    if (!msg.success && msg.error) {
-        ax.log("[__NAME_CAP__] Error: " + msg.error);
-    } else if (msg.output) {
+    if (msg.action === "error" || (!msg.success && msg.error)) {
+        ax.log("[__NAME_CAP__] Error: " + (msg.error || JSON.stringify(msg)));
+    } else if (msg.action === "status") {
         ax.log("[__NAME_CAP__] " + msg.output);
+    } else if (msg.action === "save_config") {
+        ax.log("[__NAME_CAP__] " + msg.output);
+    } else if (msg.action === "load_config") {
+        ax.log("[__NAME_CAP__] Config loaded: " + msg.output);
     } else {
         ax.log("[__NAME_CAP__] " + JSON.stringify(msg));
     }

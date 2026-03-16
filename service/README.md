@@ -1,22 +1,41 @@
 # Service Template Generator
 
-Generates a ready-to-build AdaptixC2 **service** extender plugin.
+Generates a ready-to-build AdaptixC2 **service** extender plugin — optionally
+including a **post-build wrapper pipeline** for payload transformation.
 
 A service plugin runs server-side and exposes callable functions to operators.
 Unlike agents (implant + plugin) or listeners (transport + plugin), services
 are pure server-side logic — think notifications, integrations, or utilities.
 
+A **wrapper** is a specialized service that hooks into `agent.generate` (post-phase)
+and applies configurable pipeline stages (encrypt, pack, obfuscate, …) to the
+generated payload before it reaches the operator.
+
 ## Quick start
 
 ```powershell
-# PowerShell
+# Plain service
 .\generator.ps1 -Name telegram
 
-# Bash
+# Service with wrapper pipeline
+.\generator.ps1 -Name crystalpalace -Wrapper
+
+# Bash — plain service
 NAME=telegram ./generator.sh
+
+# Bash — with wrapper pipeline
+NAME=crystalpalace WRAPPER=1 ./generator.sh
+```
+
+When neither `-Wrapper` nor `WRAPPER=1` is set, the generator asks interactively:
+
+```
+Include post-build wrapper pipeline? [y/N]:
 ```
 
 ## What gets generated
+
+**Plain service:**
 
 ```
 <name>_service/
@@ -27,9 +46,21 @@ NAME=telegram ./generator.sh
 └── ax_config.axs        # Service UI form
 ```
 
+**With wrapper pipeline (`-Wrapper`):**
+
+```
+<name>_wrapper/
+├── config.yaml          # Service manifest (extender_type: "service")
+├── go.mod               # Go module
+├── Makefile             # Build targets
+├── pl_main.go           # Plugin entry + event hook + Call handler
+├── pl_wrapper.go        # Pipeline engine (Stage, RunPipeline)
+└── ax_config.axs        # Wrapper UI (status, config save/load)
+```
+
 ## Framework interface
 
-The service plugin implements `adaptix.PluginService`:
+Both variants implement `adaptix.PluginService`:
 
 ```go
 type PluginService interface {
@@ -50,6 +81,56 @@ the JSON-encoded arguments from the form defined in `ax_config.axs`.
    your service needs (see the agent/listener templates for the full set).
 4. **Build** — `go mod tidy && make plugin`.
 5. **Deploy** — copy `dist/` contents to `<adaptix-server>/extenders/`.
+
+## Implementing wrapper stages
+
+When the wrapper pipeline is included, `pl_main.go` contains an `initStages()`
+function where you register transformation stages:
+
+```go
+func initStages() {
+    RegisterStage(Stage{
+        Name:    "rdll_loader",
+        Enabled: true,
+        Run:     stageRdllLoader,
+    })
+}
+```
+
+Each stage function has the signature:
+
+```go
+func(payload []byte, cfg map[string]string, ctx *BuildContext) ([]byte, error)
+```
+
+Stages run in registration order. If any stage returns an error, the pipeline
+stops and the original payload is returned. See the root README for detailed
+pipeline documentation and examples.
+
+## Modular addons
+
+The wrapper is the first **addon** — future service diversifications (e.g. alerting
+pipelines, C2 bridges) can follow the same pattern:
+
+```
+service/templates/
+├── pl_main.go          # Base service template
+├── ax_config.axs
+├── config.yaml
+├── go.mod
+├── Makefile
+└── wrapper/            # Wrapper addon overrides
+    ├── pl_main.go
+    ├── pl_wrapper.go
+    ├── ax_config.axs
+    ├── config.yaml
+    ├── go.mod
+    └── Makefile
+```
+
+When an addon is active, the generator checks the addon subdirectory first for
+each template file. If the addon provides an override, it is used; otherwise
+the base template is used. This keeps addons self-contained and composable.
 
 ## Placeholders
 

@@ -1,0 +1,4 @@
+extender_type: "service"
+extender_file: "wrapper___NAME__.so"
+ax_file: "ax_config.axs"
+service_name: "__NAME_CAP__"

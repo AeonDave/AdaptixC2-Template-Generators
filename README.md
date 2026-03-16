@@ -1,7 +1,7 @@
 # AdaptixC2 Template Generators
 
 Standalone scaffolding toolkit for [AdaptixC2](https://github.com/Adaptix-Framework/AdaptixC2) extender development.
-Generates ready-to-implement stub projects for **agents**, **listeners**, and custom **wire protocols** -- all compatible with the `axc2 v1.2.0` plugin API.
+Generates ready-to-implement stub projects for **agents**, **listeners**, **services** (optionally with **post-build wrapper pipeline**), and custom **wire protocols** -- all compatible with the `axc2 v1.2.0` plugin API.
 
 Agent implants can be scaffolded in **Go**, **C++**, or **Rust**.
 But can be extended to more languages.
@@ -30,13 +30,21 @@ The developer fills in the platform-specific and protocol-specific logic.
   - [Crypto Swap](#crypto-swap)
   - [Delete](#delete)
 - [Multi-Language Support](#multi-language-support)
+- [Toolchains and Compilers](#toolchains-and-compilers)
+  - [Switching Toolchains](#switching-toolchains)
+  - [Customizing Toolchains](#customizing-toolchains)
 - [Protocols](#protocols)
   - [Bundled Protocols](#bundled-protocols)
   - [Creating a Custom Protocol](#creating-a-custom-protocol)
   - [Protocol File Layout](#protocol-file-layout)
+- [Post-Build Wrappers](#post-build-wrappers)
+  - [How the Hook Works](#how-the-hook-works)
+  - [Example -- Crystal Palace (StealthPalace)](#example----crystal-palace-stealthpalace)
+  - [Writing Pipeline Stages](#writing-pipeline-stages)
 - [What Gets Generated](#what-gets-generated)
   - [Agent Output](#agent-output)
   - [Listener Output](#listener-output)
+  - [Wrapper Output](#wrapper-output)
 - [Agent Interfaces](#agent-interfaces)
 - [Workflow Examples](#workflow-examples)
   - [Example 1 -- New Go Agent from Scratch](#example-1----new-go-agent-from-scratch)
@@ -44,6 +52,8 @@ The developer fills in the platform-specific and protocol-specific logic.
   - [Example 3 -- Rust Agent](#example-3----rust-agent-cross-platform)
   - [Example 4 -- Agent + Listener Pair](#example-4----agent--listener-pair)
   - [Example 5 -- Custom Protocol with Protobuf](#example-5----custom-protocol-with-protobuf)
+  - [Example 6 -- Post-Build Wrapper + Agent](#example-6----post-build-wrapper--agent)
+  - [Example 7 -- Go Agent with Garble Obfuscation](#example-7----go-agent-with-garble-obfuscation)
 - [Architecture](#architecture)
 - [Build and Deploy](#build-and-deploy)
 - [FAQ](#faq)
@@ -67,6 +77,7 @@ This toolkit automates that scaffolding so you can focus on implementation.
 |-----------|-------------|-------------------|
 | **Agent** | Plugin skeleton + implant with interface stubs | Platform methods in `impl/agent_<os>.go` |
 | **Listener** | Full plugin skeleton with transport loop | Connection handling in `pl_transport.go` |
+| **Service** | Server-side plugin with Call handler (optionally with post-build wrapper pipeline) | Service logic in `pl_main.go`; pipeline stages when wrapper is enabled |
 | **Protocol** | Crypto, constants, and wire-type template files | Your serialization and encryption logic |
 
 ---
@@ -118,10 +129,12 @@ This toolkit automates that scaffolding so you can focus on implementation.
 |   +-- templates/             Go template files for listeners
 |
 |-- service/
-|   |-- generator.ps1          Service sub-generator
-|   |-- generator.sh
-|   |-- README.md              Service documentation
-|   +-- templates/             Go template files for services
+|   |-- generator.ps1          Service sub-generator (supports -Wrapper flag)
+|   |-- generator.sh           Service sub-generator (supports WRAPPER=1)
+|   |-- README.md              Service + wrapper documentation
+|   +-- templates/
+|       |-- (base templates)    pl_main.go, ax_config.axs, config.yaml, go.mod, Makefile
+|       +-- wrapper/            Wrapper addon overrides (pl_main.go, pl_wrapper.go, ax_config.axs, ...)
 |
 +-- protocols/
     |-- generator.ps1          Protocol scaffold generator
@@ -161,7 +174,7 @@ The menu presents six options:
 ```
 1) Generate Agent     - Scaffold a new agent extender
 2) Generate Listener  - Scaffold a new listener extender
-3) Generate Service   - Scaffold a new service extender
+3) Generate Service   - Scaffold a new service extender (optionally with wrapper pipeline)
 4) Create Protocol    - Create a new wire-protocol definition
 5) Create Crypto      - Generate or replace the crypto template for a protocol
 6) Delete             - Remove a crypto template, protocol, or generated output
@@ -180,6 +193,7 @@ Sub-generator parameters can be passed inline.
 .\generator.ps1 -Mode agent
 .\generator.ps1 -Mode listener
 .\generator.ps1 -Mode service
+.\generator.ps1 -Mode service -Wrapper   # include post-build wrapper pipeline
 .\generator.ps1 -Mode protocol
 .\generator.ps1 -Mode crypto
 .\generator.ps1 -Mode delete
@@ -190,6 +204,7 @@ Sub-generator parameters can be passed inline.
 MODE=agent    ./generator.sh
 MODE=listener ./generator.sh
 MODE=service  ./generator.sh
+MODE=service WRAPPER=1 ./generator.sh   # include post-build wrapper pipeline
 MODE=protocol ./generator.sh
 MODE=crypto   ./generator.sh
 MODE=delete   ./generator.sh
@@ -342,20 +357,37 @@ MODE=protocol NAME=myprotobuf ./generator.sh
 Scaffolds a server-side service plugin. Services are pure server-side logic (no implant,
 no transport) — think notifications, integrations, or utilities.
 
+Optionally include a **post-build wrapper pipeline** with `-Wrapper` (PowerShell) or
+`WRAPPER=1` (Bash). When the wrapper is included, the generated service hooks into
+`agent.generate` (post-phase) and applies configurable transformation stages to the
+generated payload. When neither flag is set in interactive mode, the generator asks.
+
 **Parameters:**
 
 | Parameter | PowerShell | Bash env var | Required | Default |
 |-----------|-----------|-------------|----------|---------|
 | Name | `-Name` | `NAME` | Yes (prompted if empty) | -- |
+| Wrapper | `-Wrapper` switch | `WRAPPER=1` | No | Prompted interactively |
 | Output dir | `-OutputDir` | `OUTPUT_DIR` | No | `./output/` |
 
 ```powershell
+# Plain service
 .\generator.ps1 -Mode service -Name telegram
+
+# Service with wrapper pipeline
+.\generator.ps1 -Mode service -Name crystalpalace -Wrapper
+
+# Via sub-generator directly
+cd service
+.\generator.ps1 -Name crystalpalace -Wrapper
 ```
 
 ```bash
 MODE=service NAME=telegram ./generator.sh
+MODE=service NAME=crystalpalace WRAPPER=1 ./generator.sh
 ```
+
+See [Post-Build Wrappers](#post-build-wrappers) for detailed integration guidance.
 
 ### Crypto Swap
 
@@ -492,6 +524,156 @@ Build logic is language-specific and lives in `pl_build.go`:
 
 ---
 
+## Toolchains and Compilers
+
+Every agent has a **toolchain** — a YAML manifest in `agent/toolchains/` that defines the
+compiler binary, build command, flags, and cross-compile targets. The generator substitutes
+the `__BUILD_TOOL__` placeholder in Makefiles and build scripts from the toolchain's `command:` field.
+
+### Switching Toolchains
+
+Pass `-Toolchain` (PowerShell) or `TOOLCHAIN=` (Bash) at generation time:
+
+```powershell
+# Go agent with standard compiler (default)
+.\generator.ps1 -Mode agent -Name phantom -Language go
+
+# Go agent with garble obfuscation
+.\generator.ps1 -Mode agent -Name phantom -Language go -Toolchain go-garble
+
+# C++ agent with MinGW (auto-selected — only toolchain for cpp)
+.\generator.ps1 -Mode agent -Name wraith -Language cpp
+
+# Rust agent with cargo (auto-selected — only toolchain for rust)
+.\generator.ps1 -Mode agent -Name xxx -Language rust
+```
+
+```bash
+# Garble
+MODE=agent NAME=phantom LANGUAGE=go TOOLCHAIN=go-garble ./generator.sh
+
+# MinGW
+MODE=agent NAME=wraith LANGUAGE=cpp ./generator.sh
+```
+
+When `-Toolchain` is omitted and multiple toolchains exist for the chosen language,
+the generator presents an interactive menu:
+
+```
+Available toolchains for 'go':
+  [1] go-standard (default)  - Standard Go compiler (CGO_ENABLED=0, cross-platform)
+  [2] go-garble              - Garble obfuscator (symbol/string obfuscation)
+
+Select toolchain [default: 1]:
+```
+
+If only one toolchain matches (e.g. `mingw` for `cpp`), it is auto-selected.
+
+**Bundled toolchains:**
+
+| Toolchain | Language | Compiler | Description |
+|-----------|----------|----------|-------------|
+| `go-standard` | go | `go build` | Standard Go compiler, `CGO_ENABLED=0`, `-trimpath`, `-ldflags "-s -w"` |
+| `go-garble` | go | `garble -literals -tiny build` | Symbol + string obfuscation (install: `go install mvdan.cc/garble@latest`) |
+| `mingw` | cpp | `x86_64-w64-mingw32-g++` | MinGW-w64 cross-compiler with PE/DLL/Shellcode format support |
+| `cargo` | rust | `cargo build --release` | Standard Rust/Cargo compiler with cross-compile targets |
+
+### Customizing Toolchains
+
+To add a custom toolchain (e.g. `gobfuscate`, a different MinGW version, or `clang`),
+create a new YAML file in `agent/toolchains/`:
+
+**Example — gobfuscate toolchain:**
+
+```yaml
+# agent/toolchains/go-gobfuscate.yaml
+name: go-gobfuscate
+language: go
+description: "Gobfuscate (advanced Go obfuscation)"
+
+compiler:
+  binary: gobfuscate
+  version_check: "gobfuscate --version"
+
+build:
+  command: "gobfuscate build"
+  env:
+    CGO_ENABLED: "0"
+    GOWORK: "off"
+  flags:
+    - "-trimpath"
+  ldflags: "-s -w"
+
+targets:
+  - { goos: linux,   goarch: amd64, suffix: "_linux_amd64" }
+  - { goos: windows, goarch: amd64, suffix: "_windows_amd64.exe" }
+```
+
+**Example — MinGW with custom flags (e.g. anti-AV, stack encryption):**
+
+```yaml
+# agent/toolchains/mingw-custom.yaml
+name: mingw-custom
+language: cpp
+description: "MinGW-w64 with hardened flags"
+
+compiler:
+  x64: x86_64-w64-mingw32-g++
+  x86: i686-w64-mingw32-g++
+  version_check: "x86_64-w64-mingw32-g++ --version"
+
+cxxflags:
+  - "-fno-stack-protector"
+  - "-fno-exceptions"
+  - "-fno-unwind-tables"
+  - "-fno-asynchronous-unwind-tables"
+  - "-masm=intel"
+  - "-fPIC"
+  - "-Os"                           # Optimize for size
+  - "-ffunction-sections"           # Dead code stripping
+  - "-fdata-sections"               # Dead data stripping
+  - "-Wl,--gc-sections"             # Linker removes unused sections
+
+formats:
+  exe:
+    defines: []
+    ldflags: []
+    extension: ".exe"
+  dll:
+    defines: ["BUILD_DLL"]
+    ldflags: ["-shared"]
+    extension: ".dll"
+  shellcode:
+    defines: ["BUILD_SHELLCODE"]
+    ldflags: []
+    extension: ".bin"
+
+architectures:
+  - { name: x64, compiler_key: x64 }
+  - { name: x86, compiler_key: x86 }
+```
+
+Once saved, the toolchain is automatically discovered and available on the next run:
+
+```powershell
+.\generator.ps1 -Mode agent -Name wraith -Language cpp -Toolchain mingw-custom
+```
+
+**Key fields reference:**
+
+| Field | Purpose |
+|-------|---------|
+| `name` | Unique identifier (matches filename without `.yaml`) |
+| `language` | Which language this toolchain applies to (`go`, `cpp`, `rust`) |
+| `build.command` | Replaces the `__BUILD_TOOL__` placeholder |
+| `build.env` | Environment variables set during build |
+| `build.flags` | Additional compiler flags |
+| `targets` | Cross-compile target matrix |
+| `cxxflags` | C++ specific compiler flags (MinGW) |
+| `formats` | Output format options: exe, dll, shellcode, service (C++ only) |
+
+---
+
 ## Protocols
 
 A protocol defines the shared **crypto**, **constants**, and **wire types** used between an
@@ -544,6 +726,141 @@ The `__PACKAGE__` placeholder in `.tmpl` files is replaced at generation time:
 | Listener code (flat package) | `main` |
 | Agent crypto package | `crypto` |
 | Agent protocol package | `protocol` |
+
+---
+
+## Post-Build Wrappers
+
+A **wrapper** is a service plugin (generated with `-Wrapper` or `WRAPPER=1`) that hooks
+into the `agent.generate` event (post-phase) and transforms the generated payload before
+it reaches the operator. This enables post-build processing like RDLL loading, sleep
+obfuscation, shellcode encryption, packing, and more — without modifying the agent itself.
+
+The wrapper concept is inspired by [Adaptix-StealthPalace](https://github.com/MaorSabag/Adaptix-StealthPalace)
+by MaorSabag, which integrates Crystal Palace (RDLL loader), Ekko sleep obfuscation, and
+module stomping as a post-build pipeline.
+
+### How the Hook Works
+
+1. **Operator** clicks "Build Agent" in the Adaptix UI.
+2. **Teamserver** compiles the agent and fires `agent.generate` (post-phase).
+3. **Wrapper plugin** intercepts the event via `TsEventHookRegister`.
+4. The event carries a pointer to a struct with the payload accessible via `reflect`:
+   - `FileContent []byte` — the generated payload bytes (modified in-place)
+   - `FileName string` — output file name (can be renamed)
+   - `BuilderId string` — build log identifier
+   - `AgentName string` — agent type name
+   - `Config string` — build configuration
+5. The wrapper runs all enabled pipeline stages and writes the result back via
+   `reflect.SetBytes()` — no file I/O, no disk writes.
+6. **Teamserver** returns the wrapped payload to the operator.
+
+The wrapper intercepts **all** agent builds automatically. No per-agent configuration is needed.
+
+### Example -- Crystal Palace (StealthPalace)
+
+A complete end-to-end flow:
+
+```powershell
+# 1. Generate the agent
+.\generator.ps1 -Mode agent -Name xxx -Protocol adaptix_default -Language go
+
+# 2. Generate the wrapper
+.\generator.ps1 -Mode service -Name crystalpalace -Wrapper
+
+# 3. Implement your agent (platform stubs)
+cd output\xxx_agent\src_xxx\impl
+# Edit agent_windows.go, agent_linux.go, ...
+
+# 4. Implement the wrapper stages
+cd ..\..\..\..\output\crystalpalace_wrapper
+```
+
+In `pl_main.go`, register your stages:
+
+```go
+func initStages() {
+    RegisterStage(Stage{
+        Name:    "rdll_loader",
+        Enabled: true,
+        Run:     stageRdllLoader,
+    })
+    RegisterStage(Stage{
+        Name:    "sleep_mask",
+        Enabled: true,
+        Run:     stageSleepMask,
+    })
+    RegisterStage(Stage{
+        Name:    "module_stomp",
+        Enabled: true,
+        Run:     stageModuleStomp,
+    })
+}
+```
+
+Add stage logic in a new file (e.g. `pl_stages.go`):
+
+```go
+package main
+
+import "fmt"
+
+func stageRdllLoader(payload []byte, cfg map[string]string, ctx *BuildContext) ([]byte, error) {
+    logBuild(ctx.BuilderID, BuildLogInfo, fmt.Sprintf("Applying RDLL loader to %s", ctx.FileName))
+    // Wrap the payload in an RDLL loader stub...
+    return payload, nil
+}
+
+func stageSleepMask(payload []byte, cfg map[string]string, ctx *BuildContext) ([]byte, error) {
+    logBuild(ctx.BuilderID, BuildLogInfo, "Applying Ekko sleep obfuscation")
+    // Patch sleep mask into the payload...
+    return payload, nil
+}
+
+func stageModuleStomp(payload []byte, cfg map[string]string, ctx *BuildContext) ([]byte, error) {
+    logBuild(ctx.BuilderID, BuildLogInfo, "Applying module stomping")
+    // Apply module stomping...
+    return payload, nil
+}
+```
+
+```powershell
+# 5. Build both plugins
+cd output\xxx_agent
+go mod tidy && make plugin
+
+cd ..\crystalpalace_wrapper
+go mod tidy && make plugin
+
+# 6. Deploy both to the Teamserver
+copy output\xxx_agent\dist\*        <AdaptixServer>\data\extenders\xxx_agent\
+copy output\crystalpalace_wrapper\dist\* <AdaptixServer>\data\extenders\crystalpalace_wrapper\
+```
+
+After deploying both plugins, every time any operator builds the `xxx` agent (or any
+other agent), the Crystal Palace wrapper automatically intercepts and transforms the payload.
+
+### Writing Pipeline Stages
+
+Each stage is a function with this signature:
+
+```go
+func(payload []byte, cfg map[string]string, ctx *BuildContext) ([]byte, error)
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `payload` | Current payload bytes (output of previous stage) |
+| `cfg` | Key-value configuration persisted via `TsExtenderDataSave` |
+| `ctx` | Build context: `AgentName`, `BuilderID`, `FileName`, `ModuleDir`, `Extra` |
+
+**Stage lifecycle:**
+
+- Stages run in registration order.
+- A stage can be enabled/disabled at runtime via config keys: `stage.<name>.enabled = "true"` or `"false"`.
+- If a stage returns an error, the pipeline stops and the original (unwrapped) payload is returned.
+- Stages can store state in `ctx.Extra` (e.g. `ctx.Extra["output_filename"]` to rename the output file).
+- Use `logBuild(ctx.BuilderID, BuildLogInfo, "message")` for build log output.
 
 ---
 
@@ -636,6 +953,21 @@ The implant directory (`src_<name>/`) varies by language:
 
 The main file to customize is `pl_transport.go`, which contains the connection accept
 loop and per-connection handler.
+
+### Wrapper Output (Service with `-Wrapper`)
+
+```
+<name>_wrapper/
+|-- config.yaml              Service manifest (extender_type: "service")
+|-- go.mod                   Go module (depends on axc2 v1.2.0)
+|-- Makefile                 Build targets: plugin, dist
+|-- pl_main.go               Plugin entry + event hook + Call handler  <-- ADD STAGES HERE
+|-- pl_wrapper.go            Pipeline engine (Stage registration, RunPipeline)
++-- ax_config.axs            Wrapper UI (status, config save/load)
+```
+
+The main files to customize are `pl_main.go` (register stages in `initStages()`) and
+optionally a new `pl_stages.go` file with your stage implementations.
 
 ---
 
@@ -752,9 +1084,9 @@ cd output\wraith_agent\src_wraith
 
 ```powershell
 # Generate a Rust agent scaffold
-.\generator.ps1 -Mode agent -Name spectre -Language rust
+.\generator.ps1 -Mode agent -Name xxx -Language rust
 
-cd output\spectre_agent\src_spectre
+cd output\xxx_agent\src_xxx
 # Implement src/agent.rs (Connector trait)
 # Build: cargo build --release --target x86_64-unknown-linux-gnu
 ```
@@ -807,6 +1139,85 @@ cd ..\..
 The generator injects your `crypto.go.tmpl`, `types.go.tmpl`, and `constants.go.tmpl`
 into the correct locations within each generated project.
 
+### Example 6 -- Post-Build Wrapper + Agent
+
+Generate a Go agent and a Crystal Palace-style wrapper, build both, and deploy:
+
+```powershell
+# 1. Generate the agent with the adaptix_default protocol
+.\generator.ps1 -Mode agent -Name phoenix -Protocol adaptix_default
+
+# 2. Generate the post-build wrapper
+.\generator.ps1 -Mode service -Name crystalpalace -Wrapper
+
+# 3. Implement agent platform stubs
+cd output\phoenix_agent\src_phoenix\impl
+# Fill in agent_windows.go, agent_linux.go, etc.
+
+# 4. Implement wrapper stages in output\crystalpalace_wrapper\
+#    - Edit pl_main.go → initStages() to register your stages
+#    - Add stage functions in pl_stages.go (see service/README.md)
+
+# 5. Build both plugins (on Linux with CGO_ENABLED=1)
+cd output\phoenix_agent
+go mod tidy && make full
+
+cd ..\crystalpalace_wrapper
+go mod tidy && make plugin
+
+# 6. Deploy both to the Teamserver extenders directory
+#    Both .so plugins load on server startup.
+#    The wrapper hooks ALL agent builds — no per-agent config needed.
+```
+
+```bash
+# Same flow on Linux
+MODE=agent NAME=phoenix PROTOCOL=adaptix_default ./generator.sh
+MODE=service NAME=crystalpalace WRAPPER=1 ./generator.sh
+
+cd output/phoenix_agent && go mod tidy && make full && cd ..
+cd crystalpalace_wrapper && go mod tidy && make plugin && cd ..
+```
+
+**What happens at runtime:**
+1. Operator clicks "Build Agent" for `phoenix` in the Adaptix UI.
+2. Teamserver compiles the agent → fires `agent.generate` post event.
+3. `crystalpalace_wrapper` intercepts the event, reads `FileContent` via `reflect`,
+   runs the RDLL loader / sleep mask / module stomp pipeline, and writes the
+   transformed payload back via `SetBytes()`.
+4. Teamserver returns the wrapped binary to the operator.
+
+### Example 7 -- Go Agent with Garble Obfuscation
+
+Use garble to strip symbols and obfuscate string literals:
+
+```powershell
+# Prerequisite: install garble
+go install mvdan.cc/garble@latest
+
+# Generate with garble toolchain
+.\generator.ps1 -Mode agent -Name phantom -Language go -Toolchain go-garble -Protocol adaptix_default
+
+# The generated Makefile uses "garble -literals -tiny build" instead of "go build"
+cd output\phantom_agent\src_phantom
+# Verify the Makefile:
+#   BUILD_TOOL = garble -literals -tiny build
+make linux_amd64
+```
+
+```bash
+MODE=agent NAME=phantom LANGUAGE=go TOOLCHAIN=go-garble PROTOCOL=adaptix_default ./generator.sh
+```
+
+**Garble flags applied by the `go-garble` toolchain:**
+
+| Flag | Effect |
+|------|--------|
+| `-literals` | Obfuscate string literals (replaces plaintext with runtime-decoded equivalents) |
+| `-tiny` | Remove extra information not required for runtime (smaller binary) |
+| `-trimpath` | Remove file system paths from the binary |
+| `-ldflags "-s -w"` | Strip symbol table and debug info |
+
 ---
 
 ## Architecture
@@ -815,16 +1226,16 @@ into the correct locations within each generated project.
               +-------------------+
               |  generator.ps1/sh |  root dispatcher
               +---------+---------+
-       +------+----+----+----+--------+
-       v      v    v    v    v        v
-    agent/ listener/ service/ proto/ crypto/
-    gen.   gen.      gen.    gen.   gen.
-       |      |    |    |    |        |
-       v      v    v    v    v        v
-  OUTPUT_DIR/  OUTPUT_DIR/  OUTPUT_DIR/ protocols/  protocols/
-  <name>_      <name>_     <name>_     <name>/     <proto>/
-  agent/       listener_   service/                crypto.go
-               <proto>/                            .tmpl
+  +------+------+------+------+------+------+
+  v      v      v      v      v      v      v
+agent/ listener/ service/   proto/ crypto/ delete
+gen.   gen.      gen.       gen.   gen.
+  |      |      |           |      |
+  v      v      v           v      v
+ OUTPUT_DIR/   OUTPUT_DIR/   protocols/
+ <name>_       <name>_       <name>/
+ agent/        listener_     service/ or
+               <proto>/      wrapper/
 ```
 
 **Data flow:**
@@ -843,6 +1254,17 @@ Agent Implant  <----[protocol]---->  Listener Plugin  <----[axc2 msgpack]---->  
      |                                    |                                          |
   You implement                     You implement                         Fixed API (axc2 v1.2.0)
   (impl/*.go)                       (pl_transport.go)
+```
+
+**Post-build pipeline (when a wrapper is deployed):**
+
+```
+                              agent.generate event (post)
+                                       |
+Agent Build  --->  Teamserver  --->  Wrapper Plugin  --->  Teamserver returns wrapped payload
+                                       |
+                               [rdll_loader] -> [sleep_mask] -> [module_stomp] -> ...
+                               Stages run in order, modifying FileContent in-place
 ```
 
 The agent-to-listener wire format is defined by the selected protocol and is fully replaceable.
@@ -901,6 +1323,16 @@ make plugin
 make dist
 ```
 
+### Service / Wrapper
+
+```bash
+cd <name>_service/       # or <name>_wrapper/
+go mod tidy
+
+# Build plugin (.so)
+make plugin
+```
+
 ### Deployment
 
 Copy the built artifacts into the AdaptixC2 server extenders directory:
@@ -913,6 +1345,16 @@ AdaptixServer/data/extenders/<name>_agent/
 
 AdaptixServer/data/extenders/<name>_listener_<protocol>/
     listener_<name>_<protocol>.so
+    config.yaml
+    ax_config.axs
+
+AdaptixServer/data/extenders/<name>_wrapper/
+    service_<name>.so
+    config.yaml
+    ax_config.axs
+
+AdaptixServer/data/extenders/<name>_service/
+    service_<name>.so
     config.yaml
     ax_config.axs
 ```
@@ -951,6 +1393,25 @@ and `tasks.go`.
 Yes. Create a new template directory under `agent/templates/implant/<lang>/`, a toolchain
 YAML in `agent/toolchains/`, a build variant `pl_build_<lang>.go`, and register it in the
 generator's build variant map.
+
+**How do I change the compiler for a specific agent?**
+Use `-Toolchain` at generation time. For example, `go-garble` for obfuscated Go builds,
+or create a custom toolchain YAML in `agent/toolchains/` (see [Toolchains and Compilers](#toolchains-and-compilers)).
+
+**Does the wrapper need to know about my specific agent?**
+No. The wrapper hooks `agent.generate` (post-phase) and intercepts **all** agent builds
+automatically. It receives the payload bytes via `reflect` and transforms them in-place.
+No per-agent configuration or linking is required.
+
+**Can I have multiple wrappers active simultaneously?**
+Yes. Each wrapper registers its own event hook with a unique name and priority. Hooks
+execute in priority order, so you can chain multiple wrappers (e.g. one for encryption,
+one for packing).
+
+**How do I integrate StealthPalace / Crystal Palace?**
+Generate a service with `-Wrapper` (`-Mode service -Wrapper`), implement the RDLL loader, sleep mask, and module
+stomping stages, then deploy alongside your agent. See [Example 6](#example-6----post-build-wrapper--agent)
+and the [Post-Build Wrappers](#post-build-wrappers) section for the full walkthrough.
 
 ---
 

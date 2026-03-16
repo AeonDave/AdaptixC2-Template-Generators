@@ -34,7 +34,7 @@ if [[ -z "$MODE" ]]; then
     echo ""
     echo "  [1] Generate Agent     - Scaffold a new agent extender"
     echo "  [2] Generate Listener  - Scaffold a new listener extender"
-    echo "  [3] Generate Service   - Scaffold a new service extender"
+    echo "  [3] Generate Service   - Scaffold a new service extender (optionally with wrapper pipeline)"
     echo "  [4] Create Protocol    - Create a new wire-protocol definition"
     echo "  [5] Create Crypto      - Generate or replace the crypto template for a protocol"
     echo "  [6] Delete             - Remove a crypto template, protocol, or generated output"
@@ -68,6 +68,11 @@ service)
     echo "[*] Launching Service Generator..."
     echo ""
     exec bash "$SCRIPT_DIR/service/generator.sh" "$@"
+    ;;
+wrapper)
+    echo "[*] Launching Service Generator (wrapper mode)..."
+    echo ""
+    WRAPPER=1 exec bash "$SCRIPT_DIR/service/generator.sh" "$@"
     ;;
 protocol)
     echo "[*] Launching Protocol Generator..."

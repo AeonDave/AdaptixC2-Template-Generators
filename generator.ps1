@@ -42,7 +42,7 @@
     .\generator.ps1 -Mode agent -Language cpp -Toolchain mingw
 #>
 param(
-    [ValidateSet("agent","listener","service","protocol","crypto","delete","")]
+    [ValidateSet("agent","listener","service","wrapper","protocol","crypto","delete","")]
     [string]$Mode      = "",
     [string]$OutputDir = "",
     [ValidateSet("go","cpp","rust","")]
@@ -67,7 +67,7 @@ Write-Host ""
 $modes = @(
     @{ Key = "agent";    Label = "Generate Agent";    Desc = "Scaffold a new agent extender" },
     @{ Key = "listener"; Label = "Generate Listener"; Desc = "Scaffold a new listener extender" },
-    @{ Key = "service";  Label = "Generate Service";  Desc = "Scaffold a new service extender" },
+    @{ Key = "service";  Label = "Generate Service";  Desc = "Scaffold a new service extender (optionally with wrapper pipeline)" },
     @{ Key = "protocol"; Label = "Create Protocol";   Desc = "Create a new wire-protocol definition" },
     @{ Key = "crypto";   Label = "Create Crypto";     Desc = "Generate or replace the crypto template for a protocol" },
     @{ Key = "delete";   Label = "Delete";            Desc = "Remove a crypto template, protocol, or generated output" }
@@ -123,6 +123,12 @@ switch ($Mode) {
         Write-Host "[*] Launching Service Generator..." -ForegroundColor Yellow
         Write-Host ""
         & $target @fwdArgs @extraArgs
+    }
+    "wrapper" {
+        $target = Join-Path $ScriptDir "service\generator.ps1"
+        Write-Host "[*] Launching Service Generator (wrapper mode)..." -ForegroundColor Yellow
+        Write-Host ""
+        & $target -Wrapper @fwdArgs @extraArgs
     }
     "protocol" {
         $target = Join-Path $ScriptDir "protocols\generator.ps1"
