@@ -6,12 +6,29 @@
 #   make FORMAT=svc  Build as Windows service
 #
 
-SRC_DIR  := $(shell pwd)
+SRC_DIR  := $(CURDIR)
 BEACON   := __NAME__
 
 # MinGW cross-compilers
 CXX_X64  := x86_64-w64-mingw32-g++
 CXX_X86  := i686-w64-mingw32-g++
+HAS_X64  := $(strip $(shell where $(CXX_X64) 2>nul))
+HAS_X86  := $(strip $(shell where $(CXX_X86) 2>nul))
+ALL_TARGETS :=
+
+ifneq ($(HAS_X64),)
+ALL_TARGETS += x64
+endif
+
+ifneq ($(HAS_X86),)
+ALL_TARGETS += x86
+endif
+
+ifeq ($(OS),Windows_NT)
+CLEAN_CMD := powershell -NoProfile -Command "Remove-Item -Force '$(BEACON)_x64*','$(BEACON)_x86*','$(BEACON)_svc*' -ErrorAction SilentlyContinue"
+else
+CLEAN_CMD := rm -f $(BEACON)_x64* $(BEACON)_x86* $(BEACON)_svc*
+endif
 
 # Format selection: exe | dll | svc | shellcode
 FORMAT   ?= exe
@@ -20,8 +37,8 @@ FORMAT   ?= exe
 CXXFLAGS := -fno-stack-protector -fno-strict-overflow \
             -fno-delete-null-pointer-checks -fno-strict-aliasing \
             -fno-builtin -fno-exceptions -fno-unwind-tables \
-            -fno-asynchronous-unwind-tables -fpermissive -w \
-            -masm=intel -fPIC -I $(SRC_DIR)/impl
+            -fno-asynchronous-unwind-tables -fpermissive -Wall -Wextra \
+            -masm=intel -fPIC -I $(SRC_DIR)/impl -I $(SRC_DIR)/protocol -I $(SRC_DIR)/crypto
 
 LDFLAGS  :=
 DEFINES  :=
@@ -56,7 +73,7 @@ SOURCES := $(wildcard impl/*.cpp) crypto/crypto.cpp protocol/protocol.cpp config
 
 .PHONY: all x64 x86 clean
 
-all: x64 x86
+all: $(ALL_TARGETS)
 
 x64:
 	@echo "[*] Building $(BEACON) x64 ($(FORMAT))..."
@@ -68,5 +85,4 @@ x86:
 	$(CXX_X86) $(CXXFLAGS) $(DEFINES) $(LDFLAGS) -o $(BEACON)$(EXT_X86) $(SOURCES) -lws2_32 -lwinhttp
 	@echo "[+] $(BEACON)$(EXT_X86)"
 
-clean:
-	rm -f $(BEACON)_x64* $(BEACON)_x86* $(BEACON)_svc*
+clean: ; @$(CLEAN_CMD)

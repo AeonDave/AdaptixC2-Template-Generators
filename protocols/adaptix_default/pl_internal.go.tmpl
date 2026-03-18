@@ -1,0 +1,17 @@
+package main
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+)
+
+func ParseInternalAgentRegistration(decrypted []byte) (string, string, []byte, error) {
+	if len(decrypted) < 8 {
+		return "", "", nil, errors.New("internal init packet too short")
+	}
+
+	agentType := fmt.Sprintf("%08x", binary.BigEndian.Uint32(decrypted[:4]))
+	agentID := fmt.Sprintf("%08x", binary.BigEndian.Uint32(decrypted[4:8]))
+	return agentType, agentID, decrypted[8:], nil
+}

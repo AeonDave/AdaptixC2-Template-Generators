@@ -198,6 +198,15 @@ Substitute-Template (Join-Path $TemplateDir "go.sum")           (Join-Path $OutD
 Substitute-Template (Join-Path $TemplateDir "Makefile")         (Join-Path $OutDir "Makefile")
 Substitute-Template (Join-Path $TemplateDir "pl_main.go")       (Join-Path $OutDir "pl_main.go")
 
+# pl_internal.go: use protocol override if available, else base template
+$protoInternal = Join-Path $protoDir "pl_internal.go.tmpl"
+if (Test-Path $protoInternal) {
+    Write-Host "  [+] Using protocol internal override: pl_internal.go.tmpl" -ForegroundColor Green
+    Substitute-Template $protoInternal (Join-Path $OutDir "pl_internal.go")
+} else {
+    Substitute-Template (Join-Path $TemplateDir "pl_internal.go") (Join-Path $OutDir "pl_internal.go")
+}
+
 # pl_transport.go: use protocol override if available, else base template
 $protoTransport = Join-Path $protoDir "pl_transport.go.tmpl"
 if (Test-Path $protoTransport) {
@@ -256,6 +265,7 @@ Write-Host "  |-- config.yaml          # Listener manifest"
 Write-Host "  |-- go.mod               # Go module"
 Write-Host "  |-- Makefile             # Build targets"
 Write-Host "  |-- pl_main.go           # Plugin entry + Teamserver interface"
+Write-Host "  |-- pl_internal.go       # Internal listener registration parser"
 Write-Host "  |-- pl_transport.go      # Transport: Start/Stop/handleConnection"
 Write-Host "  |-- pl_crypto.go         # Encrypt/Decrypt (from protocol: $Protocol)"
 Write-Host "  |-- pl_utils.go          # Wire types + constants (from protocol: $Protocol)"

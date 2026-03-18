@@ -3,6 +3,8 @@
 // Protocol constants and data structures for C2 communication.
 // Must match the server-side plugin (pl_utils.go).
 
+#![allow(dead_code)]
+
 /// Protocol watermark (must match agent registration)
 pub const WATERMARK: u32 = 0x__WATERMARK__;
 

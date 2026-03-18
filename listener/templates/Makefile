@@ -1,4 +1,4 @@
-PLUGIN_DIR := $(shell pwd)
+PLUGIN_DIR := $(CURDIR)
 PLUGIN_OUT := $(PLUGIN_DIR)/listener___NAME_____PROTOCOL__.so
 
 .PHONY: all plugin clean

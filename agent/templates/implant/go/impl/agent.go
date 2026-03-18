@@ -3,6 +3,7 @@ package impl
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"net"
 	"time"
 
@@ -58,28 +59,39 @@ func (a *Agent) OnStart() {
 	// no-op by default
 }
 
-// ─── Transport (cross-platform, working default) ──────────────────────────────
+// ─── Transport (cross-platform) ───────────────────────────────────────────────
 //
-// The default implementation provides TCP + optional TLS transport.
-// Override this entire method to implement HTTP, DNS, SMB, or any custom transport.
+// Override to implement your transport: TCP, HTTP, DNS, SMB, named pipes, etc.
 
 func (a *Agent) Dial(addr string, profile *protocol.Profile) (net.Conn, error) {
-	timeout := time.Duration(profile.ConnTimeout) * time.Second
-	if profile.UseSSL {
-		tlsCfg := &tls.Config{InsecureSkipVerify: false}
-		if len(profile.CaCert) > 0 {
-			pool := x509.NewCertPool()
-			pool.AppendCertsFromPEM(profile.CaCert)
-			tlsCfg.RootCAs = pool
-		}
-		if len(profile.SslCert) > 0 && len(profile.SslKey) > 0 {
-			cert, err := tls.X509KeyPair(profile.SslCert, profile.SslKey)
-			if err != nil {
-				return nil, err
-			}
-			tlsCfg.Certificates = []tls.Certificate{cert}
-		}
-		return tls.DialWithDialer(&net.Dialer{Timeout: timeout}, "tcp", addr, tlsCfg)
+	timeout := 10 * time.Second
+	if profile != nil && profile.ConnTimeout > 0 {
+		timeout = time.Duration(profile.ConnTimeout) * time.Second
 	}
-	return net.DialTimeout("tcp", addr, timeout)
+	dialer := &net.Dialer{Timeout: timeout}
+	if profile == nil || !profile.UseSSL {
+		return dialer.Dial("tcp", addr)
+	}
+
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if len(profile.CaCert) == 0 {
+		tlsCfg.InsecureSkipVerify = true
+	} else {
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(profile.CaCert) {
+			return nil, fmt.Errorf("invalid CA certificate bundle")
+		}
+		tlsCfg.RootCAs = pool
+	}
+	if len(profile.SslCert) > 0 && len(profile.SslKey) > 0 {
+		cert, err := tls.X509KeyPair(profile.SslCert, profile.SslKey)
+		if err != nil {
+			return nil, err
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		tlsCfg.ServerName = host
+	}
+	return tls.DialWithDialer(dialer, "tcp", addr, tlsCfg)
 }

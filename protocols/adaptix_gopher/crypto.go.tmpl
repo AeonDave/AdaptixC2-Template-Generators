@@ -1,4 +1,4 @@
-// AES-256-GCM (standard, fast, widely supported)
+// AES-GCM with a 16-byte key from the listener profile (AES-128-GCM in practice).
 package __PACKAGE__
 
 import (
@@ -12,10 +12,10 @@ import (
 // SKey is set from the embedded profile at startup (agent-side).
 var SKey []byte
 
-// KeySize is the expected key length in bytes (AES-128-GCM).
+// KeySize is the expected key length in bytes.
 const KeySize = 16
 
-// EncryptData encrypts data with AES-256-GCM using key.
+// EncryptData encrypts data with AES-GCM using key.
 // The nonce is prepended to the ciphertext.
 func EncryptData(data, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
@@ -33,7 +33,7 @@ func EncryptData(data, key []byte) ([]byte, error) {
 	return gcm.Seal(nonce, nonce, data, nil), nil
 }
 
-// DecryptData decrypts data with AES-256-GCM using key.
+// DecryptData decrypts data with AES-GCM using key.
 // Expects nonce prepended as per EncryptData.
 func DecryptData(data, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)

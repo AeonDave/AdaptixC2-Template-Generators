@@ -3,6 +3,8 @@
 // ReaderLE: Little-Endian reader (server → agent)
 // WriterBE: Big-Endian writer (agent → server)
 
+#![allow(dead_code)]
+
 /// Protocol watermark (must match agent registration)
 pub const WATERMARK: u32 = 0x__WATERMARK__;
 
@@ -15,6 +17,7 @@ pub const COMMAND_DISKS: u32        = 15;
 pub const COMMAND_DOWNLOAD: u32     = 32;
 pub const COMMAND_EXEC_BOF: u32     = 50;
 pub const COMMAND_EXEC_BOF_OUT: u32 = 51;
+pub const COMMAND_EXEC_BOF_ASYNC: u32 = 52;
 pub const COMMAND_EXFIL: u32        = 35;
 pub const COMMAND_GETUID: u32       = 22;
 pub const COMMAND_JOBS_KILL: u32    = 47;
@@ -49,6 +52,13 @@ pub const COMMAND_SHELL_START: u32  = 71;
 pub const COMMAND_SHELL_WRITE: u32  = 72;
 pub const COMMAND_SHELL_CLOSE: u32  = 73;
 pub const COMMAND_SHELL_ACCEPT: u32 = 74;
+
+pub const COMMAND_EXIT: u32         = 75;
+pub const COMMAND_KILL: u32         = 76;
+pub const COMMAND_RUN: u32          = 77;
+pub const COMMAND_SCREENSHOT: u32   = 78;
+pub const COMMAND_SHELL: u32        = 79;
+pub const COMMAND_ZIP: u32          = 80;
 
 pub const COMMAND_JOB: u32         = 0x8437;
 pub const COMMAND_SAVEMEMORY: u32   = 0x2321;

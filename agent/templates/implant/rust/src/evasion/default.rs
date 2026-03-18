@@ -10,6 +10,7 @@ use super::EvasionGate;
 pub struct DefaultGate;
 
 impl DefaultGate {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         DefaultGate
     }

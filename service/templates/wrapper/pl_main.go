@@ -50,7 +50,7 @@ func InitPlugin(ts any, moduleDir string, serviceConfig string) adaptix.PluginSe
 	initStages()
 
 	// Hook into agent build (post-phase) so we can wrap every generated payload.
-	Ts.TsEventHookRegister("agent.generate", "__NAME___wrapper", HookPost, 100, onAgentGenerate)
+	Ts.TsEventHookRegister("agent.generate", "__NAME___wrapper", HookPost, 50, onAgentGenerate)
 
 	return &PluginService{}
 }
@@ -105,17 +105,31 @@ func onAgentGenerate(event any) error {
 		return nil
 	}
 
+	/// START CODE HERE — filter by file extension or agent type
+	/// Example: skip non-DLL payloads
+	/// name := fileName.String()
+	/// if !strings.HasSuffix(strings.ToLower(name), ".dll") {
+	///     return nil
+	/// }
+	/// END CODE HERE
+
 	agentName := ""
 	if f := s.FieldByName("AgentName"); f.IsValid() {
 		agentName = f.String()
 	}
 
-	logBuild("", BuildLogInfo, fmt.Sprintf("[__NAME__] wrapping %s (%d bytes)", fileName.String(), len(payload)))
+	builderId := ""
+	if f := s.FieldByName("BuilderId"); f.IsValid() {
+		builderId = f.String()
+	}
+
+	logBuild(builderId, BuildLogInfo, fmt.Sprintf("[__NAME__] wrapping %s (%d bytes)", fileName.String(), len(payload)))
 
 	cfg := loadConfig()
 
 	ctx := &BuildContext{
 		AgentName: agentName,
+		BuilderId: builderId,
 		FileName:  fileName.String(),
 		ModuleDir: ModuleDir,
 		Extra:     make(map[string]any),
@@ -123,14 +137,14 @@ func onAgentGenerate(event any) error {
 
 	wrapped, err := RunPipeline(payload, cfg, ctx)
 	if err != nil {
-		logBuild("", BuildLogError, fmt.Sprintf("[__NAME__] pipeline failed: %v", err))
+		logBuild(builderId, BuildLogError, fmt.Sprintf("[__NAME__] pipeline failed: %v", err))
 		return nil // don't fail the build — wrapper is best-effort
 	}
 
 	// Write the modified payload back in-place on the event struct.
 	if fileContent.CanSet() {
 		fileContent.SetBytes(wrapped)
-		logBuild("", BuildLogSuccess, fmt.Sprintf("[__NAME__] payload wrapped (%d → %d bytes)", len(payload), len(wrapped)))
+		logBuild(builderId, BuildLogSuccess, fmt.Sprintf("[__NAME__] payload wrapped (%d → %d bytes)", len(payload), len(wrapped)))
 	}
 
 	// Optionally rename the output file (stages can set ctx.Extra["output_filename"]).

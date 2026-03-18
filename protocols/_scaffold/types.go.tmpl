@@ -245,6 +245,11 @@ type ParamsTunnelResume struct {
 	ChannelId int `msgpack:"channel_id"`
 }
 
+type ParamsTunnelReverse struct {
+	TunnelId int `msgpack:"tunnel_id"`
+	Port     int `msgpack:"port"`
+}
+
 type ParamsTerminalStart struct {
 	TermId  int    `msgpack:"term_id"`
 	Program string `msgpack:"program"`

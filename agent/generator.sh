@@ -321,8 +321,15 @@ case "$LANGUAGE" in
     rust) BUILD_VARIANT="pl_build_rust.go" ;;
     *)    BUILD_VARIANT="" ;;
 esac
-if [[ -n "$BUILD_VARIANT" && -f "$TEMPLATE_DIR/plugin/$BUILD_VARIANT" ]]; then
-    substitute "$TEMPLATE_DIR/plugin/$BUILD_VARIANT" "$OUT_DIR/pl_build.go"
+if [[ -n "$BUILD_VARIANT" ]]; then
+    BUILD_SRC="$TEMPLATE_DIR/plugin/$BUILD_VARIANT"
+    if [[ -n "$PROTOCOL" && -f "$PROTO_DIR/${BUILD_VARIANT}.tmpl" ]]; then
+        info "Using protocol-specific $BUILD_VARIANT from '$PROTOCOL'"
+        BUILD_SRC="$PROTO_DIR/${BUILD_VARIANT}.tmpl"
+    fi
+    if [[ -f "$BUILD_SRC" ]]; then
+        substitute "$BUILD_SRC" "$OUT_DIR/pl_build.go"
+    fi
 fi
 
 # Implant files (all top-level files from the language template dir)
@@ -464,7 +471,7 @@ process_evasion_markers() {
                             a\\
 // Uncomment and adjust the path below to import your evasion module:\
 // require evasion v0.0.0\
-// replace evasion => ../path/to/evasion
+// add a local replace directive that points to your evasion module
                         }' "$f"
                     fi
                     ;;

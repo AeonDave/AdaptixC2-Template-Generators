@@ -43,6 +43,7 @@ param(
     [string]$Name      = "",
     [string]$Watermark = "",
     [string]$Protocol  = "",
+    [string[]]$ListenerNames = @(),
     [ValidateSet("go","cpp","rust","")]
     [string]$Language  = "",
     [string]$Toolchain = "",
@@ -104,6 +105,7 @@ if (-not [string]::IsNullOrEmpty($Name)) {
 
 # Capitalize first letter
 $AgentNameCap = $AgentName.Substring(0,1).ToUpper() + $AgentName.Substring(1)
+$ProtocolCap = ""
 
 # Watermark
 $DefaultWatermark = -join ((1..4) | ForEach-Object { "{0:x2}" -f (Get-Random -Minimum 0 -Maximum 256) })
@@ -160,7 +162,32 @@ if (-not [string]::IsNullOrEmpty($Protocol)) {
         Write-Host "[-] Protocol '$Protocol' not found in $ProtocolsDir" -ForegroundColor Red
         exit 1
     }
+
+    $ProtocolCap = $Protocol.Substring(0,1).ToUpper() + $Protocol.Substring(1)
 }
+
+# ─── Listener binding defaults ─────────────────────────────────────────────────
+
+$ConfiguredListeners = @()
+if ($ListenerNames.Count -gt 0) {
+    foreach ($listenerName in $ListenerNames) {
+        if ([string]::IsNullOrWhiteSpace($listenerName)) { continue }
+        $ConfiguredListeners += $listenerName.Trim()
+    }
+} elseif (-not [string]::IsNullOrEmpty($Protocol)) {
+    # Auto-bind agent/listener generated with the same base name and protocol.
+    $ConfiguredListeners += "${AgentNameCap}${ProtocolCap}"
+} else {
+    # Backward-compatible base scaffold default.
+    $ConfiguredListeners += "GopherTCP"
+}
+
+if ($ConfiguredListeners.Count -eq 0) {
+    $ConfiguredListeners += "GopherTCP"
+}
+
+$ListenersYaml = ($ConfiguredListeners | ForEach-Object { "  - `"$_`"" }) -join "`n"
+$MultiListeners = if ($ConfiguredListeners.Count -gt 1) { "true" } else { "false" }
 
 Write-Host ""
 # ─── Language selection ──────────────────────────────────────────────────────
@@ -342,6 +369,8 @@ function Substitute-Template {
     $content = $content -replace '__NAME__', $AgentName
     $content = $content -replace '__WATERMARK__', $Watermark
     $content = $content -replace '__BUILD_TOOL__', $BuildTool
+    $content = $content.Replace('__LISTENER_NAMES__', $ListenersYaml)
+    $content = $content -replace '__MULTI_LISTENERS__', $MultiListeners
     # Write with UTF-8 no BOM
     [System.IO.File]::WriteAllText($Destination, $content, [System.Text.UTF8Encoding]::new($false))
 }
@@ -376,8 +405,12 @@ Substitute-Template (Join-Path $TemplateDir "plugin\$AxConfigVariant") (Join-Pat
 $BuildVariantMap = @{ "go" = "pl_build_go.go"; "cpp" = "pl_build_cpp.go"; "rust" = "pl_build_rust.go" }
 $BuildVariant = $BuildVariantMap[$Language]
 if (-not [string]::IsNullOrEmpty($BuildVariant)) {
-    $srcBuild = Join-Path $TemplateDir "plugin\$BuildVariant"
+    $protoBuild = if ($Protocol) { Join-Path $ProtoDir ("{0}.tmpl" -f $BuildVariant) } else { $null }
+    $srcBuild = if ($protoBuild -and (Test-Path $protoBuild)) { $protoBuild } else { Join-Path $TemplateDir "plugin\$BuildVariant" }
     if (Test-Path $srcBuild) {
+        if ($protoBuild -and ($srcBuild -eq $protoBuild)) {
+            Write-Host "  -> Using protocol-specific $BuildVariant from '$Protocol'" -ForegroundColor Yellow
+        }
         Substitute-Template $srcBuild (Join-Path $OutDir "pl_build.go")
     }
 }
@@ -581,7 +614,7 @@ function Process-EvasionMarkers {
 
 // Uncomment and adjust the path below to import your evasion module:
 // require evasion v0.0.0
-// replace evasion => ../path/to/evasion
+// add a local replace directive that points to your evasion module
 "@
                         $content = $content -replace '\s*// __EVASION_GOMOD__', $gomodBlock
                         $modified = $true

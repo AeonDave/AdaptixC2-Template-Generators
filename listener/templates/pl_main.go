@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -70,8 +71,10 @@ func (p *PluginListener) Create(name string, config string, customData []byte) (
 	)
 
 	if customData == nil {
-		if err = validConfig(config); err != nil {
-			return nil, listenerData, customdData, err
+		if "__LISTENER_TYPE__" != "internal" {
+			if err = validConfig(config); err != nil {
+				return nil, listenerData, customdData, err
+			}
 		}
 
 		err = json.Unmarshal([]byte(config), &conf)
@@ -82,6 +85,15 @@ func (p *PluginListener) Create(name string, config string, customData []byte) (
 		conf.Callback_addresses = strings.ReplaceAll(conf.Callback_addresses, " ", "")
 		conf.Callback_addresses = strings.ReplaceAll(conf.Callback_addresses, "\n", ", ")
 		conf.Callback_addresses = strings.TrimSuffix(conf.Callback_addresses, ", ")
+
+		if "__LISTENER_TYPE__" == "internal" {
+			if conf.Timeout < 1 {
+				conf.Timeout = 10
+			}
+			if conf.ErrorAnswer == "" {
+				conf.ErrorAnswer = "Connection error...\n"
+			}
+		}
 
 		conf.Protocol = "__PROTOCOL__"
 	} else {
@@ -99,12 +111,7 @@ func (p *PluginListener) Create(name string, config string, customData []byte) (
 		Active:        false,
 	}
 
-	listenerData = adaptix.ListenerData{
-		BindHost:  transport.Config.HostBind,
-		BindPort:  strconv.Itoa(transport.Config.PortBind),
-		AgentAddr: conf.Callback_addresses,
-		Status:    "Stopped",
-	}
+	listenerData = buildListenerData(transport)
 
 	if transport.Config.Ssl {
 		listenerData.Protocol = "mtls"
@@ -125,10 +132,20 @@ func (p *PluginListener) Create(name string, config string, customData []byte) (
 // ─── Start / Stop ──────────────────────────────────────────────────────────────
 
 func (l *Listener) Start() error {
+	if "__LISTENER_TYPE__" == "internal" {
+		l.transport.Active = true
+		return nil
+	}
+
 	return l.transport.Start(Ts)
 }
 
 func (l *Listener) Stop() error {
+	if "__LISTENER_TYPE__" == "internal" {
+		l.transport.Active = false
+		return nil
+	}
+
 	return l.transport.Stop()
 }
 
@@ -156,14 +173,20 @@ func (l *Listener) Edit(config string) (adaptix.ListenerData, []byte, error) {
 	l.transport.Config.ErrorAnswer = conf.ErrorAnswer
 	l.transport.Config.Timeout = conf.Timeout
 
-	listenerData = adaptix.ListenerData{
-		BindHost:  l.transport.Config.HostBind,
-		BindPort:  strconv.Itoa(l.transport.Config.PortBind),
-		AgentAddr: l.transport.Config.Callback_addresses,
-		Status:    "Listen",
-	}
-	if !l.transport.Active {
-		listenerData.Status = "Closed"
+	l.transport.Config.HostBind = conf.HostBind
+	l.transport.Config.PortBind = conf.PortBind
+	l.transport.Config.EncryptKey = conf.EncryptKey
+	l.transport.Config.Ssl = conf.Ssl
+	l.transport.Config.CaCert = conf.CaCert
+	l.transport.Config.ServerCert = conf.ServerCert
+	l.transport.Config.ServerKey = conf.ServerKey
+	l.transport.Config.ClientCert = conf.ClientCert
+	l.transport.Config.ClientKey = conf.ClientKey
+	l.transport.Config.Protocol = conf.Protocol
+
+	listenerData = buildListenerData(l.transport)
+	if l.transport.Config.Ssl {
+		listenerData.Protocol = "mtls"
 	}
 
 	var buffer bytes.Buffer
@@ -191,8 +214,62 @@ func (l *Listener) GetProfile() ([]byte, error) {
 
 // ─── InternalHandler ───────────────────────────────────────────────────────────
 // Called for internal listeners (bind_tcp, bind_smb). Not used for external listeners.
-// TODO: Implement if your listener_type is "internal".
 
 func (l *Listener) InternalHandler(data []byte) (string, error) {
-	return "", errors.New("not implemented")
+	if "__LISTENER_TYPE__" != "internal" {
+		return "", errors.New("listener is not internal")
+	}
+
+	encKey, err := hex.DecodeString(l.transport.Config.EncryptKey)
+	if err != nil {
+		return "", err
+	}
+
+	decrypted, err := DecryptData(data, encKey)
+	if err != nil {
+		return "", err
+	}
+
+	agentType, agentID, beat, err := ParseInternalAgentRegistration(decrypted)
+	if err != nil {
+		return "", err
+	}
+
+	if !Ts.TsAgentIsExists(agentID) {
+		_, err = Ts.TsAgentCreate(agentType, agentID, beat, l.transport.Name, "", false)
+		if err != nil {
+			return agentID, err
+		}
+	}
+
+	return agentID, nil
+}
+
+func buildListenerData(transport *Transport__NAME_CAP__) adaptix.ListenerData {
+	listenerData := adaptix.ListenerData{
+		BindHost:  transport.Config.HostBind,
+		BindPort:  strconv.Itoa(transport.Config.PortBind),
+		AgentAddr: transport.Config.Callback_addresses,
+		Status:    "Stopped",
+	}
+
+	if "__LISTENER_TYPE__" == "internal" {
+		listenerData.BindHost = ""
+		listenerData.BindPort = ""
+		listenerData.AgentAddr = "internal"
+		if transport.Active {
+			listenerData.Status = "Listen"
+		} else {
+			listenerData.Status = "Closed"
+		}
+		return listenerData
+	}
+
+	if transport.Active {
+		listenerData.Status = "Listen"
+	} else {
+		listenerData.Status = "Closed"
+	}
+
+	return listenerData
 }

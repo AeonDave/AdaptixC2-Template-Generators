@@ -8,6 +8,9 @@ import (
 // SKey is set from the embedded profile at startup (agent-side).
 var SKey []byte
 
+// KeySize is the expected embedded profile key size for adaptix_default.
+const KeySize = 32
+
 // EncryptData encrypts data with RC4.
 func EncryptData(data, key []byte) ([]byte, error) {
 	return RC4Crypt(data, key)

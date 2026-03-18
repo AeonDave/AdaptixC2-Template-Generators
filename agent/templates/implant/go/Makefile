@@ -1,4 +1,4 @@
-SRC_DIR := $(shell pwd)
+SRC_DIR := $(CURDIR)
 
 LDFLAGS := -s -w
 TRIMPATH := -trimpath

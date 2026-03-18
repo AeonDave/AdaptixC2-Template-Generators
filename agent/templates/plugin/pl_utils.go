@@ -48,17 +48,40 @@ const (
 	COMMAND_JOB_KILL   = 19
 	COMMAND_REV2SELF   = 20
 
-	COMMAND_TUNNEL_START  = 31
-	COMMAND_TUNNEL_STOP   = 32
-	COMMAND_TUNNEL_PAUSE  = 33
-	COMMAND_TUNNEL_RESUME = 34
+	COMMAND_DISKS      = 21
+	COMMAND_EXFIL      = 22
+	COMMAND_GETUID     = 23
+	COMMAND_LINK       = 24
+	COMMAND_PROFILE    = 25
+	COMMAND_SLEEP      = 26
+	COMMAND_BURST      = 27
+	COMMAND_TERMINATE  = 28
+	COMMAND_UNLINK     = 29
+	COMMAND_PIVOT_EXEC = 30
+
+	COMMAND_TUNNEL_START   = 31
+	COMMAND_TUNNEL_STOP    = 32
+	COMMAND_TUNNEL_PAUSE   = 33
+	COMMAND_TUNNEL_RESUME  = 34
+	COMMAND_TUNNEL_REVERSE = 41
 
 	COMMAND_TERMINAL_START = 35
 	COMMAND_TERMINAL_STOP  = 36
 
+	COMMAND_LPORTFWD_START = 37
+	COMMAND_LPORTFWD_STOP  = 38
+	COMMAND_RPORTFWD_START = 39
+	COMMAND_RPORTFWD_STOP  = 40
+
 	COMMAND_EXEC_BOF       = 50
 	COMMAND_EXEC_BOF_OUT   = 51
 	COMMAND_EXEC_BOF_ASYNC = 52
+)
+
+const (
+	DOWNLOAD_STATE_START    = 1
+	DOWNLOAD_STATE_CONTINUE = 2
+	DOWNLOAD_STATE_FINISH   = 3
 )
 
 // ─── BOF callback & error codes ────────────────────────────────────────────────
@@ -295,6 +318,11 @@ type ParamsTunnelResume struct {
 	ChannelId int `msgpack:"channel_id"`
 }
 
+type ParamsTunnelReverse struct {
+	TunnelId int `msgpack:"tunnel_id"`
+	Port     int `msgpack:"port"`
+}
+
 type ParamsTerminalStart struct {
 	TermId  int    `msgpack:"term_id"`
 	Program string `msgpack:"program"`
@@ -327,6 +355,147 @@ type AnsExecBofAsync struct {
 	Msgs   []byte `msgpack:"msgs"`
 	Start  bool   `msgpack:"start"`
 	Finish bool   `msgpack:"finish"`
+}
+
+// ─── Extended command types ───────────────────────────────────────────────────
+
+type DriveInfo struct {
+	Name string `msgpack:"name"`
+	Type string `msgpack:"type"`
+}
+
+type AnsDisks struct {
+	Drives []byte `msgpack:"drives"`
+}
+
+type ParamsExfil struct {
+	FileId string `msgpack:"file_id"`
+	Action int    `msgpack:"action"`
+}
+
+type AnsExfil struct {
+	FileId string `msgpack:"file_id"`
+	State  int    `msgpack:"state"`
+}
+
+type AnsGetuid struct {
+	Username string `msgpack:"username"`
+	Domain   string `msgpack:"domain"`
+	Elevated bool   `msgpack:"elevated"`
+}
+
+type ParamsLinkSmb struct {
+	Target   string `msgpack:"target"`
+	Pipename string `msgpack:"pipename"`
+}
+
+type ParamsLinkTcp struct {
+	Target string `msgpack:"target"`
+	Port   int    `msgpack:"port"`
+}
+
+type AnsLink struct {
+	LinkType  int    `msgpack:"link_type"`
+	Watermark string `msgpack:"watermark"`
+	Beat      []byte `msgpack:"beat"`
+}
+
+type ParamsProfile struct {
+	SubCmd   int    `msgpack:"subcmd"`
+	IntValue int    `msgpack:"int_value"`
+	StrValue string `msgpack:"str_value"`
+}
+
+type AnsProfile struct {
+	SubCmd   int    `msgpack:"subcmd"`
+	IntValue int    `msgpack:"int_value"`
+	StrValue string `msgpack:"str_value"`
+}
+
+type ParamsRportfwdStart struct {
+	Lport   int    `msgpack:"lport"`
+	Fwdhost string `msgpack:"fwdhost"`
+	Fwdport int    `msgpack:"fwdport"`
+}
+
+type ParamsRportfwdStop struct {
+	Lport int `msgpack:"lport"`
+}
+
+type ParamsSleep struct {
+	Sleep  int `msgpack:"sleep"`
+	Jitter int `msgpack:"jitter"`
+}
+
+type AnsSleep struct {
+	Sleep  int `msgpack:"sleep"`
+	Jitter int `msgpack:"jitter"`
+}
+
+type ParamsBurst struct {
+	SubCmd  int `msgpack:"subcmd"`
+	Enabled int `msgpack:"enabled"`
+	Sleep   int `msgpack:"sleep"`
+	Jitter  int `msgpack:"jitter"`
+}
+
+type AnsBurst struct {
+	Enabled int `msgpack:"enabled"`
+	Sleep   int `msgpack:"sleep"`
+	Jitter  int `msgpack:"jitter"`
+}
+
+type ParamsUnlink struct {
+	Id string `msgpack:"id"`
+}
+
+type AnsUnlink struct {
+	PivotId   string `msgpack:"pivot_id"`
+	PivotType int    `msgpack:"pivot_type"`
+}
+
+type AnsPivotExec struct {
+	PivotId string `msgpack:"pivot_id"`
+	Data    []byte `msgpack:"data"`
+}
+
+type AnsTerminate struct {
+	Method int `msgpack:"method"`
+}
+
+// ─── Tunnel response types ────────────────────────────────────────────────────
+
+type AnsTunnelStart struct {
+	ChannelId int  `msgpack:"channel_id"`
+	Success   bool `msgpack:"success"`
+}
+
+type AnsTunnelData struct {
+	ChannelId int    `msgpack:"channel_id"`
+	Data      []byte `msgpack:"data"`
+}
+
+type AnsTunnelClose struct {
+	ChannelId int `msgpack:"channel_id"`
+}
+
+type AnsTunnelReverse struct {
+	TunnelId  int  `msgpack:"tunnel_id"`
+	ChannelId int  `msgpack:"channel_id"`
+	Success   bool `msgpack:"success"`
+}
+
+type AnsTerminalStart struct {
+	TermId string `msgpack:"term_id"`
+}
+
+type AnsTerminalData struct {
+	TermId string `msgpack:"term_id"`
+	Data   []byte `msgpack:"data"`
+}
+
+type AnsTerminalClose struct {
+	TermId string `msgpack:"term_id"`
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -417,4 +586,11 @@ func SizeBytesToFormat(bytes int64) string {
 		return fmt.Sprintf("%.2f Mb", size/MB)
 	}
 	return fmt.Sprintf("%.2f Kb", size/KB)
+}
+
+func formatBurstStatus(enabled, sleep, jitter int) string {
+	if enabled == 0 {
+		return "disabled"
+	}
+	return fmt.Sprintf("enabled (sleep: %dms, jitter: %d%%)", sleep, jitter)
 }

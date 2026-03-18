@@ -211,10 +211,10 @@ func TunnelMessageClose(channelId int) adaptix.TaskData {
 }
 
 func TunnelMessageReverse(tunnelId int, port int) adaptix.TaskData {
-	// TODO: Implement reverse port forward initiation for your protocol.
-	// This callback is invoked when the teamserver needs the agent to open
-	// a listening port. Pack a COMMAND_RPORTFWD_START (or equivalent) here.
-	return makeProxyTask(nil)
+	packerData, _ := Marshal(ParamsTunnelReverse{TunnelId: tunnelId, Port: port})
+	cmd := Command{Code: COMMAND_TUNNEL_REVERSE, Data: packerData}
+	packData, _ := Marshal(cmd)
+	return makeProxyTask(packData)
 }
 
 // ─── Terminal callbacks ────────────────────────────────────────────────────────
@@ -345,15 +345,15 @@ func (ext *__NAME_CAP__Extender) PackTasks(agentData adaptix.AgentData, tasks []
 }
 
 func (ext *__NAME_CAP__Extender) PivotPackData(pivotId string, data []byte) (adaptix.TaskData, error) {
-	var (
-		packData []byte
-		err      error
-	)
-
-	// TODO: Wrap pivot data into your wire format.
-	_ = pivotId
-	_ = data
-	err = errors.New("pivot not implemented")
+	payload, err := Marshal(AnsPivotExec{PivotId: pivotId, Data: data})
+	if err != nil {
+		return adaptix.TaskData{}, err
+	}
+	cmd := Command{Code: COMMAND_PIVOT_EXEC, Data: payload}
+	packData, err := Marshal(cmd)
+	if err != nil {
+		return adaptix.TaskData{}, err
+	}
 
 	taskData := adaptix.TaskData{
 		TaskId: fmt.Sprintf("%08x", mrand.Uint32()),
@@ -362,7 +362,7 @@ func (ext *__NAME_CAP__Extender) PivotPackData(pivotId string, data []byte) (ada
 		Sync:   false,
 	}
 
-	return taskData, err
+	return taskData, nil
 }
 
 func (ext *__NAME_CAP__Extender) CreateCommand(agentData adaptix.AgentData, args map[string]any) (adaptix.TaskData, adaptix.ConsoleMessageData, error) {

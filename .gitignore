@@ -14,11 +14,11 @@ cmake-build-*/
 *.dylib
 *.test
 *.out
-go.work
-go.work.sum
-
 .env
 AGENTS.md
+
+go.work
+go.work.sum
 
 protocols/*/
 protocols/_crypto/*/

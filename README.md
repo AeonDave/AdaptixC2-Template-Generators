@@ -53,11 +53,11 @@ Generators produce **interface stubs and template structures** -- you fill in th
 |   +-- README.md                   Service + wrapper pipeline docs
 |   +-- templates/wrapper/          Wrapper addon overrides
 +-- protocols/                      Wire-protocol definitions + crypto templates
-    |-- _crypto/                    Crypto library (aes-gcm, rc4, xchacha20, spectre-ascon)
+    |-- _crypto/                    Crypto library (aes-gcm, rc4, xchacha20, and optional private templates)
     |-- _scaffold/                  Empty starting point (incl. C++/Rust implant stubs)
     |-- adaptix_gopher/             AES-256-GCM + msgpack
     |-- adaptix_default/            RC4 + binary packing
-    +-- spectre/                    ASCON-128 AEAD + binary reflection codec
+    +-- ...                         Private/internal protocol overlays (not documented publicly)
 ```
 
 ---
@@ -137,6 +137,9 @@ See [`agent/README.md`](agent/README.md) for generated structure, interfaces, to
 ### Listener
 
 Scaffolds a listener plugin with transport loop, crypto, and wire types from the selected protocol.
+The base listener template stays protocol-agnostic: protocol-specific framing, transport behavior,
+and internal registration parsing are supplied by protocol-owned overrides instead of hardcoded logic
+in the core templates.
 
 | Parameter | PowerShell | Bash | Default |
 |-----------|-----------|------|---------|
@@ -149,6 +152,10 @@ Scaffolds a listener plugin with transport loop, crypto, and wire types from the
 ```
 
 See [`listener/README.md`](listener/README.md) for generated structure and template placeholders.
+
+When `-ListenerType internal` is used, the generated listener does not open a socket. Instead, it exposes
+`InternalHandler()` and relies on a protocol-owned `pl_internal.go.tmpl` override to decode the first
+decrypted registration packet into `(agent type, agent id, beat)` for `TsAgentCreate(...)`.
 
 ### Service / Wrapper
 
@@ -192,7 +199,7 @@ Bundled crypto templates in `protocols/_crypto/`:
 | `aes-gcm.go.tmpl` | AES-256-GCM (authenticated) |
 | `rc4.go.tmpl` | RC4 stream cipher |
 | `xchacha20.go.tmpl` | XChaCha20-Poly1305 (authenticated) |
-| `spectre-ascon.go.tmpl` | ASCON-128 AEAD (lightweight) |
+| private/internal templates | Additional AEAD / stream cipher variants kept out of the public protocol docs |
 
 You can also create custom `.go.tmpl` files in `_crypto/` -- they are discovered automatically.
 
@@ -220,8 +227,84 @@ When both are generated with the same `-Protocol`, they are guaranteed wire-comp
 |------|--------|---------|-------------|
 | `adaptix_gopher` | AES-256-GCM | msgpack + 4-byte BE length prefix | Gopher-agent compatible |
 | `adaptix_default` | RC4 | Binary packing + 4-byte length prefix | Wire-compatible with beacon agents/listeners |
-| `spectre` | ASCON-128 AEAD | Binary reflection + SPZ1 compression | Padded ASCON envelope + masked obfuscation tag |
 | `_scaffold` | (stub) | (stub) | Empty starting point for custom protocols |
+
+### Compatibility, Quality, and Readiness
+
+The bundled protocols do **not** all have the same maturity level. Distinguish between:
+
+- **wire compatibility** — crypto, framing, constants, registration format, and task/response encoding
+- **reference implant completeness** — how many server-requested features are already implemented in the generated Go/C++/Rust implants
+
+| Protocol | Wire compatibility target | Listener/plugin status | Generated implant status | Practical readiness |
+|----------|---------------------------|------------------------|--------------------------|---------------------|
+| `adaptix_default` | Existing Adaptix beacon agents/listeners | Strong: listener transport and server-side task/response handling follow the beacon-compatible RC4 + binary protocol | Go templates cover the public command surface used by the bundled generator flow, including file ops, process/exec paths, screenshots, BOF sync/async plumbing, downloads/uploads, and job control; C++/Rust remain template scaffolds | Ready for Go-based beacon-compatible template generation and interoperability validation |
+| `adaptix_gopher` | Existing Adaptix gopher agents/listeners | Strong: framing and command model match the gopher protocol family | Go templates share the completed runtime path for file ops, process/exec paths, screenshots, BOF sync/async plumbing, and job control; C++/Rust remain template scaffolds | Ready for Go-based gopher-compatible template generation and interoperability validation |
+
+These readiness statements are intentionally **template-scoped**:
+
+- the public wire contracts are ready to import into new agent/listener templates
+- the generated Go path is the validated reference path for interoperability work
+- the generated C++ and Rust paths remain scaffolds that a developer must finish before expecting feature parity
+- advanced transport/pivot surfaces are part of the public wire vocabulary, but a generated implant may still choose to leave some of them as explicit unsupported responses until a developer implements the runtime behavior
+
+The historical implementation language of an original Adaptix family does **not** automatically define the most complete template path in this repository. Readiness is based on the generated code that exists here today, not on upstream lineage.
+
+### Original Adaptix Compatibility
+
+#### `adaptix_default`
+
+`adaptix_default` is the repository's **beacon-wire-compatible** protocol. Its metadata and templates are designed to match the original Adaptix beacon family:
+
+- RC4 encryption
+- beacon-style binary packing
+- big-endian registration header for listener handshake
+- little-endian task packing / big-endian response parsing
+- beacon-compatible command identifiers and server-side task processing model
+
+What this means in practice:
+
+- a **new listener** generated with `-Protocol adaptix_default` is intended to interoperate with an **agent that implements the original Adaptix beacon wire format**
+- a **new agent** generated with `-Protocol adaptix_default` is intended to interoperate with an **original Adaptix beacon-style listener**, provided the runtime behavior needed by the server command set is actually implemented in that generated implant
+- a **new adaptix_default agent + new adaptix_default listener** generated from this repository are expected to be wire-compatible with each other
+
+Important caveat: wire compatibility does **not** automatically mean feature parity. In this repository today, the Go reference implant is further along than the C++ and Rust reference implants for `adaptix_default`; for example, the current C++ and Rust adaptix_default commanders still return explicit unsupported responses for commands such as `run`, `shell`, `screenshot`, `zip`, and `exec_bof` until a developer finishes those runtime handlers.
+
+#### `adaptix_gopher`
+
+`adaptix_gopher` is the repository's **gopher-wire-compatible** protocol. Its metadata and templates target the original Adaptix gopher family:
+
+- AES-256-GCM
+- msgpack message model
+- 4-byte big-endian length prefix
+- gopher-style command and response envelope layout
+
+What this means in practice:
+
+- a **new listener** generated with `-Protocol adaptix_gopher` is intended to interoperate with an **agent that implements the original Adaptix gopher wire format**
+- a **new agent** generated with `-Protocol adaptix_gopher` is intended to interoperate with an **original Adaptix gopher listener**, provided you stay within the command surface already implemented in the generated implant
+- a **new adaptix_gopher agent + new adaptix_gopher listener** generated from this repository are expected to interoperate with each other
+
+The public Go template path now includes BOF sync/async plumbing and background job control, so `adaptix_gopher` can be treated as the supported msgpack/AES-GCM compatibility option for generator-produced Go agents and listeners.
+
+Private/internal protocols may exist in this repository, but they are intentionally not documented as public bundled options here.
+
+### Which protocol should I use?
+
+Use:
+
+- `adaptix_default` when you want **beacon-family interoperability** or a binary protocol that tracks the original Adaptix beacon model
+- `adaptix_gopher` when you want **gopher-family interoperability** or a msgpack/AES-GCM protocol with simpler extension ergonomics
+
+### Recommended Usage Pattern
+
+For production-facing work, treat the bundled protocols like this:
+
+1. Choose the protocol for the listener/agent family you need
+2. Generate **both** sides with the same `-Protocol`
+3. Use the generated code as the authoritative wire contract
+4. If you are not using Go for the implant, review the language-specific stubs before assuming feature parity
+5. Validate against your target listener/agent pair with the exact commands you expect operators to use
 
 ### Protocol File Layout
 
@@ -238,6 +321,8 @@ protocols/<name>/
 ```
 
 Optional overrides: `pl_main.go.tmpl` (replaces plugin logic) and `pl_transport.go.tmpl` (replaces listener transport) for protocols that need different command packing or framing.
+If a protocol supports internal listeners, add `pl_internal.go.tmpl` to own the parsing of the decrypted
+registration packet. The core listener template must remain protocol-agnostic.
 The `implant/` directory provides per-language source overrides for the implant side (protocol structs, tasks, main loop, etc.).
 
 The `__PACKAGE__` placeholder is context-dependent:
@@ -254,7 +339,8 @@ The `__PACKAGE__` placeholder is context-dependent:
 2. Implement `crypto.go.tmpl`, `constants.go.tmpl`, `types.go.tmpl`
 3. Add language-specific implant overrides in `implant/` if needed (Go at root, `cpp/`, `rust/`)
 4. Update `meta.yaml`
-5. Generate with `-Protocol <name>` and validate with `go vet`
+5. If the protocol supports internal listeners, add `pl_internal.go.tmpl` to parse the decrypted registration packet
+6. Generate with `-Protocol <name>` and validate with `go vet`
 
 ---
 
@@ -316,11 +402,9 @@ make full
 .\generator.ps1 -Mode listener -Name falcon -Protocol adaptix_default -ListenerType external
 ```
 
-Link them in the agent's `config.yaml`:
-
-```yaml
-listeners: ["FalconAdaptix_default"]
-```
+When the agent and listener share the same base name and protocol, the agent generator auto-binds
+`config.yaml -> listeners:` to the generated listener name (`<NameCap><ProtocolCap>`). Override this only when you
+intentionally want one agent to advertise multiple listener names.
 
 ### Wrapper + Agent (Crystal Palace-style)
 
@@ -375,6 +459,12 @@ Agent Implant  <----[protocol]---->  Listener Plugin  <----[axc2 msgpack]---->  
   You implement                     You implement                         Fixed API (axc2 v1.2.0)
   (impl/*.go)                       (pl_transport.go)
 ```
+
+The design rule is extensibility-first:
+
+- core generator logic should stay protocol-agnostic
+- protocol-specific behavior belongs in protocol-owned override files
+- adding a new protocol should prefer adding files under `protocols/<name>/` over adding name-based branching to the generators
 
 ---
 

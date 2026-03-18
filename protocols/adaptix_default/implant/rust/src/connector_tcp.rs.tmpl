@@ -1,0 +1,91 @@
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::time::Duration;
+
+use crate::crypto;
+
+pub struct ConnectorTCP {
+    host: String,
+    port: u16,
+    timeout_secs: u64,
+    stream: Option<TcpStream>,
+}
+
+impl ConnectorTCP {
+    pub fn new() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 4444,
+            timeout_secs: 10,
+            stream: None,
+        }
+    }
+
+    pub fn set_target(&mut self, address: &str, timeout_secs: u64) -> Result<(), String> {
+        let trimmed = address.trim();
+        if trimmed.is_empty() {
+            return Err("empty callback address".to_string());
+        }
+        if let Some((host, port)) = trimmed.rsplit_once(':') {
+            self.host = host.trim().to_string();
+            self.port = port.trim().parse::<u16>().map_err(|err| format!("invalid port in {trimmed}: {err}"))?;
+        } else {
+            self.host = trimmed.to_string();
+            self.port = 4444;
+        }
+        self.timeout_secs = timeout_secs.max(1);
+        self.stream = None;
+        Ok(())
+    }
+
+    pub fn connect(&mut self) -> Result<(), String> {
+        if self.stream.is_some() {
+            return Ok(());
+        }
+        let addr = format!("{}:{}", self.host, self.port);
+        let stream = TcpStream::connect(&addr).map_err(|err| format!("failed to connect to {addr}: {err}"))?;
+        let timeout = Duration::from_secs(self.timeout_secs.max(1));
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
+        self.stream = Some(stream);
+        Ok(())
+    }
+
+    pub fn send_frame(&mut self, plain: &[u8], key: &[u8]) -> Result<(), String> {
+        self.connect()?;
+        let stream = self.stream.as_mut().ok_or_else(|| "missing TCP stream".to_string())?;
+
+        let encrypted = if plain.is_empty() {
+            Vec::new()
+        } else {
+            crypto::encrypt(plain, key).map_err(|err| err.to_string())?
+        };
+
+        let len = (encrypted.len() as u32).to_be_bytes();
+        stream.write_all(&len).map_err(|err| format!("failed to send frame size: {err}"))?;
+        if !encrypted.is_empty() {
+            stream.write_all(&encrypted).map_err(|err| format!("failed to send frame body: {err}"))?;
+        }
+        Ok(())
+    }
+
+    pub fn recv_frame(&mut self, key: &[u8]) -> Result<Vec<u8>, String> {
+        self.connect()?;
+        let stream = self.stream.as_mut().ok_or_else(|| "missing TCP stream".to_string())?;
+
+        let mut size_buf = [0u8; 4];
+        stream.read_exact(&mut size_buf).map_err(|err| format!("failed to read frame size: {err}"))?;
+        let size = u32::from_be_bytes(size_buf) as usize;
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut encrypted = vec![0u8; size];
+        stream.read_exact(&mut encrypted).map_err(|err| format!("failed to read frame body: {err}"))?;
+        crypto::decrypt(&encrypted, key).map_err(|err| err.to_string())
+    }
+
+    pub fn disconnect(&mut self) {
+        self.stream = None;
+    }
+}

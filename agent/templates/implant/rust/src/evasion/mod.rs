@@ -24,6 +24,7 @@
 //
 
 mod default;
+#[allow(unused_imports)]
 pub use default::DefaultGate;
 
 /// Gate is the single entry point for all OS-level evasion primitives.

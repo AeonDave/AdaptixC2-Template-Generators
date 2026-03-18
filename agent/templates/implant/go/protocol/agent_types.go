@@ -7,6 +7,13 @@ package protocol
 const (
 	COMMAND_UNKNOWN = 1
 
+	INIT_PACK     = 1
+	EXFIL_PACK    = 2
+	JOB_PACK      = 3
+	TUNNEL_PACK   = 4
+	TERMINAL_PACK = 5
+	BOF_PACK      = 6
+
 	COMMAND_FS_LIST     = 10
 	COMMAND_FS_UPLOAD   = 11
 	COMMAND_FS_DOWNLOAD = 12
@@ -41,10 +48,18 @@ const (
 	RESP_OS_PS         = 22
 	RESP_OS_SCREENSHOT = 23
 	RESP_OS_SHELL      = 24
-
-	EXFIL_PACK = 100
-	JOB_PACK   = 101
 )
+
+type StartMsg struct {
+	Type int    `msgpack:"id"`
+	Data []byte `msgpack:"data"`
+}
+
+type InitPack struct {
+	Id   uint   `msgpack:"id"`
+	Type uint   `msgpack:"type"`
+	Data []byte `msgpack:"data"`
+}
 
 // ─── Agent-side types ──────────────────────────────────────────────────────────
 // Used by impl/ interfaces and tasks.go dispatcher. These are shared across all
@@ -64,6 +79,32 @@ type ProcessEntry struct {
 	User    string `msgpack:"user"`
 	Arch    string `msgpack:"arch"`
 	Session uint32 `msgpack:"session"`
+}
+
+// BofMsg represents a single output callback from a BOF execution.
+// Used by impl/bof_loader.go.
+type BofMsg struct {
+	Type int    `msgpack:"type"`
+	Data []byte `msgpack:"data"`
+}
+
+// ParamsExecBof is the command payload for BOF execution.
+type ParamsExecBof struct {
+	Object   []byte `msgpack:"object"`
+	ArgsPack string `msgpack:"argspack"`
+	Task     string `msgpack:"task"`
+}
+
+// AnsExecBof is the response for synchronous BOF execution.
+type AnsExecBof struct {
+	Msgs []byte `msgpack:"msgs"`
+}
+
+// AnsExecBofAsync is the response for asynchronous BOF execution.
+type AnsExecBofAsync struct {
+	Msgs   []byte `msgpack:"msgs"`
+	Start  bool   `msgpack:"start"`
+	Finish bool   `msgpack:"finish"`
 }
 
 // ─── File system request params ────────────────────────────────────────────────

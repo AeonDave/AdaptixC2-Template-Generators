@@ -19,6 +19,7 @@ type Stage struct {
 // BuildContext carries shared state through the pipeline.
 type BuildContext struct {
 	AgentName string
+	BuilderId string
 	FileName  string
 	ModuleDir string
 	Extra     map[string]any
@@ -55,17 +56,17 @@ func RunPipeline(payload []byte, cfg map[string]string, ctx *BuildContext) ([]by
 			enabled = (v == "true" || v == "1")
 		}
 		if !enabled {
-			logBuild("", BuildLogInfo, fmt.Sprintf("[%s] skipped (disabled)", s.Name))
+			logBuild(ctx.BuilderId, BuildLogInfo, fmt.Sprintf("[%s] skipped (disabled)", s.Name))
 			continue
 		}
-		logBuild("", BuildLogInfo, fmt.Sprintf("[%s] running...", s.Name))
+		logBuild(ctx.BuilderId, BuildLogInfo, fmt.Sprintf("[%s] running...", s.Name))
 
 		result, err := s.Run(current, cfg, ctx)
 		if err != nil {
-			logBuild("", BuildLogError, fmt.Sprintf("[%s] failed: %v", s.Name, err))
+			logBuild(ctx.BuilderId, BuildLogError, fmt.Sprintf("[%s] failed: %v", s.Name, err))
 			return nil, fmt.Errorf("stage %s: %w", s.Name, err)
 		}
-		logBuild("", BuildLogInfo, fmt.Sprintf("[%s] done (%d → %d bytes)", s.Name, len(current), len(result)))
+		logBuild(ctx.BuilderId, BuildLogInfo, fmt.Sprintf("[%s] done (%d → %d bytes)", s.Name, len(current), len(result)))
 		current = result
 	}
 	return current, nil

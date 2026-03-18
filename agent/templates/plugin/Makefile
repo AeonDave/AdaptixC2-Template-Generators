@@ -1,4 +1,4 @@
-PLUGIN_DIR := $(shell pwd)
+PLUGIN_DIR := $(CURDIR)
 SRC_DIR    := $(PLUGIN_DIR)/src___NAME__
 PLUGIN_OUT := $(PLUGIN_DIR)/agent___NAME__.so
 

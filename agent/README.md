@@ -70,8 +70,12 @@ When a protocol is selected, the generator overlays:
 
 For **C++ and Rust** implants, protocols can also provide language-specific overlays in `protocols/<name>/implant/cpp/` and `protocols/<name>/implant/rust/`. These override the base implant templates for protocol structs, wire format, and tasks.
 
-Bundled: `adaptix_default` (RC4 + binary), `adaptix_gopher` (AES-GCM + msgpack), `spectre` (ASCON-128 + binary reflection).
+Bundled public protocols: `adaptix_default` (RC4 + binary) and `adaptix_gopher` (AES-GCM + msgpack).
+Private/internal protocol overlays may also exist in `protocols/`, but they are not documented as public options here.
+The original implementation language of a protocol family does not imply that the same implant language is the most complete template path in this repository; use the generated code maturity here as the source of truth.
 Agents and listeners using the **same protocol** share identical encryption and wire types.
+The core agent generator stays protocol-agnostic: when a protocol needs custom behavior, it should provide
+protocol-owned override files under `protocols/<name>/` instead of relying on name-based branching in the generator.
 See the root README for protocol creation and crypto swap documentation.
 
 ---
@@ -291,6 +295,16 @@ AdaptixC2 uses **string name matching** to pair agents with listeners:
 2. Each listener plugin declares its `listener_name:` in its own `config.yaml`
 3. **Names must match exactly** — the Adaptix UI only shows matching listeners when building your agent
 
+When `-Protocol <name>` is used, the generator auto-populates `config.yaml -> listeners:` with:
+
+- `<AgentNameCap><ProtocolCap>`
+
+Example:
+
+- `-Name minibind2 -Protocol adaptix_gopher` → `listeners: ["Minibind2Adaptix_gopher"]`
+
+Override this only when one agent should intentionally advertise multiple listener names.
+
 ### Examples
 
 | Agent | `listeners:` | Supported protocols |
@@ -305,8 +319,9 @@ AdaptixC2 uses **string name matching** to pair agents with listeners:
 
 ### Adding listener support
 
-1. Edit `config.yaml` → add the listener name to the `listeners:` list
-2. In `pl_main.go` → `GenerateProfiles()`, add a `switch listenerType` branch to parse the new listener's protocol-specific fields
-3. In the implant's `impl/agent.go`, implement or override `Dial()` if the new protocol requires a different transport (e.g. HTTP polling, DNS tunneling)
+1. Prefer generating the agent and listener with the same basename + protocol so auto-binding is correct by default
+2. If one agent must support multiple listener names, edit `config.yaml -> listeners:` explicitly
+3. In `pl_main.go` → `GenerateProfiles()`, add a `switch listenerType` branch only when the listener profile fields differ
+4. In the implant's `impl/agent.go`, implement or override `Dial()` if the transport changes (e.g. HTTP polling, DNS tunneling)
 
-The default scaffold comes with `GopherTCP` support. The listener selection happens **in the Adaptix UI at build time**, not during generation.
+Listener selection still happens **in the Adaptix UI at build time**; generation now sets the default listener name to match the generated listener scaffold.

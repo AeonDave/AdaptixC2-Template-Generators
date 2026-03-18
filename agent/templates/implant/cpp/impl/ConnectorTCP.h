@@ -1,9 +1,12 @@
-// __NAME__ Agent — TCP Connector (Stub)
+// __NAME__ Agent — TCP Connector
 //
 // Concrete Connector implementation for raw TCP transport.
-// TODO: Implement all methods.
+// The base template accepts a simple textual profile: "host:port".
 
 #pragma once
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
 
 #include "Connector.h"
 
@@ -13,6 +16,9 @@ private:
     BYTE* recvBuffer = nullptr;
     int   recvLen    = 0;
     WORD  port       = 0;
+    SOCKET clientSocket = INVALID_SOCKET;
+    BOOL   wsaStarted   = FALSE;
+    char   host[256]    = "127.0.0.1";
 
 public:
     ConnectorTCP();

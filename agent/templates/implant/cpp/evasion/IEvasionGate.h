@@ -30,6 +30,9 @@
 
 #pragma once
 
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
 #include <windows.h>
 #include <stdint.h>
 

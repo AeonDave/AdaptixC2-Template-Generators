@@ -1,0 +1,30 @@
+package main
+
+import "fmt"
+
+type internalStartMsg struct {
+	Type int    `msgpack:"id"`
+	Data []byte `msgpack:"data"`
+}
+
+type internalInitPack struct {
+	Id   uint   `msgpack:"id"`
+	Type uint   `msgpack:"type"`
+	Data []byte `msgpack:"data"`
+}
+
+func ParseInternalAgentRegistration(decrypted []byte) (string, string, []byte, error) {
+	var start internalStartMsg
+	if err := Unmarshal(decrypted, &start); err != nil {
+		return "", "", nil, err
+	}
+
+	var initPack internalInitPack
+	if err := Unmarshal(start.Data, &initPack); err != nil {
+		return "", "", nil, err
+	}
+
+	agentType := fmt.Sprintf("%08x", initPack.Type)
+	agentID := fmt.Sprintf("%08x", initPack.Id)
+	return agentType, agentID, initPack.Data, nil
+}

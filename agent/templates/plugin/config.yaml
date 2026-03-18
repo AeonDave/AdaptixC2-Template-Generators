@@ -12,8 +12,8 @@ agent_watermark: "__WATERMARK__"
 #   - Single protocol (like gopher_agent):  ["GopherTCP"]
 #   - Multi protocol  (like beacon_agent):  ["BeaconHTTP", "BeaconTCP", "BeaconSMB", "BeaconDNS"]
 listeners:
-  - "GopherTCP"
+__LISTENER_NAMES__
 
 # multi_listeners: true  = embed multiple listener profiles in one build
 # multi_listeners: false = one listener profile per build
-multi_listeners: true
+multi_listeners: __MULTI_LISTENERS__

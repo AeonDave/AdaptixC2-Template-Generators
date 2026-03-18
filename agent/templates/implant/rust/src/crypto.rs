@@ -4,15 +4,13 @@
 // (e.g. AES-256-GCM, RC4, ChaCha20).
 
 /// Decrypt data using the session key.
-pub fn decrypt(data: &[u8], key: &[u8]) -> Vec<u8> {
-    // TODO: Implement decryption matching your protocol
-    let _ = (data, key);
-    Vec::new()
+pub fn decrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let _ = key;
+    Ok(data.to_vec())
 }
 
 /// Encrypt data using the session key.
-pub fn encrypt(data: &[u8], key: &[u8]) -> Vec<u8> {
-    // TODO: Implement encryption matching your protocol
-    let _ = (data, key);
-    Vec::new()
+pub fn encrypt(data: &[u8], key: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let _ = key;
+    Ok(data.to_vec())
 }

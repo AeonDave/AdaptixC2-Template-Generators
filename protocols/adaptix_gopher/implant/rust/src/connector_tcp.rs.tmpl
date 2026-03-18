@@ -1,0 +1,47 @@
+use crate::protocol;
+use crate::protocol::Profile;
+use std::io::Read;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::Duration;
+
+pub struct ConnectorTCP {
+    profile: Profile,
+}
+
+impl ConnectorTCP {
+    pub fn new(profile: Profile) -> Self {
+        Self { profile }
+    }
+
+    pub fn connect_to(&self, address: &str) -> Result<TcpStream, String> {
+        if self.profile.use_ssl {
+            return Err("TLS transport is not yet implemented in the Rust gopher scaffold".to_string());
+        }
+
+        let timeout = Duration::from_secs(self.profile.conn_timeout.max(1) as u64);
+        let addr = address
+            .to_socket_addrs()
+            .map_err(|e| format!("resolve {address}: {e}"))?
+            .next()
+            .ok_or_else(|| format!("no socket address resolved for {address}"))?;
+
+        let mut stream = TcpStream::connect_timeout(&addr, timeout)
+            .map_err(|e| format!("connect {address}: {e}"))?;
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
+
+        if self.profile.banner_size > 0 {
+            let mut discard = vec![0u8; self.profile.banner_size as usize];
+            stream
+                .read_exact(&mut discard)
+                .map_err(|e| format!("read banner: {e}"))?;
+        }
+
+        Ok(stream)
+    }
+
+    pub fn exchange(&self, stream: &mut TcpStream, data: &[u8]) -> Result<Vec<u8>, String> {
+        protocol::tcp_send_msg(stream, data).map_err(|e| format!("send frame: {e}"))?;
+        protocol::tcp_recv_msg(stream).map_err(|e| format!("recv frame: {e}"))
+    }
+}

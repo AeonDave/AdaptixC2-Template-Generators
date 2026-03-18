@@ -5,6 +5,9 @@
 
 #include "crypto.h"
 
+#include <stdlib.h>
+#include <string.h>
+
 void RC4Init(unsigned char* key, unsigned char* S, int keyLength)
 {
     int j = 0;
@@ -46,4 +49,34 @@ void EncryptRC4(unsigned char* data, int dataLength, unsigned char* key, int key
 void DecryptRC4(unsigned char* data, int dataLength, unsigned char* key, int keyLength)
 {
     EncryptRC4(data, dataLength, key, keyLength);
+}
+
+uint8_t* EncryptData(const uint8_t* data, uint32_t dataLen, const uint8_t* key, uint32_t keyLen, uint32_t* outLen)
+{
+    if (outLen) {
+        *outLen = 0;
+    }
+    if (!data || dataLen == 0) {
+        return nullptr;
+    }
+
+    uint8_t* out = (uint8_t*)malloc(dataLen);
+    if (!out) {
+        return nullptr;
+    }
+
+    memcpy(out, data, dataLen);
+    if (key && keyLen > 0) {
+        EncryptRC4(out, (int)dataLen, (unsigned char*)key, (int)keyLen);
+    }
+
+    if (outLen) {
+        *outLen = dataLen;
+    }
+    return out;
+}
+
+uint8_t* DecryptData(const uint8_t* data, uint32_t dataLen, const uint8_t* key, uint32_t keyLen, uint32_t* outLen)
+{
+    return EncryptData(data, dataLen, key, keyLen, outLen);
 }

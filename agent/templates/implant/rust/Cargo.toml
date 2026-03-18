@@ -11,5 +11,6 @@ strip = true
 panic = "abort"
 
 [dependencies]
-# TODO: Add dependencies for your protocol/crypto implementation
+libc = "0.2"
+# Protocol overlays may append extra dependencies here when needed.
 # __EVASION_FEATURES__

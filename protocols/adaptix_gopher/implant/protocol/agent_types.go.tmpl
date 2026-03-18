@@ -1,9 +1,68 @@
 package protocol
 
+// ─── Agent-side pack constants ────────────────────────────────────────────────
+// The shared Go implant bootstrap expects these handshake types to exist in the
+// protocol package. Gopher uses msgpack envelopes for the initial registration
+// and job/exfil side channels, matching the original extender.
+
+const (
+	INIT_PACK     = 1
+	EXFIL_PACK    = 2
+	JOB_PACK      = 3
+	TUNNEL_PACK   = 4
+	TERMINAL_PACK = 5
+	BOF_PACK      = 6
+)
+
+type StartMsg struct {
+	Type int    `msgpack:"id"`
+	Data []byte `msgpack:"data"`
+}
+
+type InitPack struct {
+	Id   uint   `msgpack:"id"`
+	Type uint   `msgpack:"type"`
+	Data []byte `msgpack:"data"`
+}
+
+type ExfilPack struct {
+	Id   uint   `msgpack:"id"`
+	Type uint   `msgpack:"type"`
+	Task string `msgpack:"task"`
+}
+
+type JobPack struct {
+	Id   uint   `msgpack:"id"`
+	Type uint   `msgpack:"type"`
+	Task string `msgpack:"task"`
+}
+
+type TunnelPack struct {
+	Id        uint   `msgpack:"id"`
+	Type      uint   `msgpack:"type"`
+	ChannelId int    `msgpack:"channel_id"`
+	Key       []byte `msgpack:"key"`
+	Iv        []byte `msgpack:"iv"`
+	Alive     bool   `msgpack:"alive"`
+	Reason    byte   `msgpack:"reason"`
+}
+
+type TermPack struct {
+	Id     uint   `msgpack:"id"`
+	TermId int    `msgpack:"term_id"`
+	Key    []byte `msgpack:"key"`
+	Iv     []byte `msgpack:"iv"`
+	Alive  bool   `msgpack:"alive"`
+	Status string `msgpack:"status"`
+}
+
 // ─── Compatibility aliases ─────────────────────────────────────────────────────
-// These aliases let impl/interfaces.go compile against adaptix_gopher/spectre protocol
-// types. The underlying types are defined in the overlay protocol.go.
+// These aliases let impl/interfaces.go compile against adaptix_gopher protocol
+// types. The underlying rich types are defined in the overlay protocol.go.
 
 type DirEntry = FileInfo
 
 type ProcessEntry = PsInfo
+
+// NOTE: BOF types (BofMsg, ParamsExecBof, AnsExecBof, AnsExecBofAsync) are
+// defined in protocol.go (from types.go.tmpl) for this protocol.
