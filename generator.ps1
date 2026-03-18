@@ -54,39 +54,80 @@ $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# ─── Banner ─────────────────────────────────────────────────────────────────────
+# ─── UI helpers ────────────────────────────────────────────────────────────────
 
-Write-Host ""
-Write-Host "╔═══════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║   AdaptixC2 Template Generator                ║" -ForegroundColor Cyan
-Write-Host "╚═══════════════════════════════════════════════╝" -ForegroundColor Cyan
-Write-Host ""
+function Write-CyberBanner {
+    Write-Host ""
+    Write-Host "┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓" -ForegroundColor DarkGreen
+    Write-Host "┃   █████╗ ██████╗  █████╗ ██████╗ ████████╗██╗██╗  ██╗ ██████╗██████╗   ┃" -ForegroundColor DarkGreen
+    Write-Host "┃  ██╔══██╗██╔══██╗██╔══██╗██╔══██╗╚══██╔══╝██║╚██╗██╔╝██╔════╝╚════██╗  ┃" -ForegroundColor DarkGreen
+    Write-Host "┃  ███████║██║  ██║███████║██████╔╝   ██║   ██║ ╚███╔╝ ██║      █████╔╝  ┃" -ForegroundColor Green
+    Write-Host "┃  ██╔══██║██║  ██║██╔══██║██╔═══╝    ██║   ██║ ██╔██╗ ██║     ██╔═══╝   ┃" -ForegroundColor Green
+    Write-Host "┃  ██║  ██║██████╔╝██║  ██║██║        ██║   ██║██╔╝ ██╗╚██████╗███████╗  ┃" -ForegroundColor DarkGreen
+    Write-Host "┃  ╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝        ╚═╝   ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝  ┃" -ForegroundColor DarkGreen
+    Write-Host "┃                                                                        ┃" -ForegroundColor DarkGreen
+    Write-Host "┃          Template Generator // agents • listeners • services           ┃" -ForegroundColor Green
+    Write-Host "┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛" -ForegroundColor DarkGreen
+    Write-Host ""
+}
+
+function Write-CyberSection([string]$Title) {
+    Write-Host "[:: $Title ::]" -ForegroundColor Cyan
+}
+
+function Write-CyberHint([string]$Message) {
+    Write-Host "    $Message" -ForegroundColor DarkGray
+}
+
+function Write-CyberMenu([string]$Prompt, [array]$Items) {
+    Write-CyberSection $Prompt
+    Write-Host ""
+    for ($i = 0; $i -lt $Items.Count; $i++) {
+        $item = $Items[$i]
+        $index = "[{0}]" -f ($i + 1)
+        Write-Host "  $index" -ForegroundColor Green -NoNewline
+        Write-Host " $($item.Label)" -ForegroundColor Cyan -NoNewline
+        if ($item.ContainsKey('Tag') -and -not [string]::IsNullOrWhiteSpace($item.Tag)) {
+            Write-Host "  <$($item.Tag)>" -ForegroundColor DarkGreen -NoNewline
+        }
+        Write-Host ""
+        Write-CyberHint $item.Desc
+    }
+    Write-Host ""
+}
+
+function Read-Choice([string]$Prompt, [int]$Min, [int]$Max) {
+    $raw = Read-Host $Prompt
+    $value = 0
+    if (-not [int]::TryParse($raw, [ref]$value) -or $value -lt $Min -or $value -gt $Max) {
+        Write-Host "[-] Invalid choice." -ForegroundColor Red
+        exit 1
+    }
+    return $value
+}
+
+function Write-LaunchMessage([string]$Name) {
+    Write-Host "[>] Launching $Name..." -ForegroundColor Cyan
+    Write-Host ""
+}
+
+Write-CyberBanner
 
 # ─── Mode selection ─────────────────────────────────────────────────────────────
 
 $modes = @(
-    @{ Key = "agent";    Label = "Generate Agent";    Desc = "Scaffold a new agent extender" },
-    @{ Key = "listener"; Label = "Generate Listener"; Desc = "Scaffold a new listener extender" },
-    @{ Key = "service";  Label = "Generate Service";  Desc = "Scaffold a new service extender (optionally with wrapper pipeline)" },
-    @{ Key = "protocol"; Label = "Create Protocol";   Desc = "Create a new wire-protocol definition" },
-    @{ Key = "crypto";   Label = "Create Crypto";     Desc = "Generate or replace the crypto template for a protocol" },
-    @{ Key = "delete";   Label = "Delete";            Desc = "Remove a crypto template, protocol, or generated output" }
+    @{ Key = "agent";    Label = "Generate Agent";    Desc = "Scaffold a new agent extender"; Tag = "GO/CPP/RUST" },
+    @{ Key = "listener"; Label = "Generate Listener"; Desc = "Scaffold a new listener extender"; Tag = "TRANSPORT" },
+    @{ Key = "service";  Label = "Generate Service";  Desc = "Scaffold a new service extender"; Tag = "HOOKS" },
+    @{ Key = "wrapper";  Label = "Generate Wrapper";  Desc = "Scaffold a service with wrapper pipeline mode enabled"; Tag = "PIPELINE" },
+    @{ Key = "protocol"; Label = "Create Protocol";   Desc = "Create a new wire-protocol definition"; Tag = "WIRE" },
+    @{ Key = "crypto";   Label = "Create Crypto";     Desc = "Generate or replace the crypto template for a protocol"; Tag = "CRYPTO" },
+    @{ Key = "delete";   Label = "Delete";            Desc = "Remove a crypto template, protocol, or generated output"; Tag = "CLEANUP" }
 )
 
 if ([string]::IsNullOrEmpty($Mode)) {
-    Write-Host "What do you want to generate?" -ForegroundColor Cyan
-    Write-Host ""
-    for ($i = 0; $i -lt $modes.Count; $i++) {
-        Write-Host "  [$($i+1)] $($modes[$i].Label)" -ForegroundColor White -NoNewline
-        Write-Host "  - $($modes[$i].Desc)" -ForegroundColor DarkGray
-    }
-    Write-Host ""
-    $choice = Read-Host "Select option"
-    $idx = [int]$choice
-    if ($idx -lt 1 -or $idx -gt $modes.Count) {
-        Write-Host "[-] Invalid choice." -ForegroundColor Red
-        exit 1
-    }
+    Write-CyberMenu "Select generation mode" $modes
+    $idx = Read-Choice "Select option" 1 $modes.Count
     $Mode = $modes[$idx - 1].Key
 }
 
@@ -108,51 +149,42 @@ if ($args.Count -gt 0) {
 switch ($Mode) {
     "agent" {
         $target = Join-Path $ScriptDir "agent\generator.ps1"
-        Write-Host "[*] Launching Agent Generator..." -ForegroundColor Yellow
-        Write-Host ""
+        Write-LaunchMessage "Agent Generator"
         & $target @fwdArgs @extraArgs
     }
     "listener" {
         $target = Join-Path $ScriptDir "listener\generator.ps1"
-        Write-Host "[*] Launching Listener Generator..." -ForegroundColor Yellow
-        Write-Host ""
+        Write-LaunchMessage "Listener Generator"
         & $target @fwdArgs @extraArgs
     }
     "service" {
         $target = Join-Path $ScriptDir "service\generator.ps1"
-        Write-Host "[*] Launching Service Generator..." -ForegroundColor Yellow
-        Write-Host ""
+        Write-LaunchMessage "Service Generator"
         & $target @fwdArgs @extraArgs
     }
     "wrapper" {
         $target = Join-Path $ScriptDir "service\generator.ps1"
-        Write-Host "[*] Launching Service Generator (wrapper mode)..." -ForegroundColor Yellow
-        Write-Host ""
+        Write-LaunchMessage "Service Generator (wrapper mode)"
         & $target -Wrapper @fwdArgs @extraArgs
     }
     "protocol" {
         $target = Join-Path $ScriptDir "protocols\generator.ps1"
-        Write-Host "[*] Launching Protocol Generator..." -ForegroundColor Yellow
-        Write-Host ""
+        Write-LaunchMessage "Protocol Generator"
         & $target @fwdArgs @extraArgs
     }
     "crypto" {
         $target = Join-Path $ScriptDir "protocols\crypto_generator.ps1"
-        Write-Host "[*] Launching Crypto Generator..." -ForegroundColor Yellow
-        Write-Host ""
+        Write-LaunchMessage "Crypto Generator"
         & $target @fwdArgs @extraArgs
     }
     "delete" {
-        Write-Host "What do you want to delete?" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "  [1] Crypto template" -ForegroundColor White -NoNewline
-        Write-Host "  - Remove a crypto .go.tmpl from _crypto/" -ForegroundColor DarkGray
-        Write-Host "  [2] Protocol" -ForegroundColor White -NoNewline
-        Write-Host "  - Remove an entire protocol definition" -ForegroundColor DarkGray
-        Write-Host "  [3] Generated output" -ForegroundColor White -NoNewline
-        Write-Host "  - Remove a generated project from output/" -ForegroundColor DarkGray
-        Write-Host ""
-        $delChoice = Read-Host "Select option"
+        $deleteModes = @(
+            @{ Key = "1"; Label = "Crypto template"; Desc = "Remove a crypto .go.tmpl from _crypto/"; Tag = "WIPE" },
+            @{ Key = "2"; Label = "Protocol"; Desc = "Remove an entire protocol definition"; Tag = "PURGE" },
+            @{ Key = "3"; Label = "Generated output"; Desc = "Remove a generated project from output/"; Tag = "SCRUB" }
+        )
+        Write-CyberMenu "Select deletion target" $deleteModes
+        $delChoice = [string](Read-Choice "Select option" 1 $deleteModes.Count)
 
         switch ($delChoice) {
             "1" {
@@ -165,18 +197,14 @@ switch ($Mode) {
                 if ($items.Count -eq 0) {
                     Write-Host "[-] No crypto templates found." -ForegroundColor Red; exit 1
                 }
+                Write-CyberSection "Available crypto templates"
                 Write-Host ""
-                Write-Host "Available crypto templates:" -ForegroundColor Cyan
                 for ($i = 0; $i -lt $items.Count; $i++) {
                     $key = $items[$i].BaseName -replace '\.go$', ''
-                    Write-Host "  [$($i+1)] $key"
+                    Write-Host "  [$($i+1)] $key" -ForegroundColor Cyan
                 }
                 Write-Host ""
-                $pick = Read-Host "Select crypto to delete"
-                $pIdx = [int]$pick
-                if ($pIdx -lt 1 -or $pIdx -gt $items.Count) {
-                    Write-Host "[-] Invalid choice." -ForegroundColor Red; exit 1
-                }
+                $pIdx = Read-Choice "Select crypto to delete" 1 $items.Count
                 $target = $items[$pIdx - 1]
                 $targetName = $target.BaseName -replace '\.go$', ''
                 $confirm = Read-Host "Delete crypto '$targetName'? [y/N]"
@@ -197,17 +225,13 @@ switch ($Mode) {
                 if ($items.Count -eq 0) {
                     Write-Host "[-] No deletable protocols found." -ForegroundColor Red; exit 1
                 }
+                Write-CyberSection "Available protocols"
                 Write-Host ""
-                Write-Host "Available protocols:" -ForegroundColor Cyan
                 for ($i = 0; $i -lt $items.Count; $i++) {
-                    Write-Host "  [$($i+1)] $($items[$i].Name)"
+                    Write-Host "  [$($i+1)] $($items[$i].Name)" -ForegroundColor Cyan
                 }
                 Write-Host ""
-                $pick = Read-Host "Select protocol to delete"
-                $pIdx = [int]$pick
-                if ($pIdx -lt 1 -or $pIdx -gt $items.Count) {
-                    Write-Host "[-] Invalid choice." -ForegroundColor Red; exit 1
-                }
+                $pIdx = Read-Choice "Select protocol to delete" 1 $items.Count
                 $target = $items[$pIdx - 1]
                 $confirm = Read-Host "Delete protocol '$($target.Name)' and all its files? [y/N]"
                 if ($confirm -ne 'y') { Write-Host "Cancelled."; exit 0 }
@@ -232,17 +256,13 @@ switch ($Mode) {
                 if ($items.Count -eq 0) {
                     Write-Host "[-] No generated projects found in $outDir" -ForegroundColor Red; exit 1
                 }
+                Write-CyberSection "Generated projects in ${outDir}"
                 Write-Host ""
-                Write-Host "Generated projects in ${outDir}:" -ForegroundColor Cyan
                 for ($i = 0; $i -lt $items.Count; $i++) {
-                    Write-Host "  [$($i+1)] $($items[$i].Name)"
+                    Write-Host "  [$($i+1)] $($items[$i].Name)" -ForegroundColor Cyan
                 }
                 Write-Host ""
-                $pick = Read-Host "Select project to delete"
-                $pIdx = [int]$pick
-                if ($pIdx -lt 1 -or $pIdx -gt $items.Count) {
-                    Write-Host "[-] Invalid choice." -ForegroundColor Red; exit 1
-                }
+                $pIdx = Read-Choice "Select project to delete" 1 $items.Count
                 $target = $items[$pIdx - 1]
                 $confirm = Read-Host "Delete '$($target.Name)' and all its contents? [y/N]"
                 if ($confirm -ne 'y') { Write-Host "Cancelled."; exit 0 }
