@@ -3,6 +3,7 @@
 
 out/
 output/
+docs/
 
 cmake-build-*/
 *.iws
