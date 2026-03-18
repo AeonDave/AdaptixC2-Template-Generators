@@ -97,21 +97,35 @@ The implant directory (`src_<name>/`) varies by language.
 ├── pl_build.go          # Build logic (Go)
 ├── ax_config.axs        # UI & command registration
 └── src_<name>/
-    ├── go.mod           # Implant Go module
-    ├── Makefile         # Cross-platform implant build
-    ├── config.go        # Encrypted profile placeholder
-    ├── main.go          # Connection loop
-    ├── tasks.go         # Command dispatch
+    ├── go.mod               # Implant Go module
+    ├── Makefile             # Cross-platform implant build
+    ├── config.go            # Encrypted profile placeholder
+    ├── main.go              # Connection loop + C2 transport
+    ├── tasks.go             # Command dispatch switch
+    ├── async_jobs.go        # Background job management
+    ├── runtime_common.go    # Shared runtime helpers (dir listing, process list, shell, screenshot)
+    ├── runtime_message.go   # Encrypted message send/receive helpers
     ├── crypto/
-    │   └── crypto.go    # AES-256-GCM (ready to use)
+    │   └── crypto.go        # Protocol crypto (from protocol overlay)
     ├── protocol/
-    │   └── protocol.go  # Wire types & framing (ready to use)
-    └── impl/
-        ├── interfaces.go    # Interface contracts (read-only)
-        ├── agent.go         # Cross-platform: Stealth + Transport
-        ├── agent_linux.go   # Linux stubs      ← IMPLEMENT
-        ├── agent_windows.go # Windows stubs    ← IMPLEMENT
-        └── agent_darwin.go  # macOS stubs      ← IMPLEMENT
+    │   ├── protocol.go      # Wire types & framing
+    │   └── agent_types.go   # Protocol adapter types (DirEntry, ProcessEntry helpers)
+    ├── impl/
+    │   ├── interfaces.go    # Interface contracts (read-only reference)
+    │   ├── agent.go         # Cross-platform: Stealth + Transport
+    │   ├── agent_linux.go   # Linux: platform info, process listing, screenshot
+    │   ├── agent_windows.go # Windows: platform info, process listing, screenshot
+    │   ├── agent_darwin.go  # macOS stubs
+    │   ├── bof_loader.go    # COFF/BOF parser + loader
+    │   ├── downloader.go    # File download chunking
+    │   ├── jobs.go          # Async job state machine
+    │   └── shared_runtime.go # Reusable runtime (dir entries, shell, screenshot)
+    └── evasion/             # (only with -Evasion flag)
+        ├── gate.go          # Gate interface definition
+        ├── default.go       # Default panic implementation
+        ├── gate_linux.go    # Linux gate stub
+        ├── gate_windows.go  # Windows gate stub
+        └── gate_darwin.go   # macOS gate stub
 ```
 
 ### C++
@@ -119,16 +133,29 @@ The implant directory (`src_<name>/`) varies by language.
 ```
 <name>_agent/
 ├── (same plugin files)
-├── pl_build.go          # Build logic (C++: profile_gen.h + make)
-├── ax_config.axs        # C++: arch, format (Exe/DLL/Shellcode), svc_name
+├── pl_build.go              # Build logic (C++: profile_gen.h + make)
+├── ax_config.axs            # C++: arch, format (Exe/DLL/Shellcode), svc_name
 └── src_<name>/
-    ├── Makefile         # MinGW cross-compile targets
-    ├── main.cpp / config.h / config.cpp
-    ├── agent.h / agent.cpp
-    ├── crypto.h / crypto.cpp
-    ├── protocol.h / protocol.cpp
-    └── impl/
-        └── agent_windows.h / agent_windows.cpp  ← IMPLEMENT
+    ├── Makefile             # MinGW cross-compile targets
+    ├── main.cpp             # Entry point (service/DLL/exe modes)
+    ├── config.h / config.cpp # Profile placeholder
+    ├── crypto/
+    │   └── crypto.h / crypto.cpp   # Protocol crypto
+    ├── protocol/
+    │   └── protocol.h / protocol.cpp # Wire types & framing
+    ├── impl/
+    │   ├── Agent.h / Agent.cpp           # Agent lifecycle + C2 loop
+    │   ├── Commander.h / Commander.cpp   # Command dispatch
+    │   ├── Connector.h                   # Transport interface
+    │   ├── ConnectorTCP.h / ConnectorTCP.cpp # TCP transport
+    │   ├── Downloader.h / Downloader.cpp # Download chunking
+    │   ├── JobsController.h / JobsController.cpp # Async job control
+    │   ├── RuntimeCommon.h / RuntimeCommon.cpp   # Shared OS/runtime helpers
+    │   ├── RuntimeErrors.h / RuntimeErrors.cpp   # Error code mapping
+    │   ├── bof_loader.h / bof_loader.cpp         # COFF/BOF parser + loader
+    └── evasion/             # (only with -Evasion flag)
+        ├── IEvasionGate.h   # Gate interface
+        ├── DefaultGate.h / DefaultGate.cpp  # Default panic implementation
 ```
 
 ### Rust
@@ -136,22 +163,60 @@ The implant directory (`src_<name>/`) varies by language.
 ```
 <name>_agent/
 ├── (same plugin files)
-├── pl_build.go          # Build logic (Rust: config.rs + cargo build)
-├── ax_config.axs        # OS + arch selection
+├── pl_build.go              # Build logic (Rust: config.rs + cargo build)
+├── ax_config.axs            # OS + arch selection
 └── src_<name>/
-    ├── Cargo.toml       # Release profile (size-optimised)
-    ├── Makefile         # cargo build targets
+    ├── Cargo.toml           # Release profile (size-optimised)
+    ├── Makefile             # cargo build targets
     └── src/
-        ├── main.rs      # Entry point
-        ├── config.rs    # Profile data (populated at build time)
-        ├── crypto.rs    # Encrypt/decrypt stubs
-        ├── protocol.rs  # Wire protocol + watermark
-        └── agent.rs     # Connector trait + Agent  ← IMPLEMENT
+        ├── main.rs              # Entry point
+        ├── config.rs            # Profile data (populated at build time)
+        ├── crypto.rs            # Protocol crypto
+        ├── protocol.rs          # Wire types, framing, watermark
+        ├── agent.rs             # Agent lifecycle + C2 loop
+        ├── commander.rs         # Command dispatch
+        ├── connector_tcp.rs     # TCP transport
+        ├── bof.rs               # COFF/BOF parser + loader
+        ├── downloader.rs        # Download chunking
+        ├── jobs.rs              # Async job control
+        ├── runtime_common.rs    # Shared runtime helpers
+        ├── runtime_fs.rs        # Filesystem helpers
+        └── runtime_response.rs  # Response building helpers
 ```
 
 ---
 
-## Interfaces
+## Evasion Gate
+
+Add `-Evasion` (PowerShell) or `EVASION=1` (Bash) to scaffold an evasion abstraction layer
+in the implant source. This provides a unified `Gate` interface for syscall/stack-spoof
+techniques without coupling the agent's command logic to a specific evasion implementation.
+
+```powershell
+.\generator.ps1 -Mode agent -Name phantom -Evasion
+```
+```bash
+NAME=phantom EVASION=1 ./generator.sh
+```
+
+**Behavior:**
+
+- **With `-Evasion`**: an `evasion/` directory is created in the implant source with a `Gate` interface
+  (5 methods: `Init`, `Syscall`, `ResolveFn`, `Call`, `Close`) and a default implementation that panics
+  on all methods, forcing you to provide a real implementation. Template marker comments (`// __EVASION_*__`)
+  are expanded into real evasion calls.
+- **Without `-Evasion`**: no `evasion/` directory is created, and all `// __EVASION_*__` markers are
+  stripped from the generated code.
+
+| Language | Evasion files |
+|----------|---------------|
+| Go | `evasion/gate.go`, `default.go`, `gate_linux.go`, `gate_windows.go`, `gate_darwin.go` |
+| C++ | `evasion/IEvasionGate.h`, `DefaultGate.h`, `DefaultGate.cpp` |
+| Rust | Not yet implemented |
+
+---
+
+## Interfaces (Go)
 
 All platform-specific behavior is defined via Go interfaces in `impl/interfaces.go`.
 
@@ -167,17 +232,17 @@ type Stealth interface {
 ### Platform
 ```go
 type Platform interface {
-    GetCP() uint32              // Console code page (Windows ACP, 65001 for UTF-8)
-    IsElevated() bool           // Running as root / admin
-    GetOsVersion() string       // "Windows 11 23H2" / "Ubuntu 22.04" / etc.
-    NormalizePath(p string) string // Expand ~ or . to absolute path
+    GetCP() uint32                     // Console code page (Windows ACP, 65001 for UTF-8)
+    IsElevated() bool                  // Running as root / admin
+    GetOsVersion() string              // "Windows 11 23H2" / "Ubuntu 22.04" / etc.
+    NormalizePath(path string) string  // Expand ~ or . to absolute path
 }
 ```
 
 ### FileSystem
 ```go
 type FileSystem interface {
-    GetListing(dir string) (string, []protocol.DirEntry, error)
+    GetListing(path string) (string, []protocol.DirEntry, error)
     CopyFile(src, dst string) error
     CopyDir(src, dst string) error
 }
@@ -186,7 +251,7 @@ type FileSystem interface {
 ### Execution
 ```go
 type Execution interface {
-    RunShell(cmd string, risky, piped bool) (string, error)
+    RunShell(cmd string, output bool, wait bool) (string, error)
     ListProcesses() ([]protocol.ProcessEntry, error)
     CaptureScreenshot() ([]byte, error)
 }
@@ -195,7 +260,7 @@ type Execution interface {
 ### Transport
 ```go
 type Transport interface {
-    Dial(address string, profile *protocol.Profile) (net.Conn, error)
+    Dial(addr string, profile *protocol.Profile) (net.Conn, error)
 }
 ```
 
