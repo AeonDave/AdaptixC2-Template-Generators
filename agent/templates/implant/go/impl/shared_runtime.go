@@ -32,12 +32,7 @@ func listDirEntries(path string) (string, []protocol.DirEntry, error) {
 		if err != nil {
 			continue
 		}
-		out = append(out, protocol.DirEntry{
-			Name:    entry.Name(),
-			IsDir:   entry.IsDir(),
-			Size:    info.Size(),
-			ModTime: info.ModTime().Unix(),
-		})
+		out = append(out, protocol.NewDirEntry(entry.Name(), entry.IsDir(), info.Size(), info.ModTime().Unix()))
 	}
 	return abs, out, nil
 }
@@ -74,7 +69,7 @@ func parseUnixPS(out []byte) []protocol.ProcessEntry {
 		}
 		user := fields[2]
 		name := strings.Join(fields[3:], " ")
-		procs = append(procs, protocol.ProcessEntry{Pid: uint32(pid), PPid: uint32(ppid), Name: name, User: user, Arch: "", Session: 0})
+		procs = append(procs, protocol.NewProcessEntry(uint32(pid), uint32(ppid), name, user, "", 0))
 	}
 	return procs
 }
@@ -100,7 +95,7 @@ func parseWindowsTasklist(out []byte) ([]protocol.ProcessEntry, error) {
 				session = uint32(v)
 			}
 		}
-		procs = append(procs, protocol.ProcessEntry{Pid: uint32(pid), PPid: 0, Name: strings.TrimSpace(rec[0]), User: "", Arch: "", Session: session})
+		procs = append(procs, protocol.NewProcessEntry(uint32(pid), 0, strings.TrimSpace(rec[0]), "", "", session))
 	}
 	return procs, nil
 }

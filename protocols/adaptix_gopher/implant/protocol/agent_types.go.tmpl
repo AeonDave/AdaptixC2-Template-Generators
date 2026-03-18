@@ -1,5 +1,10 @@
 package protocol
 
+import (
+	"fmt"
+	"time"
+)
+
 // ─── Agent-side pack constants ────────────────────────────────────────────────
 // The shared Go implant bootstrap expects these handshake types to exist in the
 // protocol package. Gopher uses msgpack envelopes for the initial registration
@@ -56,13 +61,62 @@ type TermPack struct {
 	Status string `msgpack:"status"`
 }
 
-// ─── Compatibility aliases ─────────────────────────────────────────────────────
-// These aliases let impl/interfaces.go compile against adaptix_gopher protocol
-// types. The underlying rich types are defined in the overlay protocol.go.
+// ─── Agent runtime helpers ─────────────────────────────────────────────────────
 
-type DirEntry = FileInfo
+type DirEntry struct {
+	Name    string
+	IsDir   bool
+	Size    int64
+	ModTime int64
+}
 
-type ProcessEntry = PsInfo
+type ProcessEntry struct {
+	Pid     uint32
+	PPid    uint32
+	Name    string
+	User    string
+	Arch    string
+	Session uint32
+}
+
+func NewDirEntry(name string, isDir bool, size int64, modTime int64) DirEntry {
+	return DirEntry{Name: name, IsDir: isDir, Size: size, ModTime: modTime}
+}
+
+func NewProcessEntry(pid uint32, ppid uint32, name string, user string, arch string, session uint32) ProcessEntry {
+	return ProcessEntry{Pid: pid, PPid: ppid, Name: name, User: user, Arch: arch, Session: session}
+}
+
+func MarshalDirEntries(entries []DirEntry) ([]byte, error) {
+	files := make([]FileInfo, 0, len(entries))
+	for _, entry := range entries {
+		date := ""
+		if entry.ModTime > 0 {
+			date = time.Unix(entry.ModTime, 0).UTC().Format("02/01/2006 15:04")
+		}
+		files = append(files, FileInfo{
+			Size:     entry.Size,
+			Date:     date,
+			Filename: entry.Name,
+			IsDir:    entry.IsDir,
+		})
+	}
+	return Marshal(files)
+}
+
+func MarshalProcessEntries(entries []ProcessEntry) ([]byte, error) {
+	procs := make([]PsInfo, 0, len(entries))
+	for _, entry := range entries {
+		procs = append(procs, PsInfo{
+			Pid:     int(entry.Pid),
+			Ppid:    int(entry.PPid),
+			Tty:     fmt.Sprintf("%d", entry.Session),
+			Context: entry.User,
+			Process: entry.Name,
+		})
+	}
+	return Marshal(procs)
+}
 
 // NOTE: BOF types (BofMsg, ParamsExecBof, AnsExecBof, AnsExecBofAsync) are
 // defined in protocol.go (from types.go.tmpl) for this protocol.

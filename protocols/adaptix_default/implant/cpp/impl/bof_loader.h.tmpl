@@ -19,44 +19,44 @@
 #pragma pack(push, 1)
 
 typedef struct _COF_HEADER {
-    short Machine;
-    short NumberOfSections;
-    int   TimeDateStamp;
-    int   PointerToSymbolTable;
-    int   NumberOfSymbols;
-    short SizeOfOptionalHeader;
-    short Characteristics;
+    uint16_t Machine;
+    uint16_t NumberOfSections;
+    uint32_t TimeDateStamp;
+    uint32_t PointerToSymbolTable;
+    uint32_t NumberOfSymbols;
+    uint16_t SizeOfOptionalHeader;
+    uint16_t Characteristics;
 } COF_HEADER;
 
 typedef struct _COF_SECTION {
     char  Name[8];
-    int   VirtualSize;
-    int   VirtualAddress;
-    int   SizeOfRawData;
-    int   PointerToRawData;
-    int   PointerToRelocations;
-    int   PointerToLineNumbers;
-    short NumberOfRelocations;
-    short NumberOfLinenumbers;
-    int   Characteristics;
+    uint32_t VirtualSize;
+    uint32_t VirtualAddress;
+    uint32_t SizeOfRawData;
+    uint32_t PointerToRawData;
+    uint32_t PointerToRelocations;
+    uint32_t PointerToLineNumbers;
+    uint16_t NumberOfRelocations;
+    uint16_t NumberOfLinenumbers;
+    uint32_t Characteristics;
 } COF_SECTION;
 
 typedef struct _COF_RELOCATION {
-    int   VirtualAddress;
-    int   SymbolTableIndex;
-    short Type;
+    uint32_t VirtualAddress;
+    uint32_t SymbolTableIndex;
+    uint16_t Type;
 } COF_RELOCATION;
 
 typedef struct _COF_SYMBOL {
     union {
         char cName[8];
-        int  dwName[2];
+        uint32_t dwName[2];
     } Name;
-    int   Value;
-    short SectionNumber;
-    short Type;
-    char  StorageClass;
-    char  NumberOfAuxSymbols;
+    uint32_t Value;
+    int16_t SectionNumber;
+    uint16_t Type;
+    uint8_t StorageClass;
+    uint8_t NumberOfAuxSymbols;
 } COF_SYMBOL;
 
 #pragma pack(pop)

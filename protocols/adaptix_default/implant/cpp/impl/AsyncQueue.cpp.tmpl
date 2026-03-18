@@ -1,0 +1,92 @@
+#include "AsyncQueue.h"
+
+#include <windows.h>
+
+#include <string.h>
+
+#include <vector>
+
+namespace {
+struct AsyncQueueState {
+    CRITICAL_SECTION lock;
+    std::vector<uint8_t> inner;
+
+    AsyncQueueState() {
+        InitializeCriticalSection(&lock);
+    }
+
+    ~AsyncQueueState() {
+        DeleteCriticalSection(&lock);
+    }
+};
+
+AsyncQueueState& state()
+{
+    static AsyncQueueState s;
+    return s;
+}
+
+void appendUint32BE(std::vector<uint8_t>* out, uint32_t value)
+{
+    out->push_back((uint8_t)(value >> 24));
+    out->push_back((uint8_t)(value >> 16));
+    out->push_back((uint8_t)(value >> 8));
+    out->push_back((uint8_t)value);
+}
+
+std::vector<uint8_t> wrapBinaryInner(const std::vector<uint8_t>& inner)
+{
+    std::vector<uint8_t> out;
+    if (inner.empty()) {
+        return out;
+    }
+    out.reserve(inner.size() + 4);
+    appendUint32BE(&out, (uint32_t)(inner.size() + 4));
+    out.insert(out.end(), inner.begin(), inner.end());
+    return out;
+}
+}
+
+namespace async_queue {
+
+void QueueBinaryResponse(uint32_t taskId, uint32_t commandId, const uint8_t* payload, uint32_t payloadLen)
+{
+    std::vector<uint8_t> frame;
+    frame.reserve((size_t)payloadLen + 8);
+    appendUint32BE(&frame, taskId);
+    appendUint32BE(&frame, commandId);
+    if (payloadLen > 0 && payload) {
+        frame.insert(frame.end(), payload, payload + payloadLen);
+    }
+
+    AsyncQueueState& s = state();
+    EnterCriticalSection(&s.lock);
+    s.inner.insert(s.inner.end(), frame.begin(), frame.end());
+    LeaveCriticalSection(&s.lock);
+}
+
+std::vector<uint8_t> MergeBinaryResponseBlob(const uint8_t* blob, uint32_t blobSize)
+{
+    AsyncQueueState& s = state();
+    std::vector<uint8_t> queued;
+
+    EnterCriticalSection(&s.lock);
+    queued.swap(s.inner);
+    LeaveCriticalSection(&s.lock);
+
+    if (queued.empty()) {
+        if (!blob || blobSize == 0) {
+            return std::vector<uint8_t>();
+        }
+        return std::vector<uint8_t>(blob, blob + blobSize);
+    }
+
+    std::vector<uint8_t> inner;
+    if (blob && blobSize >= 4) {
+        inner.insert(inner.end(), blob + 4, blob + blobSize);
+    }
+    inner.insert(inner.end(), queued.begin(), queued.end());
+    return wrapBinaryInner(inner);
+}
+
+} // namespace async_queue

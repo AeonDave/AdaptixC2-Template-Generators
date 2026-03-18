@@ -1,0 +1,11 @@
+#pragma once
+
+#include <stdint.h>
+#include <vector>
+
+namespace async_queue {
+
+void QueueBinaryResponse(uint32_t taskId, uint32_t commandId, const uint8_t* payload, uint32_t payloadLen);
+std::vector<uint8_t> MergeBinaryResponseBlob(const uint8_t* blob, uint32_t blobSize);
+
+} // namespace async_queue

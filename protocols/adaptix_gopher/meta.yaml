@@ -1,5 +1,5 @@
 name: "adaptix_gopher"
 version: "1.0"
-description: "AES-256-GCM encryption + msgpack framing (gopher-agent compatible)"
+description: "AES-128-GCM encryption + msgpack framing (gopher-agent compatible)"
 crypto: "aes-gcm"
 framing: "msgpack + length-prefix (4-byte BE)"

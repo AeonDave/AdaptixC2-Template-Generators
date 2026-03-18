@@ -81,6 +81,34 @@ type ProcessEntry struct {
 	Session uint32 `msgpack:"session"`
 }
 
+func NewDirEntry(name string, isDir bool, size int64, modTime int64) DirEntry {
+	return DirEntry{
+		Name:    name,
+		IsDir:   isDir,
+		Size:    size,
+		ModTime: modTime,
+	}
+}
+
+func NewProcessEntry(pid uint32, ppid uint32, name string, user string, arch string, session uint32) ProcessEntry {
+	return ProcessEntry{
+		Pid:     pid,
+		PPid:    ppid,
+		Name:    name,
+		User:    user,
+		Arch:    arch,
+		Session: session,
+	}
+}
+
+func MarshalDirEntries(entries []DirEntry) ([]byte, error) {
+	return Marshal(entries)
+}
+
+func MarshalProcessEntries(entries []ProcessEntry) ([]byte, error) {
+	return Marshal(entries)
+}
+
 // BofMsg represents a single output callback from a BOF execution.
 // Used by impl/bof_loader.go.
 type BofMsg struct {

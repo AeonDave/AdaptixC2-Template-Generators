@@ -2,14 +2,14 @@
 //
 // Main agent logic: connection loop, command dispatch, and transport.
 
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::crypto;
 use crate::protocol;
 use crate::commander;
 use crate::jobs::JobsController;
 use crate::downloader::Downloader;
+use crate::runtime_common;
 
 /// Connector trait — implement for each transport (TCP, HTTP, etc.)
 pub trait Connector {
@@ -133,61 +133,17 @@ impl Agent {
 
     /// Sleep for self.sleep_ms adjusted by ±jitter%.
     pub fn sleep_with_jitter(&self) {
-        let ms = self.sleep_ms as i64;
-        let actual = if self.jitter > 0 && self.jitter <= 90 {
-            let j = self.jitter as i64;
-            // simple LCG-style rand from timestamp — not crypto, just jitter
-            let seed = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos() as i64;
-            let pct = (seed % (j * 2 + 1)) - j;
-            let adj = ms * pct / 100;
-            let total = ms + adj;
-            if total < 0 { 0u64 } else { total as u64 }
-        } else {
-            ms as u64
-        };
-        thread::sleep(Duration::from_millis(actual));
+        runtime_common::sleep_with_jitter(self.sleep_ms, self.jitter, 0);
     }
 
     /// Returns true if kill_date has passed.
     pub fn should_exit(&self) -> bool {
-        if self.kill_date <= 0 {
-            return false;
-        }
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        now >= self.kill_date
+        runtime_common::should_exit(self.kill_date)
     }
 
     /// Block until the current time falls within [work_start, work_end).
     /// If both are 0, returns immediately.
     pub fn wait_for_working_hours(&self) {
-        if self.work_start == 0 && self.work_end == 0 {
-            return;
-        }
-        loop {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            // seconds since midnight (UTC)
-            let day_secs = (now % 86400) as i32;
-            let hhmm = (day_secs / 3600) * 100 + (day_secs % 3600) / 60;
-
-            let in_window = if self.work_start <= self.work_end {
-                hhmm >= self.work_start && hhmm < self.work_end
-            } else {
-                // overnight window: e.g. 2200-0600
-                hhmm >= self.work_start || hhmm < self.work_end
-            };
-            if in_window {
-                break;
-            }
-            thread::sleep(Duration::from_secs(60));
-        }
+        runtime_common::wait_for_working_hours(self.work_start, self.work_end)
     }
 }

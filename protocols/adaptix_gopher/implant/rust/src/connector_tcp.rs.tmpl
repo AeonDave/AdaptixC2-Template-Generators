@@ -40,6 +40,7 @@ impl ConnectorTCP {
         Ok(stream)
     }
 
+    #[allow(dead_code)]
     pub fn exchange(&self, stream: &mut TcpStream, data: &[u8]) -> Result<Vec<u8>, String> {
         protocol::tcp_send_msg(stream, data).map_err(|e| format!("send frame: {e}"))?;
         protocol::tcp_recv_msg(stream).map_err(|e| format!("recv frame: {e}"))

@@ -1,0 +1,190 @@
+#include "crypto.h"
+
+#include <windows.h>
+#include <bcrypt.h>
+
+#include <stdlib.h>
+#include <string.h>
+#include <vector>
+#include <wchar.h>
+
+namespace {
+
+static bool initAlg(BCRYPT_ALG_HANDLE* alg)
+{
+    if (!alg) {
+        return false;
+    }
+
+    NTSTATUS st = BCryptOpenAlgorithmProvider(alg, BCRYPT_AES_ALGORITHM, NULL, 0);
+    if (st < 0) {
+        return false;
+    }
+
+    st = BCryptSetProperty(
+        *alg,
+        BCRYPT_CHAINING_MODE,
+        (PUCHAR)BCRYPT_CHAIN_MODE_GCM,
+        (ULONG)((wcslen(BCRYPT_CHAIN_MODE_GCM) + 1) * sizeof(wchar_t)),
+        0);
+    if (st < 0) {
+        BCryptCloseAlgorithmProvider(*alg, 0);
+        *alg = NULL;
+        return false;
+    }
+
+    return true;
+}
+
+static bool aesGcmCrypt(
+    bool encrypt,
+    const uint8_t* input,
+    uint32_t inputLen,
+    const uint8_t* key,
+    uint32_t keyLen,
+    const uint8_t* nonce,
+    uint32_t nonceLen,
+    uint8_t* tag,
+    uint32_t tagLen,
+    std::vector<uint8_t>* output)
+{
+    if (!input || !key || !nonce || !tag || !output || keyLen < GOPHER_KEY_SIZE || nonceLen != GOPHER_NONCE_SIZE || tagLen != GOPHER_TAG_SIZE) {
+        return false;
+    }
+
+    BCRYPT_ALG_HANDLE alg = NULL;
+    BCRYPT_KEY_HANDLE hKey = NULL;
+    PUCHAR keyObject = NULL;
+    DWORD keyObjectLen = 0;
+    DWORD cbResult = 0;
+    ULONG done = 0;
+    bool ok = false;
+
+    if (!initAlg(&alg)) {
+        goto Cleanup;
+    }
+
+    if (BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&keyObjectLen, sizeof(keyObjectLen), &cbResult, 0) < 0 || keyObjectLen == 0) {
+        goto Cleanup;
+    }
+
+    keyObject = (PUCHAR)HeapAlloc(GetProcessHeap(), 0, keyObjectLen);
+    if (!keyObject) {
+        goto Cleanup;
+    }
+
+    if (BCryptGenerateSymmetricKey(alg, &hKey, keyObject, keyObjectLen, (PUCHAR)key, GOPHER_KEY_SIZE, 0) < 0) {
+        goto Cleanup;
+    }
+
+    output->assign(inputLen, 0);
+
+    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO authInfo;
+    memset(&authInfo, 0, sizeof(authInfo));
+    authInfo.cbSize = sizeof(authInfo);
+    authInfo.dwInfoVersion = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION;
+    authInfo.pbNonce = (PUCHAR)nonce;
+    authInfo.cbNonce = nonceLen;
+    authInfo.pbTag = tag;
+    authInfo.cbTag = tagLen;
+
+    NTSTATUS st;
+    if (encrypt) {
+        st = BCryptEncrypt(hKey, (PUCHAR)input, inputLen, &authInfo, NULL, 0, output->data(), inputLen, &done, 0);
+    } else {
+        st = BCryptDecrypt(hKey, (PUCHAR)input, inputLen, &authInfo, NULL, 0, output->data(), inputLen, &done, 0);
+    }
+    if (st < 0) {
+        output->clear();
+        goto Cleanup;
+    }
+
+    output->resize(done);
+    ok = true;
+
+Cleanup:
+    if (hKey) {
+        BCryptDestroyKey(hKey);
+    }
+    if (keyObject) {
+        HeapFree(GetProcessHeap(), 0, keyObject);
+    }
+    if (alg) {
+        BCryptCloseAlgorithmProvider(alg, 0);
+    }
+    return ok;
+}
+
+} // namespace
+
+uint8_t* EncryptData(const uint8_t* data, uint32_t dataLen, const uint8_t* key, uint32_t keyLen, uint32_t* outLen)
+{
+    if (outLen) {
+        *outLen = 0;
+    }
+    if (!data || dataLen == 0 || !key || keyLen < GOPHER_KEY_SIZE) {
+        return nullptr;
+    }
+
+    uint8_t nonce[GOPHER_NONCE_SIZE] = {0};
+    if (BCryptGenRandom(NULL, nonce, sizeof(nonce), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+        return nullptr;
+    }
+
+    uint8_t tag[GOPHER_TAG_SIZE] = {0};
+    std::vector<uint8_t> ciphertext;
+    if (!aesGcmCrypt(true, data, dataLen, key, keyLen, nonce, sizeof(nonce), tag, sizeof(tag), &ciphertext)) {
+        return nullptr;
+    }
+
+    uint32_t totalLen = GOPHER_NONCE_SIZE + (uint32_t)ciphertext.size() + GOPHER_TAG_SIZE;
+    uint8_t* out = (uint8_t*)malloc(totalLen);
+    if (!out) {
+        return nullptr;
+    }
+
+    memcpy(out, nonce, GOPHER_NONCE_SIZE);
+    if (!ciphertext.empty()) {
+        memcpy(out + GOPHER_NONCE_SIZE, ciphertext.data(), ciphertext.size());
+    }
+    memcpy(out + GOPHER_NONCE_SIZE + ciphertext.size(), tag, GOPHER_TAG_SIZE);
+
+    if (outLen) {
+        *outLen = totalLen;
+    }
+    return out;
+}
+
+uint8_t* DecryptData(const uint8_t* data, uint32_t dataLen, const uint8_t* key, uint32_t keyLen, uint32_t* outLen)
+{
+    if (outLen) {
+        *outLen = 0;
+    }
+    if (!data || dataLen < (GOPHER_NONCE_SIZE + GOPHER_TAG_SIZE) || !key || keyLen < GOPHER_KEY_SIZE) {
+        return nullptr;
+    }
+
+    const uint8_t* nonce = data;
+    const uint8_t* ciphertext = data + GOPHER_NONCE_SIZE;
+    uint32_t ciphertextLen = dataLen - GOPHER_NONCE_SIZE - GOPHER_TAG_SIZE;
+    uint8_t tag[GOPHER_TAG_SIZE] = {0};
+    memcpy(tag, data + GOPHER_NONCE_SIZE + ciphertextLen, GOPHER_TAG_SIZE);
+
+    std::vector<uint8_t> plain;
+    if (!aesGcmCrypt(false, ciphertext, ciphertextLen, key, keyLen, nonce, GOPHER_NONCE_SIZE, tag, GOPHER_TAG_SIZE, &plain)) {
+        return nullptr;
+    }
+
+    uint8_t* out = (uint8_t*)malloc(plain.size() > 0 ? plain.size() : 1);
+    if (!out) {
+        return nullptr;
+    }
+    if (!plain.empty()) {
+        memcpy(out, plain.data(), plain.size());
+    }
+
+    if (outLen) {
+        *outLen = (uint32_t)plain.size();
+    }
+    return out;
+}

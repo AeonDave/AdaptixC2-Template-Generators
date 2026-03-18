@@ -159,6 +159,34 @@ type ProcessEntry struct {
 	Name      string
 }
 
+func NewDirEntry(name string, isDir bool, size int64, modTime int64) DirEntry {
+	return DirEntry{
+		Name:  name,
+		IsDir: isDir,
+		Size:  size,
+		Date:  modTime,
+	}
+}
+
+func NewProcessEntry(pid uint32, ppid uint32, name string, user string, arch string, session uint32) ProcessEntry {
+	return ProcessEntry{
+		Pid:       uint16(pid),
+		PPid:      uint16(ppid),
+		SessionId: uint16(session),
+		IsArch64:  arch == "amd64" || arch == "x64",
+		Username:  user,
+		Name:      name,
+	}
+}
+
+func MarshalDirEntries(entries []DirEntry) ([]byte, error) {
+	return nil, errors.New("MarshalDirEntries is unsupported for adaptix_default manual binary tasks")
+}
+
+func MarshalProcessEntries(entries []ProcessEntry) ([]byte, error) {
+	return nil, errors.New("MarshalProcessEntries is unsupported for adaptix_default manual binary tasks")
+}
+
 // ─── Connection profile ────────────────────────────────────────────────────────
 // Profile carries the embedded connection configuration.
 // The server encodes this in GenerateProfiles / BuildPayload.

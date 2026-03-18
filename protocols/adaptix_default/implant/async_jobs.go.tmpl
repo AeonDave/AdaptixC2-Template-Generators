@@ -1,0 +1,5 @@
+package main
+
+// adaptix_default uses the protocol-owned binary async queue in async.go.tmpl.
+// This override intentionally replaces the shared async_jobs.go helper, which is
+// designed for message-based protocols that rely on protocol.Marshal.

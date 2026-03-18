@@ -1,0 +1,53 @@
+use std::mem;
+use std::sync::{Mutex, OnceLock};
+
+use crate::protocol::WriterBE;
+
+fn binary_queue() -> &'static Mutex<Vec<u8>> {
+    static QUEUE: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+    QUEUE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+pub fn queue_binary_response(task_id: u32, command_id: u32, payload: &[u8]) {
+    let mut frame = WriterBE::new();
+    frame.write_u32(task_id);
+    frame.write_u32(command_id);
+
+    let mut bytes = frame.into_bytes();
+    bytes.extend_from_slice(payload);
+
+    if let Ok(mut queue) = binary_queue().lock() {
+        queue.extend_from_slice(&bytes);
+    }
+}
+
+pub fn drain_binary_inner() -> Vec<u8> {
+    if let Ok(mut queue) = binary_queue().lock() {
+        return mem::take(&mut *queue);
+    }
+    Vec::new()
+}
+
+pub fn wrap_binary_inner(inner: &[u8]) -> Vec<u8> {
+    if inner.is_empty() {
+        return Vec::new();
+    }
+    let mut out = WriterBE::new();
+    out.write_u32((inner.len() + 4) as u32);
+    let mut bytes = out.into_bytes();
+    bytes.extend_from_slice(inner);
+    bytes
+}
+
+pub fn merge_binary_response_blob(mut blob: Vec<u8>) -> Vec<u8> {
+    let queued = drain_binary_inner();
+    if queued.is_empty() {
+        return blob;
+    }
+    if blob.len() >= 4 {
+        let mut inner = blob.split_off(4);
+        inner.extend_from_slice(&queued);
+        return wrap_binary_inner(&inner);
+    }
+    wrap_binary_inner(&queued)
+}

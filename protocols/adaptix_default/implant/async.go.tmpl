@@ -133,15 +133,12 @@ func runAsyncDefaultBof(taskID uint32, object []byte, args []byte, jobID uint32)
 func queueDownloadSequence(taskID uint32, fileID uint32, path string, data []byte) {
 	start := protocol.NewWriterBE()
 	start.WriteUint32(fileID)
-	start.WriteUint8(DOWNLOAD_START)
+	start.WriteUint8(protocol.DOWNLOAD_START)
 	start.WriteUint64(uint64(len(data)))
 	start.WriteString(path)
 	queueBinaryResponse(taskID, protocol.COMMAND_DOWNLOAD, start.Bytes())
 
-	chunk := chunkSize
-	if chunk <= 0 {
-		chunk = 64 * 1024
-	}
+	chunk := 64 * 1024
 	for offset := 0; offset < len(data); offset += chunk {
 		end := offset + chunk
 		if end > len(data) {
@@ -149,14 +146,14 @@ func queueDownloadSequence(taskID uint32, fileID uint32, path string, data []byt
 		}
 		cont := protocol.NewWriterBE()
 		cont.WriteUint32(fileID)
-		cont.WriteUint8(DOWNLOAD_CONTINUE)
+		cont.WriteUint8(protocol.DOWNLOAD_CONTINUE)
 		cont.WriteBytes(data[offset:end])
 		queueBinaryResponse(taskID, protocol.COMMAND_DOWNLOAD, cont.Bytes())
 	}
 
 	finish := protocol.NewWriterBE()
 	finish.WriteUint32(fileID)
-	finish.WriteUint8(DOWNLOAD_FINISH)
+	finish.WriteUint8(protocol.DOWNLOAD_FINISH)
 	queueBinaryResponse(taskID, protocol.COMMAND_DOWNLOAD, finish.Bytes())
 }
 
