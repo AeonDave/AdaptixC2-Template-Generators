@@ -517,17 +517,17 @@ func (ext *__NAME_CAP__Extender) CreateCommand(agentData adaptix.AgentData, args
 			goto RET
 		}
 		if subcommand == "cancel" {
-			_ = Ts.TsDownloadClose(fileId, 4)
+			_ = Ts.TsDownloadClose(fileId, adaptix.DOWNLOAD_STATE_CANCELED)
 			taskData.MessageType = adaptix.MESSAGE_SUCCESS
 			taskData.Message = fmt.Sprintf("Download %s canceled", fileId)
 			taskData.ClearText = "\n"
 		} else if subcommand == "start" {
-			_ = Ts.TsDownloadUpdate(fileId, DOWNLOAD_STATE_START, nil)
+			_ = Ts.TsDownloadUpdate(fileId, adaptix.DOWNLOAD_STATE_RUNNING, nil)
 			taskData.MessageType = adaptix.MESSAGE_SUCCESS
 			taskData.Message = fmt.Sprintf("Download %s resumed", fileId)
 			taskData.ClearText = "\n"
 		} else if subcommand == "stop" {
-			_ = Ts.TsDownloadUpdate(fileId, DOWNLOAD_STATE_FINISH, nil)
+			_ = Ts.TsDownloadUpdate(fileId, adaptix.DOWNLOAD_STATE_STOPPED, nil)
 			taskData.MessageType = adaptix.MESSAGE_SUCCESS
 			taskData.Message = fmt.Sprintf("Download %s stopped", fileId)
 			taskData.ClearText = "\n"
@@ -779,6 +779,21 @@ func (ext *__NAME_CAP__Extender) CreateCommand(agentData adaptix.AgentData, args
 		cmdArgs, _ := shlex.Split(runArgs)
 		packerData, _ := Marshal(ParamsRun{Program: prog, Args: cmdArgs, Task: taskData.TaskId})
 		cmd = Command{Code: COMMAND_RUN, Data: packerData}
+
+	case "interact":
+		sleepVal := 0
+		jitterVal := 0
+		packerData, _ := Marshal(ParamsSleep{Sleep: sleepVal, Jitter: jitterVal})
+		cmd = Command{Code: COMMAND_SLEEP, Data: packerData}
+
+	case "powershell":
+		cmdParam, err := getStringArg(args, "cmd")
+		if err != nil {
+			goto RET
+		}
+		cmdArgs := []string{"-c", cmdParam}
+		packerData, _ := Marshal(ParamsShell{Program: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", Args: cmdArgs})
+		cmd = Command{Code: COMMAND_SHELL, Data: packerData}
 
 	case "shell":
 		cmdParam, err := getStringArg(args, "cmd")
@@ -1717,8 +1732,18 @@ func (ext *__NAME_CAP__Extender) ProcessData(agentData adaptix.AgentData, decryp
 				case 3:
 					t := time.Unix(int64(params.IntValue), 0).UTC()
 					task.Message = fmt.Sprintf("Kill date set to %s", t.Format("2006-01-02"))
+
+					killdateVal := params.IntValue
+					_ = Ts.TsAgentUpdateDataPartial(agentData.Id, struct {
+						KillDate *int `json:"killdate"`
+					}{KillDate: &killdateVal})
 				case 4:
 					task.Message = fmt.Sprintf("Working time set to %s", params.StrValue)
+
+					worktimeVal := params.IntValue
+					_ = Ts.TsAgentUpdateDataPartial(agentData.Id, struct {
+						WorkingTime *int `json:"workingtime"`
+					}{WorkingTime: &worktimeVal})
 				default:
 					task.Message = "Profile updated"
 				}
@@ -1886,17 +1911,17 @@ func (ext *__NAME_CAP__Extender) ProcessData(agentData adaptix.AgentData, decryp
 					_ = Ts.TsDownloadAdd(agentData.Id, fileId, params.Path, int64(params.Size))
 				}
 
-				_ = Ts.TsDownloadUpdate(fileId, 1, params.Content)
+				_ = Ts.TsDownloadUpdate(fileId, adaptix.DOWNLOAD_STATE_RUNNING, params.Content)
 
 				if params.Finish {
 					task.Completed = true
 
 					if params.Canceled {
 						task.Message = fmt.Sprintf("Download '%v' successful canceled", fileId)
-						_ = Ts.TsDownloadClose(fileId, 4)
+						_ = Ts.TsDownloadClose(fileId, adaptix.DOWNLOAD_STATE_CANCELED)
 					} else {
 						task.Message = fmt.Sprintf("File download complete: [fid %v]", fileId)
-						_ = Ts.TsDownloadClose(fileId, 3)
+						_ = Ts.TsDownloadClose(fileId, adaptix.DOWNLOAD_STATE_FINISHED)
 					}
 				} else {
 					goto HANDLER

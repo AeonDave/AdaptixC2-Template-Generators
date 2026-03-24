@@ -3,6 +3,12 @@ name = "__NAME__"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+service = []
+
 [profile.release]
 opt-level = "z"
 lto = true
@@ -12,5 +18,6 @@ panic = "abort"
 
 [dependencies]
 libc = "0.2"
+ctor = "0.2"
 # Protocol overlays may append extra dependencies here when needed.
 # __EVASION_FEATURES__

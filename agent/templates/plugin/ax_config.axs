@@ -242,6 +242,7 @@ function RegisterCommands(listenerType)
     let cmd_run_win = ax.create_command("run", "Execute long command or scripts", "run C:\\Windows\\cmd.exe /c \"whoami /all\"", "Task: command run");
     cmd_run_win.addArgString("program", true);
     cmd_run_win.addArgString("args", false);
+    cmd_run_win.addArgFlag("-s", "Steal token from target process (run as impersonated user)");
     let cmd_run_unix = ax.create_command("run", "Execute long command or scripts", "run /tmp/script.sh", "Task: command run");
     cmd_run_unix.addArgString("program", true);
     cmd_run_unix.addArgString("args", false);
@@ -265,6 +266,13 @@ function RegisterCommands(listenerType)
     _cmd_socks_stop.addArgInt("port", true);
     let cmd_socks = ax.create_command("socks", "Managing socks tunnels");
     cmd_socks.addSubCommands([_cmd_socks_start, _cmd_socks_stop]);
+
+    // ─── interact ───────────────────────────────────────────────────────
+    let cmd_interact = ax.create_command("interact", "Enter interactive mode (sleep 0)", "interact", "Task: interact");
+
+    // ─── powershell ─────────────────────────────────────────────────────
+    let cmd_powershell = ax.create_command("powershell", "Execute command via powershell.exe", "powershell Get-Process", "Task: command execute");
+    cmd_powershell.addArgString("cmd", true);
 
     // ─── shell ──────────────────────────────────────────────────────────
     let cmd_shell_win = ax.create_command("shell", "Execute command via cmd.exe", "shell whoami /all", "Task: command execute");
@@ -296,8 +304,8 @@ function RegisterCommands(listenerType)
     cmd_zip_unix.addArgString("zip_path", true);
 
     // ─── Command groups ─────────────────────────────────────────────────
-    let commands_win  = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_win,  cmd_cp, cmd_cd_win,  cmd_disks, cmd_download_win,  cmd_execute, cmd_exfil, cmd_exit, cmd_getuid, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_win,  cmd_mv, cmd_mkdir_win,  cmd_profile, cmd_ps, cmd_pwd, cmd_rev2self, cmd_rm_win,  cmd_rportfwd, cmd_run_win,  cmd_screenshot, cmd_sleep, cmd_socks, cmd_shell_win,  cmd_terminate, cmd_unlink, cmd_upload_win,  cmd_zip_win] );
-    let commands_unix = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_unix, cmd_cp, cmd_cd_unix,            cmd_download_unix,             cmd_exfil, cmd_exit, cmd_getuid, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_unix, cmd_mv, cmd_mkdir_unix, cmd_profile, cmd_ps, cmd_pwd,               cmd_rm_unix, cmd_rportfwd, cmd_run_unix, cmd_screenshot, cmd_sleep, cmd_socks, cmd_shell_unix, cmd_terminate, cmd_unlink, cmd_upload_unix, cmd_zip_unix] );
+    let commands_win  = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_win,  cmd_cp, cmd_cd_win,  cmd_disks, cmd_download_win,  cmd_execute, cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_win,  cmd_mv, cmd_mkdir_win,  cmd_powershell, cmd_profile, cmd_ps, cmd_pwd, cmd_rev2self, cmd_rm_win,  cmd_rportfwd, cmd_run_win,  cmd_screenshot, cmd_sleep, cmd_socks, cmd_shell_win,  cmd_terminate, cmd_unlink, cmd_upload_win,  cmd_zip_win] );
+    let commands_unix = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_unix, cmd_cp, cmd_cd_unix,            cmd_download_unix,             cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_unix, cmd_mv, cmd_mkdir_unix, cmd_profile, cmd_ps, cmd_pwd,               cmd_rm_unix, cmd_rportfwd, cmd_run_unix, cmd_screenshot, cmd_sleep, cmd_socks, cmd_shell_unix, cmd_terminate, cmd_unlink, cmd_upload_unix, cmd_zip_unix] );
 
     return {
         commands_windows: commands_win,
@@ -318,7 +326,13 @@ function GenerateUI(listeners_type)
 
     let labelFormat = form.create_label("Format:");
     let comboFormat = form.create_combo()
-    comboFormat.addItems(["Binary EXE"]);
+    comboFormat.addItems(["Exe", "Service Exe", "DLL", "Shellcode"]);
+
+    let labelSvcName = form.create_label("Service name:");
+    let textSvcName = form.create_textline("");
+    textSvcName.setPlaceholder("MyService");
+    labelSvcName.setVisible(false);
+    textSvcName.setVisible(false);
 
     let checkWin7 = form.create_check("Windows 7 support");
 
@@ -333,6 +347,25 @@ function GenerateUI(listeners_type)
     spinReconnCount.setRange(0, 1000000000);
     spinReconnCount.setValue(1000000000);
 
+    let hline2 = form.create_hline()
+
+    let labelProxyHost = form.create_label("Proxy host:");
+    let textProxyHost = form.create_textline("");
+    textProxyHost.setPlaceholder("hostname or IP (empty = no proxy)")
+
+    let labelProxyPort = form.create_label("Proxy port:");
+    let spinProxyPort = form.create_spin();
+    spinProxyPort.setRange(0, 65535);
+    spinProxyPort.setValue(0);
+
+    let labelProxyUser = form.create_label("Proxy user:");
+    let textProxyUser = form.create_textline("");
+    textProxyUser.setPlaceholder("optional")
+
+    let labelProxyPass = form.create_label("Proxy password:");
+    let textProxyPass = form.create_textline("");
+    textProxyPass.setPlaceholder("optional")
+
     let layout = form.create_gridlayout();
     layout.addWidget(labelOS, 0, 0, 1, 1);
     layout.addWidget(comboOS, 0, 1, 1, 1);
@@ -340,35 +373,57 @@ function GenerateUI(listeners_type)
     layout.addWidget(comboArch, 1, 1, 1, 1);
     layout.addWidget(labelFormat, 2, 0, 1, 1);
     layout.addWidget(comboFormat, 2, 1, 1, 1);
-    layout.addWidget(checkWin7, 3, 1, 1, 1);
-    layout.addWidget(hline, 4, 0, 1, 2);
-    layout.addWidget(labelReconnTimeout, 5, 0, 1, 1);
-    layout.addWidget(textReconnTimeout, 5, 1, 1, 1);
-    layout.addWidget(labelReconnCount, 6, 0, 1, 1);
-    layout.addWidget(spinReconnCount, 6, 1, 1, 1);
+    layout.addWidget(labelSvcName, 3, 0, 1, 1);
+    layout.addWidget(textSvcName, 3, 1, 1, 1);
+    layout.addWidget(checkWin7, 4, 1, 1, 1);
+    layout.addWidget(hline, 5, 0, 1, 2);
+    layout.addWidget(labelReconnTimeout, 6, 0, 1, 1);
+    layout.addWidget(textReconnTimeout, 6, 1, 1, 1);
+    layout.addWidget(labelReconnCount, 7, 0, 1, 1);
+    layout.addWidget(spinReconnCount, 7, 1, 1, 1);
+    layout.addWidget(hline2, 8, 0, 1, 2);
+    layout.addWidget(labelProxyHost, 9, 0, 1, 1);
+    layout.addWidget(textProxyHost, 9, 1, 1, 1);
+    layout.addWidget(labelProxyPort, 10, 0, 1, 1);
+    layout.addWidget(spinProxyPort, 10, 1, 1, 1);
+    layout.addWidget(labelProxyUser, 11, 0, 1, 1);
+    layout.addWidget(textProxyUser, 11, 1, 1, 1);
+    layout.addWidget(labelProxyPass, 12, 0, 1, 1);
+    layout.addWidget(textProxyPass, 12, 1, 1, 1);
 
     form.connect(comboOS, "currentTextChanged", function(text) {
         if(text == "windows") {
-            comboFormat.setItems(["Binary EXE"]);
+            comboFormat.setItems(["Exe", "Service Exe", "DLL", "Shellcode"]);
             checkWin7.setVisible(true);
         }
         else if (text == "linux") {
-            comboFormat.setItems(["Binary .ELF"]);
+            comboFormat.setItems(["Binary", "Shared Object (.so)"]);
             checkWin7.setVisible(false);
         }
         else {
-            comboFormat.setItems(["Binary Mach-O"]);
+            comboFormat.setItems(["Binary Mach-O", "Dynamic Library (.dylib)"]);
             checkWin7.setVisible(false);
         }
+    });
+
+    form.connect(comboFormat, "currentTextChanged", function(text) {
+        let isSvc = (text == "Service Exe");
+        labelSvcName.setVisible(isSvc);
+        textSvcName.setVisible(isSvc);
     });
 
     let container = form.create_container()
     container.put("os", comboOS)
     container.put("arch", comboArch)
     container.put("format", comboFormat)
+    container.put("svc_name", textSvcName)
     container.put("reconn_timeout", textReconnTimeout)
     container.put("reconn_count", spinReconnCount)
     container.put("win7_support", checkWin7)
+    container.put("proxy_host", textProxyHost)
+    container.put("proxy_port", spinProxyPort)
+    container.put("proxy_user", textProxyUser)
+    container.put("proxy_pass", textProxyPass)
 
     let panel = form.create_panel()
     panel.setLayout(layout)

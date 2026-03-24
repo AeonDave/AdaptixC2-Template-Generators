@@ -415,6 +415,14 @@ if (-not [string]::IsNullOrEmpty($BuildVariant)) {
     }
 }
 
+# sRDI helper (Rust only — DLL→shellcode converter)
+if ($Language -eq 'rust') {
+    $srdiSrc = Join-Path $TemplateDir "plugin\srdi.go"
+    if (Test-Path $srdiSrc) {
+        Substitute-Template $srdiSrc (Join-Path $OutDir "srdi.go")
+    }
+}
+
 # Implant files
 Write-Host "[*] Generating implant files ($Language)..." -ForegroundColor Cyan
 foreach ($f in (Get-ChildItem -Path $ImplantLangDir -File)) {

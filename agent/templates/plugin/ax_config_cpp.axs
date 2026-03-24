@@ -227,6 +227,7 @@ function RegisterCommands(listenerType)
     let cmd_run = ax.create_command("run", "Execute long command or scripts", "run C:\\Windows\\cmd.exe /c \"whoami /all\"", "Task: command run");
     cmd_run.addArgString("program", true);
     cmd_run.addArgString("args", false);
+    cmd_run.addArgFlag("-s", "Steal token from target process (run as impersonated user)");
 
     // ─── screenshot ─────────────────────────────────────────────────────
     let cmd_screenshot = ax.create_command("screenshot", "Take a single screenshot", "screenshot", "Task: screenshot");
@@ -247,6 +248,13 @@ function RegisterCommands(listenerType)
     _cmd_socks_stop.addArgInt("port", true);
     let cmd_socks = ax.create_command("socks", "Managing socks tunnels");
     cmd_socks.addSubCommands([_cmd_socks_start, _cmd_socks_stop]);
+
+    // ─── interact ───────────────────────────────────────────────────────
+    let cmd_interact = ax.create_command("interact", "Enter interactive mode (sleep 0)", "interact", "Task: interact");
+
+    // ─── powershell ─────────────────────────────────────────────────────
+    let cmd_powershell = ax.create_command("powershell", "Execute command via powershell.exe", "powershell Get-Process", "Task: command execute");
+    cmd_powershell.addArgString("cmd", true);
 
     // ─── shell ──────────────────────────────────────────────────────────
     let cmd_shell = ax.create_command("shell", "Execute command via cmd.exe", "shell whoami /all", "Task: command execute");
@@ -270,7 +278,7 @@ function RegisterCommands(listenerType)
     cmd_zip.addArgString("zip_path", true);
 
     // ─── Command group (Windows only) ───────────────────────────────────
-    let commands_win = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat, cmd_cp, cmd_cd, cmd_disks, cmd_download, cmd_execute, cmd_exfil, cmd_exit, cmd_getuid, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls, cmd_mv, cmd_mkdir, cmd_profile, cmd_ps, cmd_pwd, cmd_rev2self, cmd_rm, cmd_rportfwd, cmd_run, cmd_screenshot, cmd_sleep, cmd_socks, cmd_shell, cmd_terminate, cmd_unlink, cmd_upload, cmd_zip] );
+    let commands_win = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat, cmd_cp, cmd_cd, cmd_disks, cmd_download, cmd_execute, cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls, cmd_mv, cmd_mkdir, cmd_powershell, cmd_profile, cmd_ps, cmd_pwd, cmd_rev2self, cmd_rm, cmd_rportfwd, cmd_run, cmd_screenshot, cmd_sleep, cmd_socks, cmd_shell, cmd_terminate, cmd_unlink, cmd_upload, cmd_zip] );
 
     return {
         commands_windows: commands_win
@@ -300,6 +308,25 @@ function GenerateUI(listeners_type)
     spinReconnCount.setRange(0, 1000000000);
     spinReconnCount.setValue(1000000000);
 
+    let hline2 = form.create_hline()
+
+    let labelProxyHost = form.create_label("Proxy host:");
+    let textProxyHost = form.create_textline("");
+    textProxyHost.setPlaceholder("hostname or IP (empty = no proxy)")
+
+    let labelProxyPort = form.create_label("Proxy port:");
+    let spinProxyPort = form.create_spin();
+    spinProxyPort.setRange(0, 65535);
+    spinProxyPort.setValue(0);
+
+    let labelProxyUser = form.create_label("Proxy user:");
+    let textProxyUser = form.create_textline("");
+    textProxyUser.setPlaceholder("optional")
+
+    let labelProxyPass = form.create_label("Proxy password:");
+    let textProxyPass = form.create_textline("");
+    textProxyPass.setPlaceholder("optional")
+
     let layout = form.create_gridlayout();
     layout.addWidget(labelArch, 0, 0, 1, 1);
     layout.addWidget(comboArch, 0, 1, 1, 1);
@@ -311,6 +338,15 @@ function GenerateUI(listeners_type)
     layout.addWidget(textReconnTimeout, 4, 1, 1, 1);
     layout.addWidget(labelReconnCount, 5, 0, 1, 1);
     layout.addWidget(spinReconnCount, 5, 1, 1, 1);
+    layout.addWidget(hline2, 6, 0, 1, 2);
+    layout.addWidget(labelProxyHost, 7, 0, 1, 1);
+    layout.addWidget(textProxyHost, 7, 1, 1, 1);
+    layout.addWidget(labelProxyPort, 8, 0, 1, 1);
+    layout.addWidget(spinProxyPort, 8, 1, 1, 1);
+    layout.addWidget(labelProxyUser, 9, 0, 1, 1);
+    layout.addWidget(textProxyUser, 9, 1, 1, 1);
+    layout.addWidget(labelProxyPass, 10, 0, 1, 1);
+    layout.addWidget(textProxyPass, 10, 1, 1, 1);
 
     let container = form.create_container()
     container.put("arch", comboArch)
@@ -318,6 +354,10 @@ function GenerateUI(listeners_type)
     container.put("reconn_timeout", textReconnTimeout)
     container.put("reconn_count", spinReconnCount)
     container.put("win7_support", checkWin7)
+    container.put("proxy_host", textProxyHost)
+    container.put("proxy_port", spinProxyPort)
+    container.put("proxy_user", textProxyUser)
+    container.put("proxy_pass", textProxyPass)
 
     let panel = form.create_panel()
     panel.setLayout(layout)

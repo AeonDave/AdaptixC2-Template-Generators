@@ -332,6 +332,11 @@ if [[ -n "$BUILD_VARIANT" ]]; then
     fi
 fi
 
+# sRDI helper (Rust only — DLL→shellcode converter)
+if [[ "$LANGUAGE" == "rust" && -f "$TEMPLATE_DIR/plugin/srdi.go" ]]; then
+    substitute "$TEMPLATE_DIR/plugin/srdi.go" "$OUT_DIR/srdi.go"
+fi
+
 # Implant files (all top-level files from the language template dir)
 info "Generating implant files ($LANGUAGE)..."
 for f in "$IMPLANT_LANG_DIR"/*; do

@@ -13,6 +13,8 @@ import (
 type GenerateConfig struct {
 	Os            string `json:"os"`
 	Arch          string `json:"arch"`
+	Format        string `json:"format"`
+	SvcName       string `json:"svc_name"`
 	ReconnTimeout string `json:"reconn_timeout"`
 	ReconnCount   int    `json:"reconn_count"`
 }
@@ -76,23 +78,63 @@ func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentPro
 		return nil, "", err
 	}
 
+	var cargoFlags string // extra cargo flags per format
+
 	switch generateConfig.Os + "/" + generateConfig.Arch {
 	case "linux/amd64":
 		target = "x86_64-unknown-linux-gnu"
-		Filename = "__NAME__"
 	case "linux/arm64":
 		target = "aarch64-unknown-linux-gnu"
-		Filename = "__NAME__"
 	case "windows/amd64":
 		target = "x86_64-pc-windows-gnu"
-		Filename = "__NAME__.exe"
 	default:
 		_ = os.RemoveAll(tempDir)
 		return nil, "", fmt.Errorf("unsupported target: %s/%s", generateConfig.Os, generateConfig.Arch)
 	}
 
+	// ── Format → cargo flags + output filename ─────────────────────────────
+	format := generateConfig.Format
+	if format == "" {
+		// Legacy/default: pick by OS
+		switch generateConfig.Os {
+		case "windows":
+			format = "Exe"
+		case "linux":
+			format = "Binary"
+		default:
+			format = "Binary Mach-O"
+		}
+	}
+
+	switch format {
+	case "Exe", "Binary", "Binary Mach-O":
+		if generateConfig.Os == "windows" {
+			Filename = "__NAME__.exe"
+		} else {
+			Filename = "__NAME__"
+		}
+	case "Service Exe":
+		Filename = "__NAME___svc.exe"
+		cargoFlags = " --features service"
+	case "DLL":
+		Filename = "__NAME__.dll"
+		cargoFlags = " --lib"
+	case "Shellcode":
+		Filename = "__NAME__.dll" // build DLL first, then sRDI
+		cargoFlags = " --lib"
+	case "Shared Object (.so)":
+		Filename = "lib__NAME__.so"
+		cargoFlags = " --lib"
+	case "Dynamic Library (.dylib)":
+		Filename = "lib__NAME__.dylib"
+		cargoFlags = " --lib"
+	default:
+		_ = os.RemoveAll(tempDir)
+		return nil, "", fmt.Errorf("unsupported format: %s", format)
+	}
+
 	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
-		fmt.Sprintf("Target: %s, Output: %s", target, Filename))
+		fmt.Sprintf("Target: %s, Format: %s, Output: %s", target, format, Filename))
 
 	// Write profile data into src/config.rs
 	config := "pub static ENC_PROFILES: &[&[u8]] = &[\n"
@@ -111,7 +153,7 @@ func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentPro
 	// Build
 	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO, "Starting cargo build...")
 
-	cmdBuild := fmt.Sprintf("__BUILD_TOOL__ --release --target %s --target-dir %s", target, tempDir)
+	cmdBuild := fmt.Sprintf("__BUILD_TOOL__ --release --target %s --target-dir %s%s", target, tempDir, cargoFlags)
 	err = Ts.TsAgentBuildExecute(profile.BuilderId, srcDir, "sh", "-c", cmdBuild)
 	if err != nil {
 		_ = os.RemoveAll(tempDir)
@@ -126,6 +168,17 @@ func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentPro
 		return nil, "", err
 	}
 	_ = os.RemoveAll(tempDir)
+
+	// ── Post-processing: sRDI for Shellcode format ──────────────────────
+	if format == "Shellcode" {
+		_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
+			fmt.Sprintf("Applying sRDI conversion (%d byte DLL)...", len(Payload)))
+		Payload, err = DllToShellcode(Payload)
+		if err != nil {
+			return nil, "", err
+		}
+		Filename = "__NAME__.bin"
+	}
 
 	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
 		fmt.Sprintf("Payload: %s (%d bytes)", Filename, len(Payload)))
