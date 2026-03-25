@@ -406,18 +406,14 @@ build_plugin() {
 copy_dist() {
     local name="$1"
     $USE_DIST || return 0
-    mkdir -p "$DIST_DIR/$name" || error_exit "Failed to create dist dir for $name"
-
     local ext_dir="$EXTENDERS_DIR/$name"
 
-    # Copy .so plugin
-    for so_file in "$ext_dir"/*.so; do
-        [[ -f "$so_file" ]] && cp "$so_file" "$DIST_DIR/$name/"
-    done
-
-    # Copy config + axs
-    [[ -f "$ext_dir/config.yaml" ]]    && cp "$ext_dir/config.yaml"    "$DIST_DIR/$name/"
-    [[ -f "$ext_dir/ax_config.axs" ]]  && cp "$ext_dir/ax_config.axs"  "$DIST_DIR/$name/"
+    # Dist should mirror the complete built extender directory.
+    # Extenders may require arbitrary source trees, assets, wrappers, or helper
+    # files at runtime/build time, so avoid assuming any specific layout here.
+    rm -rf "$DIST_DIR/$name"
+    mkdir -p "$DIST_DIR" || error_exit "Failed to create dist/extenders directory"
+    cp -r "$ext_dir" "$DIST_DIR/" || error_exit "Failed to copy dist package for $name"
 }
 
 # ════════════════════════════════════════════════════════════════════════════
