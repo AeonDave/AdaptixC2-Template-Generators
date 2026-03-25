@@ -13,6 +13,9 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+DIM='\033[2m'
 NC='\033[0m'
 
 error_exit() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
@@ -25,7 +28,7 @@ ADAPTIX_DIR=""
 INPUT_DIR=""
 GO_BIN=""
 PULL_CHANGES=false
-ACTION="all"
+ACTION=""
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER_TRIMPATH="-trimpath"
 
@@ -61,7 +64,7 @@ Required:
   -o, --ax <dir>      Path to AdaptixC2 output directory
 
 Optional:
-  -a, --action <act>  Action to perform (default: all)
+  -a, --action <act>  Action to perform (omit for interactive selector)
   -i, --input <dir>   Folder containing extender subdirectories
                       (default: same directory as this script)
   -g, --go <path>     Go binary to use for building plugins
@@ -69,17 +72,18 @@ Optional:
   --pull              Execute git pull before installation
 
 Actions:
-  all                 Complete installation — agents + listeners + services
-  agents              Build and install agent plugins only
-  listeners           Build and install listener plugins only
-  services            Build and install service plugins only
+  all                 Install all discovered extenders
+  agents              Agents only
+  listeners           Listeners only
+  services            Services only
   clean               Remove all discovered extenders from AdaptixC2
+  (none)              Interactive selector — pick which extenders to install
 
 Examples:
-  $0 -o ../AdaptixC2
+  $0 -o ../AdaptixC2                          # interactive selector
+  $0 -o /opt/AdaptixC2 -a all                 # install everything
   $0 -o /opt/AdaptixC2 -a agents --pull
   $0 -o ../AdaptixC2 -g /usr/local/go1.25.4/bin/go
-  $0 -o ../AdaptixC2 -i /tmp/my_extenders
   $0 -o ../AdaptixC2 -a clean
 EOF
     exit 1
@@ -103,6 +107,101 @@ done
 [[ -d "$INPUT_DIR" ]] || error_exit "Input directory does not exist: $INPUT_DIR"
 
 discover_extenders
+
+# ── Interactive selector ────────────────────────────────────────────────────
+# Shows a toggleable checklist: green = new, blue = already installed.
+# Space toggles, Enter confirms.  Needs EXTENDERS_DIR, called after dir setup.
+
+interactive_select() {
+    local dest_dir="$1"
+    local -a all_names=() all_types=()
+
+    # Merge all discovered into flat arrays preserving type
+    for n in "${AGENTS[@]}"; do    all_names+=("$n"); all_types+=("agent"); done
+    for n in "${LISTENERS[@]}"; do all_names+=("$n"); all_types+=("listener"); done
+    for n in "${SERVICES[@]}"; do  all_names+=("$n"); all_types+=("service"); done
+
+    local count=${#all_names[@]}
+    (( count == 0 )) && error_exit "No extenders found in $INPUT_DIR"
+
+    # Build selected[] (all on) and color per entry
+    local -a selected=() colors=()
+    for (( i=0; i<count; i++ )); do
+        selected+=( 1 )
+        if [[ -d "$dest_dir/${all_names[$i]}" ]]; then
+            colors+=( "$BLUE" )    # already installed
+        else
+            colors+=( "$GREEN" )   # new
+        fi
+    done
+
+    local cursor=0 _menu_drawn=0
+
+    # Save terminal, hide cursor
+    local saved_stty
+    saved_stty="$(stty -g)"
+    stty -echo -icanon min 1 time 0
+    tput civis 2>/dev/null
+
+    _render_menu() {
+        (( _menu_drawn )) && printf '\033[%dA' "$((count + 3))"
+        _menu_drawn=1
+        printf '\r\033[K'
+        echo -e "${BOLD}Select extenders to install ${DIM}(Space=toggle  a=all  n=none  Enter=confirm  q=quit)${NC}"
+        printf '\r\033[K\n'
+        for (( i=0; i<count; i++ )); do
+            printf '\r\033[K'
+            local arrow="  "; [[ $i -eq $cursor ]] && arrow="> "
+            local check=" "; (( selected[i] )) && check="x"
+            local tag=""
+            case "${all_types[$i]}" in
+                agent)    tag="${DIM}agent${NC}" ;;
+                listener) tag="${DIM}listener${NC}" ;;
+                service)  tag="${DIM}service${NC}" ;;
+            esac
+            echo -e "${arrow}[${check}] ${colors[$i]}${all_names[$i]}${NC}  ${tag}"
+        done
+        printf '\r\033[K\n'
+    }
+
+    _render_menu
+
+    while true; do
+        local key
+        IFS= read -rsN1 key
+        case "$key" in
+            $'\x1b')
+                IFS= read -rsN2 rest
+                case "$rest" in
+                    '[A') (( cursor > 0 )) && (( cursor-- )) ;;
+                    '[B') (( cursor < count-1 )) && (( cursor++ )) ;;
+                esac ;;
+            ' ')  (( selected[cursor] = !selected[cursor] )) ;;
+            a|A)  for (( i=0; i<count; i++ )); do selected[$i]=1; done ;;
+            n|N)  for (( i=0; i<count; i++ )); do selected[$i]=0; done ;;
+            ''|$'\n') break ;;
+            q|Q)  stty "$saved_stty"; tput cnorm 2>/dev/null
+                  echo -e "${YELLOW}Aborted.${NC}"; exit 0 ;;
+        esac
+        _render_menu
+    done
+
+    stty "$saved_stty"; tput cnorm 2>/dev/null
+
+    # Rebuild arrays from selection
+    AGENTS=(); LISTENERS=(); SERVICES=()
+    for (( i=0; i<count; i++ )); do
+        (( selected[i] )) || continue
+        case "${all_types[$i]}" in
+            agent)    AGENTS+=("${all_names[$i]}") ;;
+            listener) LISTENERS+=("${all_names[$i]}") ;;
+            service)  SERVICES+=("${all_names[$i]}") ;;
+        esac
+    done
+    local total=$(( ${#AGENTS[@]} + ${#LISTENERS[@]} + ${#SERVICES[@]} ))
+    (( total == 0 )) && { echo -e "${YELLOW}Nothing selected.${NC}"; exit 0; }
+    echo -e "${GREEN}Selected ${total} extender(s)${NC}"
+}
 
 # ── Validate ────────────────────────────────────────────────────────────────
 [[ -d "$ADAPTIX_DIR" ]] || error_exit "Directory does not exist: $ADAPTIX_DIR"
@@ -246,10 +345,14 @@ mkdir -p "$EXTENDERS_DIR" || error_exit "Failed to create extenders directory"
 if [[ -d "$ADAPTIX_DIR/dist" ]]; then
     USE_DIST=true
     mkdir -p "$DIST_DIR" || error_exit "Failed to create dist/extenders directory"
-    info_msg "dist/ found — extenders will be deployed to dist/extenders/"
 else
     USE_DIST=false
-    info_msg "Source mode — extenders will be served from AdaptixServer/extenders/"
+fi
+
+# Show interactive selector when no -a flag was given
+if [[ -z "$ACTION" ]]; then
+    interactive_select "$EXTENDERS_DIR"
+    ACTION="all"
 fi
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -264,9 +367,8 @@ clean_extender() {
 
 copy_extender() {
     local name="$1"
-    [[ -d "$INPUT_DIR/$name" ]] || { warn_msg "Folder not found: $name (skipping)"; return 1; }
+    [[ -d "$INPUT_DIR/$name" ]] || { warn_msg "$name: not found (skipping)"; return 1; }
     cp -r "$INPUT_DIR/$name" "$EXTENDERS_DIR/" || error_exit "Failed to copy $name"
-    info_msg "Copied $name → extenders/"
 }
 
 go_work_use() {
@@ -280,30 +382,30 @@ go_work_use() {
 go_work_sync_all() {
     cd "$ADAPTIX_DIR/AdaptixServer" || error_exit "Could not enter AdaptixServer"
     "$GO_BIN" work sync || error_exit "go work sync failed"
-    info_msg "Go workspace synchronized"
 }
 
 build_plugin() {
     local name="$1"
     cd "$ADAPTIX_DIR/AdaptixServer" || error_exit "Could not enter AdaptixServer"
-    [[ -f "extenders/$name/Makefile" ]] || { warn_msg "No Makefile for $name (skipping build)"; return 1; }
+    [[ -f "extenders/$name/Makefile" ]] || { warn_msg "$name: no Makefile (skipping build)"; return 1; }
 
     # Patch Makefile to match server -trimpath setting (ABI must match)
     if [[ -z "$SERVER_TRIMPATH" ]]; then
         sed -i 's/-trimpath //g' "extenders/$name/Makefile"
     fi
 
-    step_msg "Building $name..."
-    make -C "extenders/$name" plugin GO="$GO_BIN" TRIMPATH="$SERVER_TRIMPATH" || error_exit "Failed to build $name"
-    info_msg "Built $name"
+    step_msg "Building ${BOLD}$name${NC}..."
+    local build_log
+    build_log="$(make --no-print-directory -C "extenders/$name" plugin GO="$GO_BIN" TRIMPATH="$SERVER_TRIMPATH" 2>&1)" || \
+        { echo "$build_log"; error_exit "Failed to build $name"; }
+    # Show only unexpected output (errors/warnings), suppress known noise
+    echo "$build_log" | grep -vE '^\[\*\]|^cd |^\[\+\]|^$' || true
+    info_msg "$name ${DIM}✓${NC}"
 }
 
 copy_dist() {
     local name="$1"
-    if ! $USE_DIST; then
-        info_msg "Source mode: $name ready in extenders/"
-        return
-    fi
+    $USE_DIST || return 0
     mkdir -p "$DIST_DIR/$name" || error_exit "Failed to create dist dir for $name"
 
     local ext_dir="$EXTENDERS_DIR/$name"
@@ -316,61 +418,36 @@ copy_dist() {
     # Copy config + axs
     [[ -f "$ext_dir/config.yaml" ]]    && cp "$ext_dir/config.yaml"    "$DIST_DIR/$name/"
     [[ -f "$ext_dir/ax_config.axs" ]]  && cp "$ext_dir/ax_config.axs"  "$DIST_DIR/$name/"
-
-    info_msg "Dist ready: $name"
 }
 
 # ════════════════════════════════════════════════════════════════════════════
 # Action blocks
 # ════════════════════════════════════════════════════════════════════════════
 
-install_agents() {
-    step_msg "Installing agents..."
-    for name in "${AGENTS[@]}"; do
+install_group() {
+    local label="$1"; shift
+    local -a names=("$@")
+    (( ${#names[@]} == 0 )) && return 0
+
+    echo ""
+    step_msg "${BOLD}${label}${NC} ${DIM}(${#names[@]})${NC}"
+
+    for name in "${names[@]}"; do
         clean_extender "$name"
         copy_extender "$name" || continue
         go_work_use "$name"
     done
     go_work_sync_all
-    for name in "${AGENTS[@]}"; do
+    for name in "${names[@]}"; do
         [[ -d "$EXTENDERS_DIR/$name" ]] || continue
         build_plugin "$name"
         copy_dist "$name"
     done
-    info_msg "All agents installed"
 }
 
-install_listeners() {
-    step_msg "Installing listeners..."
-    for name in "${LISTENERS[@]}"; do
-        clean_extender "$name"
-        copy_extender "$name" || continue
-        go_work_use "$name"
-    done
-    go_work_sync_all
-    for name in "${LISTENERS[@]}"; do
-        [[ -d "$EXTENDERS_DIR/$name" ]] || continue
-        build_plugin "$name"
-        copy_dist "$name"
-    done
-    info_msg "All listeners installed"
-}
-
-install_services() {
-    step_msg "Installing services..."
-    for name in "${SERVICES[@]}"; do
-        clean_extender "$name"
-        copy_extender "$name" || continue
-        go_work_use "$name"
-    done
-    go_work_sync_all
-    for name in "${SERVICES[@]}"; do
-        [[ -d "$EXTENDERS_DIR/$name" ]] || continue
-        build_plugin "$name"
-        copy_dist "$name"
-    done
-    info_msg "All services installed"
-}
+install_agents()    { install_group "Agents"    "${AGENTS[@]}"; }
+install_listeners() { install_group "Listeners" "${LISTENERS[@]}"; }
+install_services()  { install_group "Services"  "${SERVICES[@]}"; }
 
 clean_all() {
     step_msg "Cleaning all discovered extenders..."
@@ -386,39 +463,21 @@ clean_all() {
 
 case $ACTION in
     all)
-        info_msg "Action: Full installation"
         install_agents
         install_listeners
         install_services
         ;;
-    agents)
-        info_msg "Action: Agents only"
-        install_agents
-        ;;
-    listeners)
-        info_msg "Action: Listeners only"
-        install_listeners
-        ;;
-    services)
-        info_msg "Action: Services only"
-        install_services
-        ;;
-    clean)
-        clean_all
-        ;;
-    *)
-        error_exit "Unknown action: $ACTION"
-        ;;
+    agents)    install_agents ;;
+    listeners) install_listeners ;;
+    services)  install_services ;;
+    clean)     clean_all ;;
+    *)         error_exit "Unknown action: $ACTION" ;;
 esac
 
 # ── Summary ─────────────────────────────────────────────────────────────────
 echo ""
-echo "================================================================"
-echo -e " ${GREEN}Installation completed successfully${NC}"
-echo "================================================================"
-echo " Action:     $ACTION"
-echo " Agents:     ${AGENTS[*]}"
-echo " Listeners:  ${LISTENERS[*]}"
-echo " Services:   ${SERVICES[*]}"
-echo " AdaptixC2:  $ADAPTIX_DIR"
-echo "================================================================"
+local_total=$(( ${#AGENTS[@]} + ${#LISTENERS[@]} + ${#SERVICES[@]} ))
+echo -e "${GREEN}${BOLD}Done.${NC} ${local_total} extender(s) → ${ADAPTIX_DIR}"
+[[ ${#AGENTS[@]} -gt 0 ]]    && echo -e "  Agents:    ${AGENTS[*]}"
+[[ ${#LISTENERS[@]} -gt 0 ]] && echo -e "  Listeners: ${LISTENERS[*]}"
+[[ ${#SERVICES[@]} -gt 0 ]]  && echo -e "  Services:  ${SERVICES[*]}"
