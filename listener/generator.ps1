@@ -15,6 +15,10 @@
 .PARAMETER ListenerType
     "external" (default) or "internal". External = agents connect in; internal = agent binds.
 
+.PARAMETER Transport
+    Transport variant: "tcp" (default) or "http".
+    When "http", uses HTTP-specific template overrides from the protocol.
+
 .PARAMETER OutputDir
     Directory where <name>_listener/ will be created.
     Default: ADAPTIX_OUTPUT_DIR env var, or ./output.
@@ -26,12 +30,16 @@
     .\generator.ps1 -Name telegram -Protocol adaptix_default -ListenerType external
 
 .EXAMPLE
+    .\generator.ps1 -Name spectre_http -Protocol spectre -ListenerType external -Transport http
+
+.EXAMPLE
     .\generator.ps1 -Name telegram -Protocol adaptix_default -OutputDir ..\my-adaptix\extenders
 #>
 param(
     [string]$Name         = "",
     [string]$Protocol     = "",
     [string]$ListenerType = "",
+    [string]$Transport    = "",
     [string]$OutputDir    = ""
 )
 
@@ -151,10 +159,23 @@ if ($ListenerType -ne "external" -and $ListenerType -ne "internal") {
     exit 1
 }
 
+# ─── Input: Transport variant ───────────────────────────────────────────────────
+
+if ([string]::IsNullOrEmpty($Transport)) {
+    $Transport = "tcp"
+}
+$Transport = $Transport.ToLower()
+$validTransports = @("tcp", "http", "telegram", "dropbox", "smb")
+if ($validTransports -notcontains $Transport) {
+    Write-Host "[-] Transport must be one of: $($validTransports -join ', ')." -ForegroundColor Red
+    exit 1
+}
+
 Write-Host ""
 Write-Host "[*] Creating listener: ${ListenerName}_listener" -ForegroundColor Cyan
 Write-Host "      Protocol    : $Protocol" -ForegroundColor Cyan
 Write-Host "      Type        : $ListenerType" -ForegroundColor Cyan
+Write-Host "      Transport   : $Transport" -ForegroundColor Cyan
 Write-Host "      Directory   : $OutDir\" -ForegroundColor Cyan
 Write-Host ""
 
@@ -193,31 +214,66 @@ function Substitute-Protocol {
 
 Write-Host "[*] Generating listener files..." -ForegroundColor Cyan
 Substitute-Template (Join-Path $TemplateDir "config.yaml")      (Join-Path $OutDir "config.yaml")
-Substitute-Template (Join-Path $TemplateDir "go.mod")           (Join-Path $OutDir "go.mod")
-Substitute-Template (Join-Path $TemplateDir "go.sum")           (Join-Path $OutDir "go.sum")
 Substitute-Template (Join-Path $TemplateDir "Makefile")         (Join-Path $OutDir "Makefile")
-Substitute-Template (Join-Path $TemplateDir "pl_main.go")       (Join-Path $OutDir "pl_main.go")
 
-# pl_internal.go: use protocol override if available, else base template
-$protoInternal = Join-Path $protoDir "pl_internal.go.tmpl"
-if (Test-Path $protoInternal) {
-    Write-Host "  [+] Using protocol internal override: pl_internal.go.tmpl" -ForegroundColor Green
-    Substitute-Template $protoInternal (Join-Path $OutDir "pl_internal.go")
+# go.mod: use protocol override if available, else base template
+$protoGoMod = Join-Path $protoDir "go_mod.tmpl"
+if (Test-Path $protoGoMod) {
+    Write-Host "  [+] Using protocol go.mod override" -ForegroundColor Green
+    Substitute-Template $protoGoMod (Join-Path $OutDir "go.mod")
 } else {
-    Substitute-Template (Join-Path $TemplateDir "pl_internal.go") (Join-Path $OutDir "pl_internal.go")
+    Substitute-Template (Join-Path $TemplateDir "go.mod")       (Join-Path $OutDir "go.mod")
+    Substitute-Template (Join-Path $TemplateDir "go.sum")       (Join-Path $OutDir "go.sum")
 }
 
-# pl_transport.go: use protocol override if available, else base template
+# pl_main.go: check for transport-specific listener main override in protocol
+$listenerMain = Join-Path $protoDir "listener_main_${Transport}.go.tmpl"
+if (Test-Path $listenerMain) {
+    Write-Host "  [+] Using protocol listener main override: listener_main_${Transport}.go.tmpl" -ForegroundColor Green
+    Substitute-Template $listenerMain (Join-Path $OutDir "pl_main.go")
+} else {
+    Substitute-Template (Join-Path $TemplateDir "pl_main.go")   (Join-Path $OutDir "pl_main.go")
+}
+
+# pl_internal.go: skip for non-socket transports; use protocol override if available, else base
+$skipInternal = @("http", "telegram", "dropbox")
+if ($skipInternal -notcontains $Transport) {
+    $protoInternal = Join-Path $protoDir "pl_internal.go.tmpl"
+    if (Test-Path $protoInternal) {
+        Write-Host "  [+] Using protocol internal override: pl_internal.go.tmpl" -ForegroundColor Green
+        Substitute-Template $protoInternal (Join-Path $OutDir "pl_internal.go")
+    } else {
+        Substitute-Template (Join-Path $TemplateDir "pl_internal.go") (Join-Path $OutDir "pl_internal.go")
+    }
+}
+
+# pl_transport.go: check for transport-specific override, else default override, else base
+$protoTransportVariant = Join-Path $protoDir "pl_transport_${Transport}.go.tmpl"
 $protoTransport = Join-Path $protoDir "pl_transport.go.tmpl"
-if (Test-Path $protoTransport) {
+if (Test-Path $protoTransportVariant) {
+    Write-Host "  [+] Using protocol transport override: pl_transport_${Transport}.go.tmpl" -ForegroundColor Green
+    Substitute-Template $protoTransportVariant (Join-Path $OutDir "pl_transport.go")
+} elseif (Test-Path $protoTransport) {
     Write-Host "  [+] Using protocol transport override: pl_transport.go.tmpl" -ForegroundColor Green
     Substitute-Template $protoTransport (Join-Path $OutDir "pl_transport.go")
 } else {
     Substitute-Template (Join-Path $TemplateDir "pl_transport.go") (Join-Path $OutDir "pl_transport.go")
 }
 
-Substitute-Template (Join-Path $TemplateDir "map.go")           (Join-Path $OutDir "map.go")
-Substitute-Template (Join-Path $TemplateDir "ax_config.axs")    (Join-Path $OutDir "ax_config.axs")
+# map.go: only needed for transports that use concurrent maps (TCP)
+$skipMap = @("http", "telegram", "dropbox", "smb")
+if ($skipMap -notcontains $Transport) {
+    Substitute-Template (Join-Path $TemplateDir "map.go")       (Join-Path $OutDir "map.go")
+}
+
+# ax_config.axs: check for transport-specific override in protocol, else base
+$protoAxConfig = Join-Path $protoDir "ax_config_${Transport}.axs.tmpl"
+if (Test-Path $protoAxConfig) {
+    Write-Host "  [+] Using protocol ax_config override: ax_config_${Transport}.axs.tmpl" -ForegroundColor Green
+    Substitute-Template $protoAxConfig (Join-Path $OutDir "ax_config.axs")
+} else {
+    Substitute-Template (Join-Path $TemplateDir "ax_config.axs") (Join-Path $OutDir "ax_config.axs")
+}
 
 # ─── Copy from protocol ────────────────────────────────────────────────────────
 

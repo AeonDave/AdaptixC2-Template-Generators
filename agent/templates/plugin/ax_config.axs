@@ -8,11 +8,9 @@ menu.add_session_agent(terminate_action, ["__NAME__"])
 
 let file_browser_action     = menu.create_action("File Browser",    function(agents_id) { agents_id.forEach(id => ax.open_browser_files(id)) });
 let process_browser_action  = menu.create_action("Process Browser", function(agents_id) { agents_id.forEach(id => ax.open_browser_process(id)) });
-let disk_browser_action     = menu.create_action("Disk Browser",    function(agents_id) { agents_id.forEach(id => ax.open_browser_disks(id)) });
 let terminal_browser_action = menu.create_action("Remote Terminal", function(agents_id) { agents_id.forEach(id => ax.open_remote_terminal(id)) });
 menu.add_session_browser(file_browser_action, ["__NAME__"])
 menu.add_session_browser(process_browser_action, ["__NAME__"])
-menu.add_session_browser(disk_browser_action, ["__NAME__"])
 menu.add_session_browser(terminal_browser_action, ["__NAME__"])
 
 let tunnel_access_action = menu.create_action("Create Tunnel", function(agents_id) { ax.open_access_tunnel(agents_id[0], true, true, true, true) });
@@ -89,7 +87,7 @@ event.on_processbrowser_list(event_process_action, ["__NAME__"]);
 var event_disks_action = function(id) {
     ax.execute_browser(id, "disks");
 }
-event.on_diskbrowser_list(event_disks_action, ["__NAME__"]);
+event.on_filebrowser_disks(event_disks_action, ["__NAME__"]);
 
 
 
@@ -242,7 +240,7 @@ function RegisterCommands(listenerType)
     let cmd_run_win = ax.create_command("run", "Execute long command or scripts", "run C:\\Windows\\cmd.exe /c \"whoami /all\"", "Task: command run");
     cmd_run_win.addArgString("program", true);
     cmd_run_win.addArgString("args", false);
-    cmd_run_win.addArgFlag("-s", "Steal token from target process (run as impersonated user)");
+    cmd_run_win.addArgBool("-s", "Steal token from target process (run as impersonated user)");
     let cmd_run_unix = ax.create_command("run", "Execute long command or scripts", "run /tmp/script.sh", "Task: command run");
     cmd_run_unix.addArgString("program", true);
     cmd_run_unix.addArgString("args", false);
@@ -393,15 +391,15 @@ function GenerateUI(listeners_type)
 
     form.connect(comboOS, "currentTextChanged", function(text) {
         if(text == "windows") {
-            comboFormat.setItems(["Exe", "Service Exe", "DLL", "Shellcode"]);
+            comboFormat.addItems(["Exe", "Service Exe", "DLL", "Shellcode"]);
             checkWin7.setVisible(true);
         }
         else if (text == "linux") {
-            comboFormat.setItems(["Binary", "Shared Object (.so)"]);
+            comboFormat.addItems(["Binary", "Shared Object (.so)"]);
             checkWin7.setVisible(false);
         }
         else {
-            comboFormat.setItems(["Binary Mach-O", "Dynamic Library (.dylib)"]);
+            comboFormat.addItems(["Binary Mach-O", "Dynamic Library (.dylib)"]);
             checkWin7.setVisible(false);
         }
     });

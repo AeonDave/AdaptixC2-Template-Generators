@@ -48,6 +48,7 @@ echo ""
 
 PROTOCOL="${PROTOCOL:-}"
 LISTENER_TYPE="${LISTENER_TYPE:-}"
+TRANSPORT="${TRANSPORT:-tcp}"
 
 # ─── Discover protocols ─────────────────────────────────────────────────────────
 
@@ -94,19 +95,26 @@ PROTO_DIR="$PROTOCOLS_DIR/$PROTOCOL"
 
 # ─── Input: Listener name ──────────────────────────────────────────────────────
 
-while true; do
-    read -rp "Listener name (lowercase, e.g. telegram): " LISTENER_NAME
+LISTENER_NAME="${NAME:-}"
+if [[ -n "$LISTENER_NAME" ]]; then
     LISTENER_NAME=$(echo "$LISTENER_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_')
-    if [[ -z "$LISTENER_NAME" ]]; then
-        warn "Name cannot be empty."
-        continue
-    fi
-    if [[ -d "$EXTENDERS_DIR/${LISTENER_NAME}_listener" ]]; then
-        warn "Directory ${LISTENER_NAME}_listener already exists!"
-        continue
-    fi
-    break
-done
+    [[ -z "$LISTENER_NAME" ]] && fail "Invalid name."
+    [[ -d "$EXTENDERS_DIR/${LISTENER_NAME}_listener" ]] && fail "Directory ${LISTENER_NAME}_listener already exists!"
+else
+    while true; do
+        read -rp "Listener name (lowercase, e.g. telegram): " LISTENER_NAME
+        LISTENER_NAME=$(echo "$LISTENER_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_')
+        if [[ -z "$LISTENER_NAME" ]]; then
+            warn "Name cannot be empty."
+            continue
+        fi
+        if [[ -d "$EXTENDERS_DIR/${LISTENER_NAME}_listener" ]]; then
+            warn "Directory ${LISTENER_NAME}_listener already exists!"
+            continue
+        fi
+        break
+    done
+fi
 
 # Capitalize first letter
 LISTENER_NAME_CAP="$(echo "${LISTENER_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${LISTENER_NAME:1}"
@@ -122,10 +130,20 @@ if [[ "$LISTENER_TYPE" != "external" && "$LISTENER_TYPE" != "internal" ]]; then
     fail "Listener type must be 'external' or 'internal'."
 fi
 
+# ─── Input: Transport variant ───────────────────────────────────────────────────
+
+TRANSPORT=$(echo "$TRANSPORT" | tr '[:upper:]' '[:lower:]')
+case "$TRANSPORT" in
+    tcp|http|telegram|dropbox|smb) ;;
+    *) fail "Transport must be one of: tcp, http, telegram, dropbox, smb.";;
+esac
+fi
+
 echo ""
 info "Creating listener: ${LISTENER_NAME}_listener"
 info "  Protocol    : ${PROTOCOL}"
 info "  Type        : ${LISTENER_TYPE}"
+info "  Transport   : ${TRANSPORT}"
 info "  Directory   : ${EXTENDERS_DIR}/${LISTENER_NAME}_listener/"
 echo ""
 
@@ -154,22 +172,64 @@ substitute_protocol() {
 
 info "Generating listener files..."
 substitute "$TEMPLATE_DIR/config.yaml"      "$OUT_DIR/config.yaml"
-substitute "$TEMPLATE_DIR/go.mod"           "$OUT_DIR/go.mod"
-substitute "$TEMPLATE_DIR/go.sum"           "$OUT_DIR/go.sum"
 substitute "$TEMPLATE_DIR/Makefile"         "$OUT_DIR/Makefile"
-substitute "$TEMPLATE_DIR/pl_main.go"       "$OUT_DIR/pl_main.go"
 
-# pl_transport.go: use protocol override if available, else base template
+# go.mod: use protocol override if available, else base template
+PROTO_GOMOD="$PROTO_DIR/go_mod.tmpl"
+if [[ -f "$PROTO_GOMOD" ]]; then
+    ok "Using protocol go.mod override"
+    substitute "$PROTO_GOMOD" "$OUT_DIR/go.mod"
+else
+    substitute "$TEMPLATE_DIR/go.mod"       "$OUT_DIR/go.mod"
+    substitute "$TEMPLATE_DIR/go.sum"       "$OUT_DIR/go.sum"
+fi
+
+# pl_main.go: check for transport-specific listener main override in protocol
+LISTENER_MAIN="$PROTO_DIR/listener_main_${TRANSPORT}.go.tmpl"
+if [[ -f "$LISTENER_MAIN" ]]; then
+    ok "Using protocol listener main override: listener_main_${TRANSPORT}.go.tmpl"
+    substitute "$LISTENER_MAIN" "$OUT_DIR/pl_main.go"
+else
+    substitute "$TEMPLATE_DIR/pl_main.go"   "$OUT_DIR/pl_main.go"
+fi
+
+# pl_internal.go: skip for non-socket transports; use protocol override if available, else base
+if [[ "$TRANSPORT" != "http" && "$TRANSPORT" != "telegram" && "$TRANSPORT" != "dropbox" ]]; then
+    PROTO_INTERNAL="$PROTO_DIR/pl_internal.go.tmpl"
+    if [[ -f "$PROTO_INTERNAL" ]]; then
+        ok "Using protocol internal override: pl_internal.go.tmpl"
+        substitute "$PROTO_INTERNAL" "$OUT_DIR/pl_internal.go"
+    else
+        substitute "$TEMPLATE_DIR/pl_internal.go" "$OUT_DIR/pl_internal.go"
+    fi
+fi
+
+# pl_transport.go: check for transport-specific override, else default override, else base
+PROTO_TRANSPORT_VARIANT="$PROTO_DIR/pl_transport_${TRANSPORT}.go.tmpl"
 PROTO_TRANSPORT="$PROTO_DIR/pl_transport.go.tmpl"
-if [[ -f "$PROTO_TRANSPORT" ]]; then
+if [[ -f "$PROTO_TRANSPORT_VARIANT" ]]; then
+    ok "Using protocol transport override: pl_transport_${TRANSPORT}.go.tmpl"
+    substitute "$PROTO_TRANSPORT_VARIANT" "$OUT_DIR/pl_transport.go"
+elif [[ -f "$PROTO_TRANSPORT" ]]; then
     ok "Using protocol transport override: pl_transport.go.tmpl"
     substitute "$PROTO_TRANSPORT" "$OUT_DIR/pl_transport.go"
 else
     substitute "$TEMPLATE_DIR/pl_transport.go"  "$OUT_DIR/pl_transport.go"
 fi
 
-substitute "$TEMPLATE_DIR/map.go"           "$OUT_DIR/map.go"
-substitute "$TEMPLATE_DIR/ax_config.axs"    "$OUT_DIR/ax_config.axs"
+# map.go: only needed for transports that use concurrent maps (TCP)
+if [[ "$TRANSPORT" == "tcp" ]]; then
+    substitute "$TEMPLATE_DIR/map.go"       "$OUT_DIR/map.go"
+fi
+
+# ax_config.axs: check for transport-specific override in protocol, else base
+PROTO_AX_CONFIG="$PROTO_DIR/ax_config_${TRANSPORT}.axs.tmpl"
+if [[ -f "$PROTO_AX_CONFIG" ]]; then
+    ok "Using protocol ax_config override: ax_config_${TRANSPORT}.axs.tmpl"
+    substitute "$PROTO_AX_CONFIG" "$OUT_DIR/ax_config.axs"
+else
+    substitute "$TEMPLATE_DIR/ax_config.axs" "$OUT_DIR/ax_config.axs"
+fi
 
 # ─── Copy from protocol ────────────────────────────────────────────────────────
 

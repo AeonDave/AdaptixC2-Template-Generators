@@ -1,5 +1,7 @@
 PLUGIN_DIR := $(CURDIR)
 PLUGIN_OUT := $(PLUGIN_DIR)/listener___NAME_____PROTOCOL__.so
+GO         ?= go
+TRIMPATH   ?= -trimpath
 
 .PHONY: all plugin clean
 
@@ -7,7 +9,7 @@ all: plugin
 
 plugin:
 	@echo "[*] Building __NAME__ __PROTOCOL__ listener plugin..."
-	cd $(PLUGIN_DIR) && GOEXPERIMENT=jsonv2,greenteagc go build -trimpath -buildmode=plugin -ldflags="-s -w" -o $(PLUGIN_OUT) .
+	cd $(PLUGIN_DIR) && GOEXPERIMENT=jsonv2,greenteagc $(GO) build $(TRIMPATH) -buildmode=plugin -ldflags="-s -w" -o $(PLUGIN_OUT) .
 	@echo "[+] Plugin built: $(PLUGIN_OUT)"
 
 dist: plugin

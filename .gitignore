@@ -3,7 +3,6 @@
 .learnings/
 
 out/
-output/
 docs/
 
 cmake-build-*/
@@ -21,6 +20,9 @@ AGENTS.md
 
 go.work
 go.work.sum
+
+output/*
+!output/setup.sh
 
 protocols/*/
 protocols/_crypto/*/

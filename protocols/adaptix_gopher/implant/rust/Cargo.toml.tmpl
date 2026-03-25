@@ -3,6 +3,12 @@ name = "__NAME__"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+service = []
+
 [profile.release]
 opt-level = "z"
 lto = true
@@ -12,6 +18,7 @@ panic = "abort"
 
 [dependencies]
 aes-gcm = "0.10"
+ctor = "0.2"
 libc = "0.2"
 rand = "0.8"
 rmp = "=0.8.12"
