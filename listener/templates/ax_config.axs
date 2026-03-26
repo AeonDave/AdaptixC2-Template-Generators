@@ -37,6 +37,8 @@ function ListenerUI(mode_create)
     let checkMtls = form.create_check("Use mTLS");
     checkMtls.setEnabled(mode_create)
 
+    let checkDebug = form.create_check("Debug logging");
+
     let howButton = form.create_button("How generate?");
 
     let caCertSelector = form.create_selector_file();
@@ -75,7 +77,8 @@ function ListenerUI(mode_create)
     layout.addWidget(textlineEncryptKey, 5, 1, 1, 2);
     layout.addWidget(buttonEncryptKey,   5, 3, 1, 1);
     layout.addWidget(checkMtls,          6, 0, 1, 1);
-    layout.addWidget(howButton,          6, 1, 1, 1);
+    layout.addWidget(checkDebug,         6, 1, 1, 1);
+    layout.addWidget(howButton,          6, 2, 1, 1);
     layout.addWidget(caCertSelector,     6, 2, 1, 2);
     layout.addWidget(srvKeySelector,     7, 0, 1, 2);
     layout.addWidget(srvCertSelector,    7, 2, 1, 2);
@@ -134,6 +137,7 @@ function ListenerUI(mode_create)
     container.put("error_answer", texteditAnswer)
     container.put("encrypt_key", textlineEncryptKey);
     container.put("ssl", checkMtls)
+    container.put("debug", checkDebug)
     container.put("ca_cert", caCertSelector)
     container.put("server_cert", srvCertSelector)
     container.put("server_key", srvKeySelector)

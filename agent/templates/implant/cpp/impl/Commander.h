@@ -21,7 +21,7 @@ public:
     ~Commander();
 
     // Process a buffer of packed command tasks
-    void ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, ULONG* outSize);
+    void ProcessCommandTasks(BYTE* recvBuf, ULONG recvSize, BYTE* outBuf, ULONG* outSize);
 
     // Command handlers
     void CmdTerminate(ULONG cmdId, BYTE* data, ULONG dataSize);

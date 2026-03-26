@@ -346,6 +346,60 @@ function GenerateUI(listeners_type)
     layout.addWidget(labelProxyPass, 10, 0, 1, 1);
     layout.addWidget(textProxyPass, 10, 1, 1, 1);
 
+    // ── Kill Date (optional — remove this block if not needed) ─────────
+    let hline3 = form.create_hline()
+
+    let checkKillDate = form.create_check("Set kill date");
+    let labelKillDate = form.create_label("Kill date:");
+    let dateKillDate = form.create_dateline();
+    let _tomorrow = new Date(); _tomorrow.setDate(_tomorrow.getDate() + 1);
+    dateKillDate.setDateString(("0" + _tomorrow.getDate()).slice(-2) + "." + ("0" + (_tomorrow.getMonth()+1)).slice(-2) + "." + _tomorrow.getFullYear());
+    dateKillDate.setVisible(false);
+    let labelKillTime = form.create_label("Kill time:");
+    let timeKillTime = form.create_timeline();
+    timeKillTime.setVisible(false);
+    labelKillDate.setVisible(false);
+    labelKillTime.setVisible(false);
+
+    form.connect(checkKillDate, "stateChanged", function() {
+        let checked = checkKillDate.isChecked();
+        labelKillDate.setVisible(checked);
+        dateKillDate.setVisible(checked);
+        labelKillTime.setVisible(checked);
+        timeKillTime.setVisible(checked);
+    });
+
+    // ── Working Time (optional — remove this block if not needed) ──────
+    let checkWorkTime = form.create_check("Set working time");
+    let labelStartTime = form.create_label("Start time:");
+    let timeStartTime = form.create_timeline();
+    timeStartTime.setVisible(false);
+    let labelEndTime = form.create_label("End time:");
+    let timeEndTime = form.create_timeline();
+    timeEndTime.setVisible(false);
+    labelStartTime.setVisible(false);
+    labelEndTime.setVisible(false);
+
+    form.connect(checkWorkTime, "stateChanged", function() {
+        let checked = checkWorkTime.isChecked();
+        labelStartTime.setVisible(checked);
+        timeStartTime.setVisible(checked);
+        labelEndTime.setVisible(checked);
+        timeEndTime.setVisible(checked);
+    });
+
+    layout.addWidget(hline3, 11, 0, 1, 2);
+    layout.addWidget(checkKillDate, 12, 1, 1, 1);
+    layout.addWidget(labelKillDate, 13, 0, 1, 1);
+    layout.addWidget(dateKillDate, 13, 1, 1, 1);
+    layout.addWidget(labelKillTime, 14, 0, 1, 1);
+    layout.addWidget(timeKillTime, 14, 1, 1, 1);
+    layout.addWidget(checkWorkTime, 15, 1, 1, 1);
+    layout.addWidget(labelStartTime, 16, 0, 1, 1);
+    layout.addWidget(timeStartTime, 16, 1, 1, 1);
+    layout.addWidget(labelEndTime, 17, 0, 1, 1);
+    layout.addWidget(timeEndTime, 17, 1, 1, 1);
+
     let container = form.create_container()
     container.put("arch", comboArch)
     container.put("format", comboFormat)
@@ -356,14 +410,29 @@ function GenerateUI(listeners_type)
     container.put("proxy_port", spinProxyPort)
     container.put("proxy_user", textProxyUser)
     container.put("proxy_pass", textProxyPass)
+    container.put("is_killdate", checkKillDate)
+    container.put("kill_date", dateKillDate)
+    container.put("kill_time", timeKillTime)
+    container.put("is_workingtime", checkWorkTime)
+    container.put("start_time", timeStartTime)
+    container.put("end_time", timeEndTime)
 
-    let panel = form.create_panel()
-    panel.setLayout(layout)
+    let innerPanel = form.create_panel()
+    innerPanel.setLayout(layout)
+
+    let scroll = form.create_scrollarea()
+    scroll.setPanel(innerPanel)
+
+    let outerLayout = form.create_vlayout()
+    outerLayout.addWidget(scroll)
+
+    let outerPanel = form.create_panel()
+    outerPanel.setLayout(outerLayout)
 
     return {
-        ui_panel: panel,
+        ui_panel: outerPanel,
         ui_container: container,
-        ui_height: 400,
-        ui_width: 500
+        ui_height: 600,
+        ui_width: 800
     }
 }

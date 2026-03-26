@@ -50,7 +50,7 @@ Commander::~Commander()
 {
 }
 
-void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, ULONG* outSize)
+void Commander::ProcessCommandTasks(BYTE* recvBuf, ULONG recvSize, BYTE* outBuf, ULONG* outSize)
 {
     // Protocol overlays normally replace this framing layer.
     // The base fallback uses the generic TaskHeader declared in protocol.h:
@@ -60,21 +60,21 @@ void Commander::ProcessCommandTasks(BYTE* recv, ULONG recvSize, BYTE* outBuf, UL
     if (outSize) {
         *outSize = 0;
     }
-    if (!recv || recvSize < sizeof(TaskHeader)) {
+    if (!recvBuf || recvSize < sizeof(TaskHeader)) {
         return;
     }
 
     ULONG offset = 0;
     while (offset + sizeof(TaskHeader) <= recvSize) {
         TaskHeader header = {0};
-        memcpy(&header, recv + offset, sizeof(TaskHeader));
+        memcpy(&header, recvBuf + offset, sizeof(TaskHeader));
         offset += sizeof(TaskHeader);
 
         if (header.dataSize > (recvSize - offset)) {
             break;
         }
 
-        BYTE* data = recv + offset;
+        BYTE* data = recvBuf + offset;
         offset += header.dataSize;
 
         DispatchTask(this, header.commandId, 0, data, header.dataSize);

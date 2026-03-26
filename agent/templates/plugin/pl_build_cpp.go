@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	adaptix "github.com/Adaptix-Framework/axc2"
 )
@@ -18,6 +19,16 @@ type GenerateConfig struct {
 	SvcName       string `json:"svc_name"`
 	ReconnTimeout string `json:"reconn_timeout"`
 	ReconnCount   int    `json:"reconn_count"`
+	// Kill Date — set via "Set kill date" checkbox in ax_config UI.
+	// Remove these fields (and the matching container.put lines) if not needed.
+	IsKillDate bool   `json:"is_killdate"`
+	KillDate   string `json:"kill_date"`
+	KillTime   string `json:"kill_time"`
+	// Working Time — set via "Set working time" checkbox in ax_config UI.
+	// Remove these fields (and the matching container.put lines) if not needed.
+	IsWorkTime bool   `json:"is_workingtime"`
+	StartTime  string `json:"start_time"`
+	EndTime    string `json:"end_time"`
 }
 
 var SrcPath = "src___NAME__"
@@ -188,4 +199,36 @@ func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentPro
 		fmt.Sprintf("Payload: %s (%d bytes)", Filename, len(Payload)))
 
 	return Payload, Filename, nil
+}
+
+// ─── Helper: parse kill date + time → Unix timestamp ───────────────────────
+// Returns 0 when the checkbox is unchecked.
+// Date format from ax_config dateline: "DD.MM.YYYY", time: "HH:MM".
+
+func parseKillDate(enabled bool, dateStr, timeStr string) int64 {
+	if !enabled || dateStr == "" {
+		return 0
+	}
+	if timeStr == "" {
+		timeStr = "00:00"
+	}
+	t, err := time.Parse("02.01.2006 15:04", dateStr+" "+timeStr)
+	if err != nil {
+		return 0
+	}
+	return t.Unix()
+}
+
+// ─── Helper: parse "HH:MM" → integer HHMM ─────────────────────────────────
+// Returns 0 when the checkbox is unchecked.
+
+func parseTimeHHMM(enabled bool, s string) int {
+	if !enabled || s == "" {
+		return 0
+	}
+	t, err := time.Parse("15:04", s)
+	if err != nil {
+		return 0
+	}
+	return t.Hour()*100 + t.Minute()
 }

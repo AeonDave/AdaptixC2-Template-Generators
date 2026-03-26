@@ -182,7 +182,7 @@ func (l *Listener) Edit(config string) (adaptix.ListenerData, []byte, error) {
 	l.transport.Config.ServerKey = conf.ServerKey
 	l.transport.Config.ClientCert = conf.ClientCert
 	l.transport.Config.ClientKey = conf.ClientKey
-	l.transport.Config.Protocol = conf.Protocol
+	l.transport.Config.Debug = conf.Debug
 
 	listenerData = buildListenerData(l.transport)
 	if l.transport.Config.Ssl {

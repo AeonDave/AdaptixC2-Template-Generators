@@ -72,6 +72,17 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
     return TRUE;
 }
 
+#elif defined(DEBUG)
+
+int main()
+{
+    AllocConsole();
+    freopen("CONOUT$", "w", stdout);
+    freopen("CONOUT$", "w", stderr);
+    AgentMain(NULL);
+    return 0;
+}
+
 #else
 
 int main()

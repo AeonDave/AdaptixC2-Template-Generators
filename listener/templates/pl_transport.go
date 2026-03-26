@@ -51,6 +51,15 @@ type TransportConfig struct {
 	ErrorAnswer        string `json:"error_answer"`
 	Timeout            int    `json:"timeout"`
 	Protocol           string `json:"protocol"`
+	Debug              bool   `json:"debug"`
+}
+
+// ─── Debug logging helper ──────────────────────────────────────────────────────
+
+func (t *Transport__NAME_CAP__) logDebug(format string, args ...interface{}) {
+	if t.Config.Debug {
+		fmt.Printf(format, args...)
+	}
 }
 
 type Connection struct {

@@ -13,6 +13,10 @@ let serviceName = "__NAME__";
 
 function InitService()
 {
+    let action = menu.create_action("__NAME_CAP__", function() {
+        openServiceDialog();
+    });
+    menu.add_main_axscript(action);
     /// START CODE HERE — runs when the service is loaded
     /// Example: ax.service_command(serviceName, "load_settings", null);
     /// END CODE HERE
@@ -20,7 +24,9 @@ function InitService()
 
 /// ─── Service UI ────────────────────────────────────────────────────────────────
 
-function ServiceUI()
+function ServiceUI() {}
+
+function openServiceDialog()
 {
     let labelInfo = form.create_label("__NAME_CAP__ Service");
 
@@ -34,20 +40,27 @@ function ServiceUI()
     let texteditArgs = form.create_textmulti();
     texteditArgs.setPlaceholder("Optional JSON arguments...");
 
+    let btnRun = form.create_button("Run");
+
     let layout = form.create_gridlayout();
     layout.addWidget(labelInfo,       0, 0, 1, 4);
     layout.addWidget(labelFunction,   1, 0, 1, 1);
     layout.addWidget(comboFunction,   1, 1, 1, 3);
     layout.addWidget(labelArgs,       2, 0, 1, 1);
     layout.addWidget(texteditArgs,    2, 1, 1, 3);
+    layout.addWidget(btnRun,          3, 0, 1, 4);
 
-    form.set_layout(layout);
-
-    form.on_save(function() {
+    form.connect(btnRun, "clicked", function() {
         let fn   = comboFunction.currentText();
-        let args = texteditArgs.toPlainText();
+        let args = texteditArgs.text();
         ax.service_command(serviceName, fn, args);
     });
+
+    let dialog = form.create_ext_dialog("__NAME_CAP__");
+    dialog.setLayout(layout);
+    dialog.setSize(480, 320);
+    dialog.setButtonsText("Close", "");
+    dialog.exec();
 }
 
 /// ─── Data handler ──────────────────────────────────────────────────────────────
@@ -66,7 +79,6 @@ function data_handler(data)
     }
 }
 
-/// ─── Init ──────────────────────────────────────────────────────────────────────
+/// ─── Boot ──────────────────────────────────────────────────────────────────────
 
 ServiceUI();
-InitService();
