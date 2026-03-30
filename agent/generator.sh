@@ -502,12 +502,7 @@ process_evasion_markers() {
                         -e 's|// __EVASION_MOD__|mod evasion;|' \
                         "$f"
                     if grep -q '# __EVASION_FEATURES__' "$f"; then
-                        sed -i '/# __EVASION_FEATURES__/{
-                            s|# __EVASION_FEATURES__||
-                            a\\
-[features]\
-evasion = []
-                        }' "$f"
+                        sed -i 's|# __EVASION_FEATURES__|evasion = []|' "$f"
                     fi
                     ;;
             esac

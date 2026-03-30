@@ -4,6 +4,8 @@
 
 out/
 docs/
+tools/
+TOOL_USAGE.md
 
 cmake-build-*/
 *.iws

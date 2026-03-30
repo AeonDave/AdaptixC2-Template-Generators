@@ -84,10 +84,13 @@ impl JobsController {
         false
     }
 
-    /// Collect all job entries for reporting to the server.
+    /// Collect running job entries for reporting to the server.
     pub fn list(&self) -> Vec<(u32, u32, u32)> {
         if let Ok(v) = self.jobs.lock() {
-            v.iter().map(|j| (j.job_id, j.job_type, j.state)).collect()
+            v.iter()
+                .filter(|j| j.state == JOB_STATE_RUNNING || j.state == JOB_STATE_STARTING)
+                .map(|j| (j.job_id, j.job_type, j.state))
+                .collect()
         } else {
             Vec::new()
         }

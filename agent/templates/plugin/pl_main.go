@@ -1154,7 +1154,9 @@ func (ext *__NAME_CAP__Extender) ProcessData(agentData adaptix.AgentData, decryp
 							stringType = "Download"
 						} else if value.JobType == 0x3 {
 							stringType = "Process"
-						} else if value.JobType == 0x6 {
+						} else if value.JobType == 0x4 {
+							stringType = "Shell"
+						} else if value.JobType == 0x5 {
 							stringType = "Async BOF"
 						}
 						Output += fmt.Sprintf("\n %-10v  %-13s", value.JobId, stringType)

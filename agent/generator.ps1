@@ -661,12 +661,7 @@ function Process-EvasionMarkers {
                         $modified = $true
                     }
                     if ($content -match '# __EVASION_FEATURES__') {
-                        $featBlock = @"
-
-[features]
-evasion = []
-"@
-                        $content = $content -replace '\s*# __EVASION_FEATURES__', $featBlock
+                        $content = $content -replace '# __EVASION_FEATURES__', 'evasion = []'
                         $modified = $true
                     }
                 }

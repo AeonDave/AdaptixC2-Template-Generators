@@ -43,9 +43,19 @@ pub const COMMAND_EXEC_BOF: u8 = 50;
 pub const COMMAND_EXEC_BOF_OUT: u8 = 51;
 pub const COMMAND_EXEC_BOF_ASYNC: u8 = 52;
 
+// Self-delete, token, config
+pub const COMMAND_SELFDEL: u8 = 53;
+pub const COMMAND_TOKEN_STEAL: u8 = 54;
+pub const COMMAND_TOKEN_IMPERSONATE: u8 = 55;
+pub const COMMAND_TOKEN_MAKE: u8 = 56;
+pub const COMMAND_TOKEN_LIST: u8 = 57;
+pub const COMMAND_TOKEN_REMOVE: u8 = 58;
+pub const COMMAND_TOKEN_PRIVS: u8 = 59;
+pub const COMMAND_CONFIG: u8 = 60;
+
 // Job management
-pub const COMMAND_JOB_LIST: u8 = 60;
-pub const COMMAND_JOB_KILL: u8 = 61;
+pub const COMMAND_JOB_LIST: u8 = 70;
+pub const COMMAND_JOB_KILL: u8 = 71;
 
 // ─── Response codes ────────────────────────────────────────────────────────────
 

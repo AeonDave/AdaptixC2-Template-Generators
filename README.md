@@ -57,7 +57,7 @@ Generators produce **interface stubs and template structures** -- you fill in th
     |-- _scaffold/                  Empty starting point (incl. C++/Rust implant stubs)
     |-- adaptix_gopher/             AES-256-GCM + msgpack
     |-- adaptix_default/            RC4 + binary packing
-    +-- ...                         Private/internal protocol overlays (not documented publicly)
+    +-- ...                         Your own protocol overlays
 ```
 
 ---
@@ -124,12 +124,14 @@ Scaffolds a server-side Go plugin + cross-platform implant (Go/C++/Rust) with in
 | Protocol | `-Protocol` | `PROTOCOL` | `adaptix_default` |
 | Language | `-Language` | `LANGUAGE` | `go` (interactive menu) |
 | Toolchain | `-Toolchain` | `TOOLCHAIN` | Auto-detected per language |
+| Evasion | `-Evasion` | `EVASION=1` | No (evasion gate scaffold) |
 
 ```powershell
 .\generator.ps1 -Mode agent -Name phantom -Protocol adaptix_default
 .\generator.ps1 -Mode agent -Name beacon -Language cpp
 .\generator.ps1 -Mode agent -Name xxx -Language rust -Protocol adaptix_gopher
 .\generator.ps1 -Mode agent -Name phantom -Language go -Toolchain go-garble
+.\generator.ps1 -Mode agent -Name stealth -Language cpp -Evasion   # includes evasion gate scaffold
 ```
 
 See [`agent/README.md`](agent/README.md) for generated structure, interfaces, toolchains, and implementation guide.
@@ -287,7 +289,7 @@ What this means in practice:
 
 The public Go template path now includes BOF sync/async plumbing and background job control, so `adaptix_gopher` can be treated as the supported msgpack/AES-GCM compatibility option for generator-produced Go agents and listeners.
 
-Private/internal protocols may exist in this repository, but they are intentionally not documented as public bundled options here.
+Additional protocols may exist beyond what is documented here.
 
 ### Which protocol should I use?
 
@@ -295,6 +297,7 @@ Use:
 
 - `adaptix_default` when you want **beacon-family interoperability** or a binary protocol that tracks the original Adaptix beacon model
 - `adaptix_gopher` when you want **gopher-family interoperability** or a msgpack/AES-GCM protocol with simpler extension ergonomics
+- a **custom protocol** when you need a different wire format, crypto, or transport — use `_scaffold` as the starting point
 
 ### Recommended Usage Pattern
 

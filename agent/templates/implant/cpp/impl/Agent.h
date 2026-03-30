@@ -11,6 +11,7 @@
 #include <windows.h>
 
 #include <vector>
+#include <string>
 #include <stdint.h>
 
 // Forward declarations
@@ -19,6 +20,13 @@ class Connector;
 class JobsController;
 class Downloader;
 // __EVASION_FORWARD_DECL__
+
+struct TokenEntry {
+    int         id;
+    HANDLE      hToken;
+    std::string domain;
+    std::string username;
+};
 
 class Agent
 {
@@ -39,6 +47,15 @@ public:
 
     // Pending type-2 (job) output messages queued by async commands.
     std::vector<std::vector<uint8_t>> pendingJobOutput;
+
+    // Runtime config (modifiable via COMMAND_CONFIG)
+    DWORD       ppidSpoof = 0;       // parent PID for spoofing; 0 = disabled
+    BOOL        blockDlls = FALSE;   // block non-Microsoft DLLs in child processes
+    std::string spawnTo;             // sacrificial process path
+
+    // Token vault
+    std::vector<TokenEntry> tokenVault;
+    int nextTokenId = 1;
 
     // __EVASION_MEMBER__
 

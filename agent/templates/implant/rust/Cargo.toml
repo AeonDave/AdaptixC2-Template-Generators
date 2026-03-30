@@ -8,6 +8,9 @@ crate-type = ["cdylib"]
 
 [features]
 service = []
+iat_hiding = []
+debug = []
+# __EVASION_FEATURES__
 
 [profile.release]
 opt-level = "z"
@@ -20,4 +23,3 @@ panic = "abort"
 libc = "0.2"
 ctor = "0.2"
 # Protocol overlays may append extra dependencies here when needed.
-# __EVASION_FEATURES__

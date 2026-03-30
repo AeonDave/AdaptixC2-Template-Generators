@@ -3,6 +3,9 @@
 // Minimal scaffold. Implement the agent loop and connect it to
 // the protocol/crypto modules.
 
+// Hide console window on Windows when debug feature is disabled
+#![cfg_attr(all(windows, not(feature = "debug")), windows_subsystem = "windows")]
+
 mod config;
 mod crypto;
 mod protocol;

