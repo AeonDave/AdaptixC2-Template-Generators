@@ -16,6 +16,10 @@ TEMPLATES_ROOT="$(dirname "$SCRIPT_DIR")"
 PROTOCOLS_DIR="$TEMPLATES_ROOT/protocols"
 
 # Language & toolchain (env-based for non-interactive)
+NAME="${NAME:-}"
+WATERMARK="${WATERMARK:-}"
+PROTOCOL="${PROTOCOL:-}"
+LISTENER_NAMES="${LISTENER_NAMES:-}"
 LANGUAGE="${LANGUAGE:-}"
 TOOLCHAIN="${TOOLCHAIN:-}"
 EVASION="${EVASION:-}"
@@ -50,35 +54,43 @@ echo -e "${CYAN}╚════════════════════�
 echo ""
 
 # Agent name (lowercase, alphanumeric + underscore)
-while true; do
-    read -rp "Agent name (lowercase, e.g. phantom): " AGENT_NAME
-    AGENT_NAME=$(echo "$AGENT_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_')
-    if [[ -z "$AGENT_NAME" ]]; then
-        warn "Name cannot be empty."
-        continue
-    fi
-    if [[ -d "$EXTENDERS_DIR/${AGENT_NAME}_agent" ]]; then
-        warn "Directory ${AGENT_NAME}_agent already exists!"
-        continue
-    fi
-    break
-done
+if [[ -n "$NAME" ]]; then
+    AGENT_NAME=$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_')
+    [[ -z "$AGENT_NAME" ]] && fail "Invalid name."
+    [[ -d "$EXTENDERS_DIR/stub_${AGENT_NAME}_agent" ]] && fail "Directory stub_${AGENT_NAME}_agent already exists!"
+else
+    while true; do
+        read -rp "Agent name (lowercase, e.g. phantom): " AGENT_NAME
+        AGENT_NAME=$(echo "$AGENT_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_')
+        if [[ -z "$AGENT_NAME" ]]; then
+            warn "Name cannot be empty."
+            continue
+        fi
+        if [[ -d "$EXTENDERS_DIR/stub_${AGENT_NAME}_agent" ]]; then
+            warn "Directory stub_${AGENT_NAME}_agent already exists!"
+            continue
+        fi
+        break
+    done
+fi
+
+AGENT_DIR_NAME="stub_${AGENT_NAME}_agent"
 
 # Capitalize first letter
 AGENT_NAME_CAP="$(echo "${AGENT_NAME:0:1}" | tr '[:lower:]' '[:upper:]')${AGENT_NAME:1}"
 
 # Watermark (8-char hex, auto-generated or custom)
 DEFAULT_WATERMARK=$(head -c 4 /dev/urandom | xxd -p)
-read -rp "Watermark [${DEFAULT_WATERMARK}]: " WATERMARK
-WATERMARK=${WATERMARK:-$DEFAULT_WATERMARK}
+if [[ -z "$WATERMARK" ]]; then
+    read -rp "Watermark [${DEFAULT_WATERMARK}]: " WATERMARK
+    WATERMARK=${WATERMARK:-$DEFAULT_WATERMARK}
+fi
 # Validate: must be exactly 8 hex chars
 if ! echo "$WATERMARK" | grep -qE '^[0-9a-fA-F]{8}$'; then
     fail "Watermark must be exactly 8 hex characters (e.g. a1b2c3d4)."
 fi
 
 # ─── Protocol selection ─────────────────────────────────────────────────────────
-
-PROTOCOL="${PROTOCOL:-}"
 
 AVAILABLE_PROTOCOLS=()
 if [[ -d "$PROTOCOLS_DIR" ]]; then
@@ -126,9 +138,42 @@ elif [[ -z "$PROTOCOL" ]]; then
 fi
 
 PROTO_DIR=""
+PROTOCOL_CAP=""
 if [[ -n "$PROTOCOL" ]]; then
     PROTO_DIR="$PROTOCOLS_DIR/$PROTOCOL"
     [[ -d "$PROTO_DIR" ]] || fail "Protocol '$PROTOCOL' not found in $PROTOCOLS_DIR"
+    PROTOCOL_CAP="$(echo "${PROTOCOL:0:1}" | tr '[:lower:]' '[:upper:]')${PROTOCOL:1}"
+fi
+
+# ─── Listener binding defaults ───────────────────────────────────────────────
+
+CONFIGURED_LISTENERS=()
+if [[ -n "$LISTENER_NAMES" ]]; then
+    IFS=',' read -r -a RAW_LISTENERS <<< "$LISTENER_NAMES"
+    for listener_name in "${RAW_LISTENERS[@]}"; do
+        listener_name="$(echo "$listener_name" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+        [[ -n "$listener_name" ]] && CONFIGURED_LISTENERS+=("$listener_name")
+    done
+elif [[ -n "$PROTOCOL" ]]; then
+    CONFIGURED_LISTENERS+=("${AGENT_NAME_CAP}${PROTOCOL_CAP}")
+else
+    CONFIGURED_LISTENERS+=("GopherTCP")
+fi
+
+if [[ ${#CONFIGURED_LISTENERS[@]} -eq 0 ]]; then
+    CONFIGURED_LISTENERS+=("GopherTCP")
+fi
+
+LISTENERS_YAML=""
+for listener_name in "${CONFIGURED_LISTENERS[@]}"; do
+    LISTENERS_YAML+="  - \"${listener_name}\"\n"
+done
+LISTENERS_YAML="${LISTENERS_YAML%\\n}"
+
+if [[ ${#CONFIGURED_LISTENERS[@]} -gt 1 ]]; then
+    MULTI_LISTENERS="true"
+else
+    MULTI_LISTENERS="false"
 fi
 
 # ─── Language selection ──────────────────────────────────────────────────────
@@ -254,16 +299,16 @@ info "  Toolchain : ${TOOLCHAIN}"
 info "  Watermark : ${WATERMARK}"
 [[ "$ENABLE_EVASION" -eq 1 ]] && info "  Evasion   : enabled"
 [[ -n "$PROTOCOL" ]] && info "  Protocol  : ${PROTOCOL}"
-info "  Directory : ${EXTENDERS_DIR}/${AGENT_NAME}_agent/"
+info "  Directory : ${EXTENDERS_DIR}/${AGENT_DIR_NAME}/"
 echo ""
 
 # ─── Create directory structure ─────────────────────────────────────────────────
 
-OUT_DIR="$EXTENDERS_DIR/${AGENT_NAME}_agent"
+OUT_DIR="$EXTENDERS_DIR/${AGENT_DIR_NAME}"
 SRC_DIR="$OUT_DIR/src_${AGENT_NAME}"
 
-mkdir -p "$OUT_DIR"
-mkdir -p "$SRC_DIR"
+mkdir "$OUT_DIR"
+mkdir "$SRC_DIR"
 [[ -d "$IMPLANT_LANG_DIR/impl" ]]     && mkdir -p "$SRC_DIR/impl"
 [[ -d "$IMPLANT_LANG_DIR/crypto" ]]   && mkdir -p "$SRC_DIR/crypto"
 [[ -d "$IMPLANT_LANG_DIR/protocol" ]] && mkdir -p "$SRC_DIR/protocol"
@@ -282,11 +327,15 @@ fi
 # ─── Copy and substitute templates ─────────────────────────────────────────────
 
 substitute() {
-    sed -e "s|__NAME__|${AGENT_NAME}|g" \
-        -e "s|__NAME_CAP__|${AGENT_NAME_CAP}|g" \
-        -e "s|__WATERMARK__|${WATERMARK}|g" \
-        -e "s|__BUILD_TOOL__|${BUILD_TOOL}|g" \
-        "$1" > "$2"
+    local content
+    content="$(cat "$1")"
+    content="${content//__NAME_CAP__/$AGENT_NAME_CAP}"
+    content="${content//__NAME__/$AGENT_NAME}"
+    content="${content//__WATERMARK__/$WATERMARK}"
+    content="${content//__BUILD_TOOL__/$BUILD_TOOL}"
+    content="${content//__LISTENER_NAMES__/$LISTENERS_YAML}"
+    content="${content//__MULTI_LISTENERS__/$MULTI_LISTENERS}"
+    printf '%s' "$content" > "$2"
 }
 
 # Plugin files (top-level)
@@ -297,9 +346,13 @@ substitute "$TEMPLATE_DIR/plugin/go.sum"       "$OUT_DIR/go.sum"
 substitute "$TEMPLATE_DIR/plugin/Makefile"     "$OUT_DIR/Makefile"
 substitute "$TEMPLATE_DIR/plugin/pl_utils.go"  "$OUT_DIR/pl_utils.go"
 # pl_main.go — protocol-specific override if present
-if [[ -n "$PROTOCOL" && -f "$PROTO_DIR/pl_main.go.tmpl" ]]; then
+PROTO_MAIN=""
+if [[ -n "$PROTOCOL" ]]; then
+    PROTO_MAIN="$PROTO_DIR/pl_main.go.tmpl"
+fi
+if [[ -n "$PROTO_MAIN" && -f "$PROTO_MAIN" ]]; then
     info "Using protocol-specific pl_main.go from '$PROTOCOL'"
-    substitute "$PROTO_DIR/pl_main.go.tmpl" "$OUT_DIR/pl_main.go"
+    substitute "$PROTO_MAIN" "$OUT_DIR/pl_main.go"
 else
     substitute "$TEMPLATE_DIR/plugin/pl_main.go" "$OUT_DIR/pl_main.go"
 fi
@@ -323,9 +376,13 @@ case "$LANGUAGE" in
 esac
 if [[ -n "$BUILD_VARIANT" ]]; then
     BUILD_SRC="$TEMPLATE_DIR/plugin/$BUILD_VARIANT"
-    if [[ -n "$PROTOCOL" && -f "$PROTO_DIR/${BUILD_VARIANT}.tmpl" ]]; then
+    PROTO_BUILD=""
+    if [[ -n "$PROTOCOL" ]]; then
+        PROTO_BUILD="$PROTO_DIR/${BUILD_VARIANT}.tmpl"
+    fi
+    if [[ -n "$PROTO_BUILD" && -f "$PROTO_BUILD" ]]; then
         info "Using protocol-specific $BUILD_VARIANT from '$PROTOCOL'"
-        BUILD_SRC="$PROTO_DIR/${BUILD_VARIANT}.tmpl"
+        BUILD_SRC="$PROTO_BUILD"
     fi
     if [[ -f "$BUILD_SRC" ]]; then
         substitute "$BUILD_SRC" "$OUT_DIR/pl_build.go"
@@ -345,9 +402,13 @@ for f in "$IMPLANT_LANG_DIR"/*; do
 done
 
 # Crypto — from protocol .go.tmpl if Go and available, otherwise from language template
-if [[ "$LANGUAGE" == "go" && -n "$PROTOCOL" && -f "$PROTO_DIR/crypto.go.tmpl" ]]; then
+PROTO_CRYPTO_TMPL=""
+if [[ -n "$PROTOCOL" ]]; then
+    PROTO_CRYPTO_TMPL="$PROTO_DIR/crypto.go.tmpl"
+fi
+if [[ "$LANGUAGE" == "go" && -n "$PROTOCOL" && -f "$PROTO_CRYPTO_TMPL" ]]; then
     info "Applying protocol '$PROTOCOL' crypto..."
-    sed "s|__PACKAGE__|crypto|g" "$PROTO_DIR/crypto.go.tmpl" > "$SRC_DIR/crypto/crypto.go"
+    sed "s|__PACKAGE__|crypto|g" "$PROTO_CRYPTO_TMPL" > "$SRC_DIR/crypto/crypto.go"
 else
     for f in "$IMPLANT_LANG_DIR"/crypto/*; do
         [[ -f "$f" ]] || continue
@@ -356,12 +417,18 @@ else
 fi
 
 # Protocol types — from protocol .go.tmpl if Go and available, otherwise from language template
-if [[ "$LANGUAGE" == "go" && -n "$PROTOCOL" && -f "$PROTO_DIR/types.go.tmpl" && -f "$PROTO_DIR/constants.go.tmpl" ]]; then
+PROTO_TYPES_TMPL=""
+PROTO_CONSTANTS_TMPL=""
+if [[ -n "$PROTOCOL" ]]; then
+    PROTO_TYPES_TMPL="$PROTO_DIR/types.go.tmpl"
+    PROTO_CONSTANTS_TMPL="$PROTO_DIR/constants.go.tmpl"
+fi
+if [[ "$LANGUAGE" == "go" && -n "$PROTOCOL" && -f "$PROTO_TYPES_TMPL" && -f "$PROTO_CONSTANTS_TMPL" ]]; then
     info "Applying protocol '$PROTOCOL' types + constants..."
     {
-        cat "$PROTO_DIR/types.go.tmpl"
+        cat "$PROTO_TYPES_TMPL"
         echo ""
-        sed '/^package /d' "$PROTO_DIR/constants.go.tmpl"
+        sed '/^package /d' "$PROTO_CONSTANTS_TMPL"
     } | sed "s|__PACKAGE__|protocol|g" > "$SRC_DIR/protocol/protocol.go"
     # Also copy base protocol files that are NOT protocol.go (e.g. agent_types.go)
     for f in "$IMPLANT_LANG_DIR"/protocol/*; do
@@ -377,12 +444,12 @@ else
 fi
 
 # Plugin pl_utils.go — overlay with protocol if available
-if [[ -n "$PROTOCOL" && -f "$PROTO_DIR/types.go.tmpl" && -f "$PROTO_DIR/constants.go.tmpl" ]]; then
+if [[ -n "$PROTOCOL" && -f "$PROTO_TYPES_TMPL" && -f "$PROTO_CONSTANTS_TMPL" ]]; then
     info "Applying protocol '$PROTOCOL' to pl_utils.go..."
     {
-        cat "$PROTO_DIR/types.go.tmpl"
+        cat "$PROTO_TYPES_TMPL"
         echo ""
-        sed '/^package /d' "$PROTO_DIR/constants.go.tmpl"
+        sed '/^package /d' "$PROTO_CONSTANTS_TMPL"
     } | sed "s|__PACKAGE__|main|g" > "$OUT_DIR/pl_utils.go"
 fi
 
@@ -423,6 +490,8 @@ if [[ -n "$PROTOCOL" ]]; then
             if [[ "$LANGUAGE" == "go" ]] && [[ "$rel" == cpp/* || "$rel" == rust/* ]]; then
                 continue
             fi
+            # Skip evasion/ overlay files unless evasion is enabled
+            if [[ "$rel" == evasion/* ]] && [[ "$ENABLE_EVASION" -ne 1 ]]; then continue; fi
             target="${rel%.tmpl}"
             echo -e "  -> ${YELLOW}$target${NC}"
             mkdir -p "$(dirname "$SRC_DIR/$target")"
@@ -528,7 +597,7 @@ fi
 echo ""
 echo -e "${CYAN}Directory structure:${NC}"
 echo ""
-echo "  ${AGENT_NAME}_agent/"
+echo "  ${AGENT_DIR_NAME}/"
 echo "  ├── config.yaml          # Plugin manifest"
 echo "  ├── go.mod               # Plugin module"
 echo "  ├── Makefile             # Build targets"
@@ -543,7 +612,7 @@ echo -e "${CYAN}Language  : ${LANGUAGE}${NC}"
 echo -e "${CYAN}Toolchain : ${TOOLCHAIN}${NC}"
 echo ""
 echo -e "${YELLOW}Next steps:${NC}"
-echo "  1. cd ${EXTENDERS_DIR}/${AGENT_NAME}_agent"
+echo "  1. cd ${EXTENDERS_DIR}/${AGENT_DIR_NAME}"
 echo "  2. Implement the TODO stubs in src_${AGENT_NAME}/"
 echo "  3. Build: make full"
 echo ""

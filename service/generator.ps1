@@ -108,7 +108,7 @@ Write-Host ""
 
 # ─── Create directory ───────────────────────────────────────────────────────────
 
-New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+New-Item -ItemType Directory -Path $OutDir | Out-Null
 
 # ─── Substitute function ───────────────────────────────────────────────────────
 

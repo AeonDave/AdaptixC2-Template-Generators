@@ -183,7 +183,8 @@ Creates a new wire-protocol definition from `_scaffold/`:
 .\generator.ps1 -Mode protocol       # prompts for name
 ```
 
-This creates `protocols/<name>/` with stub `crypto.go.tmpl`, `constants.go.tmpl`, and `types.go.tmpl`.
+This creates `protocols/<name>/` with scaffold `crypto.go.tmpl`, `constants.go.tmpl`, and `types.go.tmpl`.
+The generated protocol directory is an intentional starting point: its crypto/codec templates contain placeholders and are not expected to interoperate until you complete them.
 Edit these to implement your serialization and encryption, then generate agents/listeners with `-Protocol <name>`.
 
 ### Crypto Swap
@@ -387,7 +388,7 @@ See [`service/README.md`](service/README.md) for stage registration and the wrap
 ```powershell
 .\generator.ps1 -Mode agent -Name phoenix -Protocol adaptix_default
 
-cd output\phoenix_agent\src_phoenix\impl
+cd output\stub_phoenix_agent\src_phoenix\impl
 # Edit agent_linux.go, agent_windows.go -- fill in // TODO: stubs
 
 cd ..\..
@@ -415,10 +416,10 @@ intentionally want one agent to advertise multiple listener names.
 .\generator.ps1 -Mode agent -Name phoenix -Protocol adaptix_default
 .\generator.ps1 -Mode service -Name crystalpalace -Wrapper
 
-# Implement agent stubs in output/phoenix_agent/src_phoenix/impl/
+# Implement agent stubs in output/stub_phoenix_agent/src_phoenix/impl/
 # Register wrapper stages in output/crystalpalace_wrapper/pl_main.go → initStages()
 
-cd output\phoenix_agent && go mod tidy && make full
+cd output\stub_phoenix_agent && go mod tidy && make full
 cd ..\crystalpalace_wrapper && go mod tidy && make plugin
 # Deploy both .so plugins -- wrapper hooks all agent builds automatically
 ```

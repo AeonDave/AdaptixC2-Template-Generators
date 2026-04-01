@@ -137,7 +137,6 @@ case "$TRANSPORT" in
     tcp|http|telegram|dropbox|smb) ;;
     *) fail "Transport must be one of: tcp, http, telegram, dropbox, smb.";;
 esac
-fi
 
 echo ""
 info "Creating listener: ${LISTENER_NAME}_listener"
@@ -150,7 +149,7 @@ echo ""
 # ─── Create directory ───────────────────────────────────────────────────────────
 
 OUT_DIR="$EXTENDERS_DIR/${LISTENER_NAME}_listener"
-mkdir -p "$OUT_DIR"
+mkdir "$OUT_DIR"
 
 # ─── Substitute functions ───────────────────────────────────────────────────────
 

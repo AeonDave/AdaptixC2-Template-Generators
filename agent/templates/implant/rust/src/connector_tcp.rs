@@ -4,6 +4,7 @@
 // The base template accepts a simple textual profile: "host:port".
 
 use crate::agent::Connector;
+use crate::obf;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
@@ -53,7 +54,7 @@ impl Connector for ConnectorTCP {
 
         let addr = format!("{}:{}", self.host, self.port);
         let stream = TcpStream::connect(&addr)
-            .map_err(|err| format!("failed to connect to {addr}: {err}"))?;
+            .map_err(|err| { let mut s = obf!(0xC1, "connect "); s.push_str(&addr); s.push_str(": "); s.push_str(&err.to_string()); s })?;
         let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
         let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
         self.stream = Some(stream);
@@ -70,24 +71,24 @@ impl Connector for ConnectorTCP {
         let len = (data.len() as u32).to_le_bytes();
         stream
             .write_all(&len)
-            .map_err(|err| format!("failed to send frame size: {err}"))?;
+            .map_err(|err| { let mut s = obf!(0xC1, "send size: "); s.push_str(&err.to_string()); s })?;
         if !data.is_empty() {
             stream
                 .write_all(data)
-                .map_err(|err| format!("failed to send frame body: {err}"))?;
+                .map_err(|err| { let mut s = obf!(0xC1, "send body: "); s.push_str(&err.to_string()); s })?;
         }
 
         let mut size_buf = [0u8; 4];
         stream
             .read_exact(&mut size_buf)
-            .map_err(|err| format!("failed to read frame size: {err}"))?;
+            .map_err(|err| { let mut s = obf!(0xC1, "read size: "); s.push_str(&err.to_string()); s })?;
         let size = u32::from_le_bytes(size_buf) as usize;
 
         let mut response = vec![0u8; size];
         if size > 0 {
             stream
                 .read_exact(&mut response)
-                .map_err(|err| format!("failed to read frame body: {err}"))?;
+                .map_err(|err| { let mut s = obf!(0xC1, "read body: "); s.push_str(&err.to_string()); s })?;
         }
 
         self.recv_buffer = Some(response.clone());

@@ -14,13 +14,13 @@ all: linux windows
 
 linux:
 	@echo "[*] Building $(BEACON) linux (release)..."
-	__BUILD_TOOL__ --release --target x86_64-unknown-linux-gnu
+	__BUILD_TOOL__ --target x86_64-unknown-linux-gnu
 	@cp target/x86_64-unknown-linux-gnu/release/$(BEACON) $(BEACON)_linux
 	@echo "[+] $(BEACON)_linux"
 
 windows:
 	@echo "[*] Building $(BEACON) windows (release)..."
-	__BUILD_TOOL__ --release --target x86_64-pc-windows-gnu
+	__BUILD_TOOL__ --target x86_64-pc-windows-gnu
 	@cp target/x86_64-pc-windows-gnu/release/$(BEACON).exe $(BEACON)_windows.exe
 	@echo "[+] $(BEACON)_windows.exe"
 

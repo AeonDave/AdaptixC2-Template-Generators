@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"time"
 
 	adaptix "github.com/Adaptix-Framework/axc2"
@@ -29,6 +30,9 @@ type GenerateConfig struct {
 	IsWorkTime bool   `json:"is_workingtime"`
 	StartTime  string `json:"start_time"`
 	EndTime    string `json:"end_time"`
+	// OLLVM Obfuscation — set via "OLLVM Obfuscation" checkbox in ax_config UI.
+	Obfuscation bool   `json:"obfuscation"`
+	OllvmSeed   string `json:"ollvm_seed"`
 }
 
 var SrcPath = "src___NAME__"
@@ -160,10 +164,23 @@ func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentPro
 
 	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO, "Compiling and linking...")
 
-	err = Ts.TsAgentBuildExecute(profile.BuilderId, srcDir, "make", makeTarget,
+	makeArgs := []string{makeTarget,
 		fmt.Sprintf("FORMAT=%s", makeFormat),
 		fmt.Sprintf("BEACON=%s/__NAME__", tempDir),
-		fmt.Sprintf("PROFILE_HEADER=%s", headerPath))
+		fmt.Sprintf("PROFILE_HEADER=%s", headerPath)}
+	if generateConfig.Obfuscation {
+		if _, err := exec.LookPath("x86_64-w64-mingw32-clang++"); err != nil {
+			_ = os.RemoveAll(tempDir)
+			return nil, "", fmt.Errorf("OLLVM obfuscation enabled but x86_64-w64-mingw32-clang++ not found in PATH")
+		}
+		makeArgs = append(makeArgs, "OLLVM=1")
+		if generateConfig.OllvmSeed != "" {
+			makeArgs = append(makeArgs, fmt.Sprintf("OLLVM_SEED=%s", generateConfig.OllvmSeed))
+		}
+		_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO, "OLLVM obfuscation enabled")
+	}
+
+	err = Ts.TsAgentBuildExecute(profile.BuilderId, srcDir, "make", makeArgs...)
 	if err != nil {
 		_ = os.RemoveAll(tempDir)
 		return nil, "", err

@@ -330,9 +330,11 @@ function RegisterCommands(listenerType)
     let cmd_config = ax.create_command("config", "Runtime agent configuration");
     cmd_config.addSubCommands([_cmd_config_ppid, _cmd_config_blockdlls, _cmd_config_spawnto]);
 
+    let cmd_secfeat = ax.create_command("secfeat", "Enumerate host security features (Secure Boot, VBS, HVCI, Credential Guard, LSA Protection)", "secfeat", "Task: enumerate security features");
+
     // ─── Command groups ─────────────────────────────────────────────────
-    let commands_win  = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_win,  cmd_config, cmd_cp, cmd_cd_win,  cmd_disks, cmd_download_win,  cmd_execute, cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_win,  cmd_mv, cmd_mkdir_win,  cmd_powershell, cmd_profile, cmd_ps, cmd_pwd, cmd_rev2self, cmd_rm_win,  cmd_rportfwd, cmd_run_win,  cmd_screenshot, cmd_selfdel, cmd_sleep, cmd_socks, cmd_shell_win,  cmd_terminate, cmd_token, cmd_unlink, cmd_upload_win,  cmd_zip_win] );
-    let commands_unix = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_unix, cmd_cp, cmd_cd_unix,            cmd_download_unix,             cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_unix, cmd_mv, cmd_mkdir_unix, cmd_profile, cmd_ps, cmd_pwd,               cmd_rm_unix, cmd_rportfwd, cmd_run_unix, cmd_screenshot, cmd_selfdel, cmd_sleep, cmd_socks, cmd_shell_unix, cmd_terminate, cmd_unlink, cmd_upload_unix, cmd_zip_unix] );
+    let commands_win  = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_win,  cmd_config, cmd_cp, cmd_cd_win,  cmd_disks, cmd_download_win,  cmd_execute, cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_win,  cmd_mv, cmd_mkdir_win,  cmd_powershell, cmd_profile, cmd_ps, cmd_pwd, cmd_rev2self, cmd_rm_win,  cmd_rportfwd, cmd_run_win,  cmd_screenshot, cmd_secfeat, cmd_selfdel, cmd_sleep, cmd_socks, cmd_shell_win,  cmd_terminate, cmd_token, cmd_unlink, cmd_upload_win,  cmd_zip_win] );
+    let commands_unix = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat_unix, cmd_cp, cmd_cd_unix,            cmd_download_unix,             cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls_unix, cmd_mv, cmd_mkdir_unix, cmd_profile, cmd_ps, cmd_pwd,               cmd_rm_unix, cmd_rportfwd, cmd_run_unix, cmd_screenshot, cmd_secfeat, cmd_selfdel, cmd_sleep, cmd_socks, cmd_shell_unix, cmd_terminate, cmd_unlink, cmd_upload_unix, cmd_zip_unix] );
 
     return {
         commands_windows: commands_win,

@@ -88,7 +88,7 @@ The implant directory (`src_<name>/`) varies by language.
 ### Go (default)
 
 ```
-<name>_agent/
+stub_<name>_agent/
 ├── config.yaml          # Plugin manifest (name, watermark, listeners)
 ├── go.mod               # Plugin Go module
 ├── Makefile             # Plugin build (agent_<name>.so)
@@ -131,7 +131,7 @@ The implant directory (`src_<name>/`) varies by language.
 ### C++
 
 ```
-<name>_agent/
+stub_<name>_agent/
 ├── (same plugin files)
 ├── pl_build.go              # Build logic (C++: profile_gen.h + make)
 ├── ax_config.axs            # C++: arch, format (Exe/DLL/Shellcode), svc_name
@@ -161,7 +161,7 @@ The implant directory (`src_<name>/`) varies by language.
 ### Rust
 
 ```
-<name>_agent/
+stub_<name>_agent/
 ├── (same plugin files)
 ├── pl_build.go              # Build logic (Rust: config.rs + cargo build)
 ├── ax_config.axs            # OS + arch selection

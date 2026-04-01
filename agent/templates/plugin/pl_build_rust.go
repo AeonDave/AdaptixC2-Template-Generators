@@ -164,7 +164,8 @@ func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentPro
 	// Build
 	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO, "Starting cargo build...")
 
-	cmdBuild := fmt.Sprintf("__BUILD_TOOL__ --release --target %s --target-dir %s%s", target, tempDir, cargoFlags)
+	cmdBuild := fmt.Sprintf("__BUILD_TOOL__ --target %s --target-dir %s%s", target, tempDir, cargoFlags)
+
 	shellCmd := fmt.Sprintf(`[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"; %s`, cmdBuild)
 	err = Ts.TsAgentBuildExecute(profile.BuilderId, srcDir, "sh", "-c", shellCmd)
 	if err != nil {

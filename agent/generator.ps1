@@ -83,9 +83,9 @@ Write-Host ""
 # Agent name
 if (-not [string]::IsNullOrEmpty($Name)) {
     $AgentName = ($Name.ToLower() -replace '[^a-z0-9_]', '')
-    $OutDir = Join-Path $ExtendersDir "${AgentName}_agent"
+    $OutDir = Join-Path $ExtendersDir "stub_${AgentName}_agent"
     if ([string]::IsNullOrEmpty($AgentName)) { Write-Host "[-] Invalid name." -ForegroundColor Red; exit 1 }
-    if (Test-Path $OutDir) { Write-Host "[-] Directory ${AgentName}_agent already exists!" -ForegroundColor Red; exit 1 }
+    if (Test-Path $OutDir) { Write-Host "[-] Directory stub_${AgentName}_agent already exists!" -ForegroundColor Red; exit 1 }
 } else {
     while ($true) {
         $AgentName = Read-Host "Agent name (lowercase, e.g. phantom)"
@@ -94,14 +94,16 @@ if (-not [string]::IsNullOrEmpty($Name)) {
             Write-Host "[!] Name cannot be empty." -ForegroundColor Yellow
             continue
         }
-        $OutDir = Join-Path $ExtendersDir "${AgentName}_agent"
+        $OutDir = Join-Path $ExtendersDir "stub_${AgentName}_agent"
         if (Test-Path $OutDir) {
-            Write-Host "[!] Directory ${AgentName}_agent already exists!" -ForegroundColor Yellow
+            Write-Host "[!] Directory stub_${AgentName}_agent already exists!" -ForegroundColor Yellow
             continue
         }
         break
     }
 }
+
+$AgentDirName = "stub_${AgentName}_agent"
 
 # Capitalize first letter
 $AgentNameCap = $AgentName.Substring(0,1).ToUpper() + $AgentName.Substring(1)
@@ -328,19 +330,19 @@ Write-Host ""
 
 $SrcDir = Join-Path $OutDir "src_$AgentName"
 
-New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-New-Item -ItemType Directory -Path $SrcDir -Force | Out-Null
+New-Item -ItemType Directory -Path $OutDir | Out-Null
+New-Item -ItemType Directory -Path $SrcDir | Out-Null
 if (Test-Path (Join-Path $ImplantLangDir "impl")) {
-    New-Item -ItemType Directory -Path (Join-Path $SrcDir "impl") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $SrcDir "impl") | Out-Null
 }
 if (Test-Path (Join-Path $ImplantLangDir "crypto")) {
-    New-Item -ItemType Directory -Path (Join-Path $SrcDir "crypto") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $SrcDir "crypto") | Out-Null
 }
 if (Test-Path (Join-Path $ImplantLangDir "protocol")) {
-    New-Item -ItemType Directory -Path (Join-Path $SrcDir "protocol") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $SrcDir "protocol") | Out-Null
 }
 if ($EnableEvasion -and (Test-Path (Join-Path $ImplantLangDir "evasion"))) {
-    New-Item -ItemType Directory -Path (Join-Path $SrcDir "evasion") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $SrcDir "evasion") | Out-Null
 }
 
 # ─── Parse toolchain ────────────────────────────────────────────────────────────
@@ -544,11 +546,13 @@ if (-not [string]::IsNullOrEmpty($Protocol)) {
             $relToOverrides = $f.FullName.Substring($implantOverrides.Length + 1)
             # For Go, skip files under cpp/ and rust/ subdirectories
             if ($Language -eq 'go' -and $relToOverrides -match '^(cpp|rust)[\\/]') { continue }
+            # Skip evasion/ overlay files unless evasion is enabled
+            if ($relToOverrides -match '(^|[\\/])evasion[\\/]' -and -not $EnableEvasion) { continue }
             $relPath = $relToOverrides -replace '\.tmpl$', ''
             $targetPath = Join-Path $SrcDir $relPath
             $tgtDir = Split-Path -Parent $targetPath
             if (-not (Test-Path $tgtDir)) {
-                New-Item -ItemType Directory -Path $tgtDir -Force | Out-Null
+                New-Item -ItemType Directory -Path $tgtDir | Out-Null
             }
             Write-Host "  -> $relPath" -ForegroundColor Yellow
             Substitute-Template $f.FullName $targetPath
@@ -698,7 +702,7 @@ if ($EnableEvasion) {
 Write-Host ""
 Write-Host "Directory structure:" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "  ${AgentName}_agent\"
+Write-Host "  $AgentDirName\"
 Write-Host "  |-- config.yaml          # Plugin manifest"
 Write-Host "  |-- go.mod               # Plugin module"
 Write-Host "  |-- Makefile             # Build targets"

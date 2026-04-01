@@ -304,8 +304,10 @@ function RegisterCommands(listenerType)
     let cmd_config = ax.create_command("config", "Runtime agent configuration");
     cmd_config.addSubCommands([_cmd_config_ppid, _cmd_config_blockdlls, _cmd_config_spawnto]);
 
+    let cmd_secfeat = ax.create_command("secfeat", "Enumerate host security features (Secure Boot, VBS, HVCI, Credential Guard, LSA Protection)", "secfeat", "Task: enumerate security features");
+
     // ─── Command group (Windows only) ───────────────────────────────────
-    let commands_win = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat, cmd_config, cmd_cp, cmd_cd, cmd_disks, cmd_download, cmd_execute, cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls, cmd_mv, cmd_mkdir, cmd_powershell, cmd_profile, cmd_ps, cmd_pwd, cmd_rev2self, cmd_rm, cmd_rportfwd, cmd_run, cmd_screenshot, cmd_selfdel, cmd_sleep, cmd_socks, cmd_shell, cmd_terminate, cmd_token, cmd_unlink, cmd_upload, cmd_zip] );
+    let commands_win = ax.create_commands_group("__NAME__", [cmd_burst, cmd_cat, cmd_config, cmd_cp, cmd_cd, cmd_disks, cmd_download, cmd_execute, cmd_exfil, cmd_exit, cmd_getuid, cmd_interact, cmd_jobs, cmd_kill, cmd_link, cmd_lportfwd, cmd_ls, cmd_mv, cmd_mkdir, cmd_powershell, cmd_profile, cmd_ps, cmd_pwd, cmd_rev2self, cmd_rm, cmd_rportfwd, cmd_run, cmd_screenshot, cmd_secfeat, cmd_selfdel, cmd_sleep, cmd_socks, cmd_shell, cmd_terminate, cmd_token, cmd_unlink, cmd_upload, cmd_zip] );
 
     return {
         commands_windows: commands_win
@@ -432,6 +434,22 @@ function GenerateUI(listeners_type)
     let checkPPIDSpoof = form.create_check("PPID Spoofing");
     let checkBlockDLLs = form.create_check("Block non-Microsoft DLLs");
 
+    // ── OLLVM Obfuscation (optional) ───────────────────────────────────
+    let hlineOllvm = form.create_hline()
+    let checkObfuscation = form.create_check("OLLVM Obfuscation (ollvm-mingw)");
+    let labelOllvmSeed = form.create_label("OLLVM Seed:");
+    let textOllvmSeed = form.create_textline("");
+    textOllvmSeed.setPlaceholder("numeric seed for reproducible builds (optional)");
+
+    labelOllvmSeed.setVisible(false);
+    textOllvmSeed.setVisible(false);
+
+    form.connect(checkObfuscation, "stateChanged", function() {
+        let checked = checkObfuscation.isChecked();
+        labelOllvmSeed.setVisible(checked);
+        textOllvmSeed.setVisible(checked);
+    });
+
     // ── Guardrails (optional) ──────────────────────────────────────────
     let hline7 = form.create_hline()
 
@@ -489,16 +507,20 @@ function GenerateUI(listeners_type)
     layout.addWidget(checkPatchAMSI, 23, 1, 1, 1);
     layout.addWidget(checkPPIDSpoof, 24, 1, 1, 1);
     layout.addWidget(checkBlockDLLs, 25, 1, 1, 1);
-    layout.addWidget(hline7, 26, 0, 1, 2);
-    layout.addWidget(checkGuardrails, 27, 1, 1, 1);
-    layout.addWidget(labelGuardIP, 28, 0, 1, 1);
-    layout.addWidget(textGuardIP, 28, 1, 1, 1);
-    layout.addWidget(labelGuardHost, 29, 0, 1, 1);
-    layout.addWidget(textGuardHost, 29, 1, 1, 1);
-    layout.addWidget(labelGuardUser, 30, 0, 1, 1);
-    layout.addWidget(textGuardUser, 30, 1, 1, 1);
-    layout.addWidget(labelGuardDomain, 31, 0, 1, 1);
-    layout.addWidget(textGuardDomain, 31, 1, 1, 1);
+    layout.addWidget(hlineOllvm, 26, 0, 1, 2);
+    layout.addWidget(checkObfuscation, 27, 1, 1, 1);
+    layout.addWidget(labelOllvmSeed, 28, 0, 1, 1);
+    layout.addWidget(textOllvmSeed, 28, 1, 1, 1);
+    layout.addWidget(hline7, 29, 0, 1, 2);
+    layout.addWidget(checkGuardrails, 30, 1, 1, 1);
+    layout.addWidget(labelGuardIP, 31, 0, 1, 1);
+    layout.addWidget(textGuardIP, 31, 1, 1, 1);
+    layout.addWidget(labelGuardHost, 32, 0, 1, 1);
+    layout.addWidget(textGuardHost, 32, 1, 1, 1);
+    layout.addWidget(labelGuardUser, 33, 0, 1, 1);
+    layout.addWidget(textGuardUser, 33, 1, 1, 1);
+    layout.addWidget(labelGuardDomain, 34, 0, 1, 1);
+    layout.addWidget(textGuardDomain, 34, 1, 1, 1);
 
     let container = form.create_container()
     container.put("arch", comboArch)
@@ -522,6 +544,8 @@ function GenerateUI(listeners_type)
     container.put("patch_amsi", checkPatchAMSI)
     container.put("ppid_spoof", checkPPIDSpoof)
     container.put("block_dlls", checkBlockDLLs)
+    container.put("obfuscation", checkObfuscation)
+    container.put("ollvm_seed", textOllvmSeed)
     container.put("guardrails", checkGuardrails)
     container.put("guard_ip", textGuardIP)
     container.put("guard_hostname", textGuardHost)

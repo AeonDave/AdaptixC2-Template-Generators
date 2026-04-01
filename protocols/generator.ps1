@@ -57,20 +57,21 @@ if (-not [string]::IsNullOrEmpty($Name)) {
     }
 }
 
-$OutDir = Join-Path $ScriptDir $ProtoName
+$ProtocolDirName = $ProtoName
+$OutDir = Join-Path $ScriptDir $ProtocolDirName
 if (Test-Path $OutDir) {
-    Write-Host "[-] Protocol '$ProtoName' already exists at $OutDir" -ForegroundColor Red
+    Write-Host "[-] Protocol '$ProtocolDirName' already exists at $OutDir" -ForegroundColor Red
     exit 1
 }
 
 Write-Host ""
-Write-Host "[*] Creating protocol: $ProtoName" -ForegroundColor Cyan
+Write-Host "[*] Creating protocol: $ProtocolDirName" -ForegroundColor Cyan
 Write-Host "      Directory : $OutDir\" -ForegroundColor Cyan
 Write-Host ""
 
 # ─── Scaffold ───────────────────────────────────────────────────────────────────
 
-New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+New-Item -ItemType Directory -Path $OutDir | Out-Null
 
 # Copy top-level scaffold files (Go templates + meta.yaml)
 foreach ($f in Get-ChildItem -Path $ScaffoldDir -File) {
@@ -101,10 +102,11 @@ if (Test-Path $ImplantScaffold) {
 # ─── Summary ────────────────────────────────────────────────────────────────────
 
 Write-Host ""
-Write-Host "[+] Protocol '$ProtoName' created!" -ForegroundColor Green
+Write-Host "[+] Protocol '$ProtocolDirName' created!" -ForegroundColor Green
+Write-Host "    Scaffold only: crypto/codec templates contain placeholders until you implement them." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Files:" -ForegroundColor Cyan
-Write-Host "  $ProtoName\"
+Write-Host "  $ProtocolDirName\"
 Write-Host "  |-- meta.yaml                           # Protocol metadata"
 Write-Host "  |-- crypto.go.tmpl                      # Go EncryptData / DecryptData"
 Write-Host "  |-- constants.go.tmpl                   # Go COMMAND_* / RESP_* constants"
@@ -123,5 +125,8 @@ Write-Host "  4. Edit implant\cpp\crypto\*          - C++ encryption (must match
 Write-Host "  5. Edit implant\cpp\protocol\*        - C++ constants + wire types"
 Write-Host "  6. Edit implant\rust\src\crypto.rs    - Rust encryption (must match Go)"
 Write-Host "  7. Edit implant\rust\src\protocol.rs  - Rust constants + wire types"
-Write-Host "  8. Use with: generator.ps1 -Protocol $ProtoName"
+Write-Host "  8. Use with: generator.ps1 -Protocol $ProtocolDirName"
+Write-Host ""
+Write-Host "Note:" -ForegroundColor Yellow
+Write-Host "  The generated protocol scaffold is intentionally non-functional until the crypto and wire codec templates are completed."
 Write-Host ""

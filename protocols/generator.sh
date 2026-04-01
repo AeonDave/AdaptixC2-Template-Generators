@@ -48,19 +48,23 @@ if [[ -z "$PROTO_NAME" ]]; then
         fi
         break
     done
+else
+    PROTO_NAME="$(echo "$PROTO_NAME" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_')"
+    [[ -z "$PROTO_NAME" ]] && fail "Invalid name."
 fi
 
-OUT_DIR="$SCRIPT_DIR/$PROTO_NAME"
-[[ -d "$OUT_DIR" ]] && fail "Protocol '$PROTO_NAME' already exists at $OUT_DIR"
+PROTO_DIR_NAME="${PROTO_NAME}"
+OUT_DIR="$SCRIPT_DIR/$PROTO_DIR_NAME"
+[[ -d "$OUT_DIR" ]] && fail "Protocol '$PROTO_DIR_NAME' already exists at $OUT_DIR"
 
 echo ""
-info "Creating protocol: $PROTO_NAME"
+info "Creating protocol: $PROTO_DIR_NAME"
 info "  Directory : $OUT_DIR/"
 echo ""
 
 # ─── Scaffold ───────────────────────────────────────────────────────────────────
 
-mkdir -p "$OUT_DIR"
+mkdir "$OUT_DIR"
 
 # Copy top-level scaffold files (Go templates + meta.yaml)
 for f in "$SCAFFOLD_DIR"/*; do
@@ -85,10 +89,11 @@ fi
 # ─── Summary ────────────────────────────────────────────────────────────────────
 
 echo ""
-ok "Protocol '$PROTO_NAME' created!"
+ok "Protocol '$PROTO_DIR_NAME' created!"
+warn "Scaffold only: crypto/codec templates contain placeholders until you implement them."
 echo ""
 echo -e "${CYAN}Files:${NC}"
-echo "  $PROTO_NAME/"
+echo "  $PROTO_DIR_NAME/"
 echo "  ├── meta.yaml                            # Protocol metadata"
 echo "  ├── crypto.go.tmpl                       # Go EncryptData / DecryptData"
 echo "  ├── constants.go.tmpl                    # Go COMMAND_* / RESP_* constants"
@@ -107,5 +112,8 @@ echo "  4. Edit implant/cpp/crypto/*          - C++ encryption (must match Go)"
 echo "  5. Edit implant/cpp/protocol/*        - C++ constants + wire types"
 echo "  6. Edit implant/rust/src/crypto.rs    - Rust encryption (must match Go)"
 echo "  7. Edit implant/rust/src/protocol.rs  - Rust constants + wire types"
-echo "  8. Use with: generator.sh (select protocol '$PROTO_NAME')"
+echo "  8. Use with: generator.sh (select protocol '$PROTO_DIR_NAME')"
+echo ""
+echo -e "${YELLOW}Note:${NC}"
+echo "  The generated protocol scaffold is intentionally non-functional until the crypto and wire codec templates are completed."
 echo ""
