@@ -576,9 +576,11 @@ process_evasion_markers() {
                     ;;
             esac
         else
-            # Strip all evasion markers
-            sed -i -e '/^[[:space:]]*\/\/ __EVASION_[A-Z_]*__[[:space:]]*$/d' \
-                   -e '/^[[:space:]]*# __EVASION_[A-Z_]*__[[:space:]]*$/d' "$f"
+            # Strip all evasion markers (only rewrite if markers actually existed)
+            if grep -qE '__EVASION_[A-Z_]+__' "$f"; then
+                sed -i -e '/^[[:space:]]*\/\/ __EVASION_[A-Z_]*__[[:space:]]*$/d' \
+                       -e '/^[[:space:]]*# __EVASION_[A-Z_]*__[[:space:]]*$/d' "$f"
+            fi
         fi
     done
 }

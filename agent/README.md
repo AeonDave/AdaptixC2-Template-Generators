@@ -202,17 +202,24 @@ NAME=phantom EVASION=1 ./generator.sh
 **Behavior:**
 
 - **With `-Evasion`**: an `evasion/` directory is created in the implant source with a `Gate` interface
-  (5 methods: `Init`, `Syscall`, `ResolveFn`, `Call`, `Close`) and a default implementation that panics
-  on all methods, forcing you to provide a real implementation. Template marker comments (`// __EVASION_*__`)
+  (5 core methods: `Init`, `Syscall`, `ResolveFn`, `Call`, `Close`) and a default implementation that panics
+  on all core methods, forcing you to provide a real implementation. Template marker comments (`// __EVASION_*__`)
   are expanded into real evasion calls.
 - **Without `-Evasion`**: no `evasion/` directory is created, and all `// __EVASION_*__` markers are
   stripped from the generated code.
+
+The C++ `IEvasionGate` interface also exposes optional extension points with safe defaults:
+- `ResolveSsn(apiHash, outSsn, outAddr)` — SSN resolution by API hash (default: returns false)
+- `ConfigureSleep(regionBase, regionSize, sleepMs, jitter)` — sleep obfuscation setup (default: no-op)
+- `SleepMasked(ms)` — sleep with memory encryption (default: plain `Sleep()`)
+
+These do not need to be overridden unless you implement the corresponding evasion technique.
 
 | Language | Evasion files |
 |----------|---------------|
 | Go | `evasion/gate.go`, `default.go`, `gate_linux.go`, `gate_windows.go`, `gate_darwin.go` |
 | C++ | `evasion/IEvasionGate.h`, `DefaultGate.h`, `DefaultGate.cpp` |
-| Rust | Not yet implemented |
+| Rust | `evasion/mod.rs`, `default.rs`, `hash.rs`, `peb.rs`, `spoof.rs`, `syscall.rs`, `recycle_gate.rs`, `sleep_trampoline.rs`, `gate_helpers.rs` |
 
 ---
 

@@ -18,6 +18,8 @@ mod jobs;
 mod downloader;
 mod bof;
 #[macro_use]
+mod debug_log;
+#[macro_use]
 mod obf;
 // __EVASION_MOD__
 

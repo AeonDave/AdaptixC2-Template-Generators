@@ -434,20 +434,27 @@ function GenerateUI(listeners_type)
     let checkPPIDSpoof = form.create_check("PPID Spoofing");
     let checkBlockDLLs = form.create_check("Block non-Microsoft DLLs");
 
-    // ── OLLVM Obfuscation (optional) ───────────────────────────────────
-    let hlineOllvm = form.create_hline()
-    let checkObfuscation = form.create_check("OLLVM Obfuscation (ollvm-mingw)");
-    let labelOllvmSeed = form.create_label("OLLVM Seed:");
-    let textOllvmSeed = form.create_textline("");
-    textOllvmSeed.setPlaceholder("numeric seed for reproducible builds (optional)");
+    // ── LLVM Obfuscation (optional) ─────────────────────────────────────
+    let hlineLlvm = form.create_hline()
+    let checkLlvmObf = form.create_check("LLVM Obfuscation");
+    let labelLlvmCompiler = form.create_label("Compiler:");
+    let textLlvmCompiler = form.create_textline("");
+    textLlvmCompiler.setPlaceholder("/opt/Arkari/build/bin/clang or name in PATH");
+    let labelLlvmFlags = form.create_label("Flags:");
+    let textLlvmFlags = form.create_textline("");
+    textLlvmFlags.setPlaceholder("-mllvm -irobf-indbr -mllvm -irobf-icall ...");
 
-    labelOllvmSeed.setVisible(false);
-    textOllvmSeed.setVisible(false);
+    labelLlvmCompiler.setVisible(false);
+    textLlvmCompiler.setVisible(false);
+    labelLlvmFlags.setVisible(false);
+    textLlvmFlags.setVisible(false);
 
-    form.connect(checkObfuscation, "stateChanged", function() {
-        let checked = checkObfuscation.isChecked();
-        labelOllvmSeed.setVisible(checked);
-        textOllvmSeed.setVisible(checked);
+    form.connect(checkLlvmObf, "stateChanged", function() {
+        let checked = checkLlvmObf.isChecked();
+        labelLlvmCompiler.setVisible(checked);
+        textLlvmCompiler.setVisible(checked);
+        labelLlvmFlags.setVisible(checked);
+        textLlvmFlags.setVisible(checked);
     });
 
     // ── Guardrails (optional) ──────────────────────────────────────────
@@ -507,20 +514,22 @@ function GenerateUI(listeners_type)
     layout.addWidget(checkPatchAMSI, 23, 1, 1, 1);
     layout.addWidget(checkPPIDSpoof, 24, 1, 1, 1);
     layout.addWidget(checkBlockDLLs, 25, 1, 1, 1);
-    layout.addWidget(hlineOllvm, 26, 0, 1, 2);
-    layout.addWidget(checkObfuscation, 27, 1, 1, 1);
-    layout.addWidget(labelOllvmSeed, 28, 0, 1, 1);
-    layout.addWidget(textOllvmSeed, 28, 1, 1, 1);
-    layout.addWidget(hline7, 29, 0, 1, 2);
-    layout.addWidget(checkGuardrails, 30, 1, 1, 1);
-    layout.addWidget(labelGuardIP, 31, 0, 1, 1);
-    layout.addWidget(textGuardIP, 31, 1, 1, 1);
-    layout.addWidget(labelGuardHost, 32, 0, 1, 1);
-    layout.addWidget(textGuardHost, 32, 1, 1, 1);
-    layout.addWidget(labelGuardUser, 33, 0, 1, 1);
-    layout.addWidget(textGuardUser, 33, 1, 1, 1);
-    layout.addWidget(labelGuardDomain, 34, 0, 1, 1);
-    layout.addWidget(textGuardDomain, 34, 1, 1, 1);
+    layout.addWidget(hlineLlvm, 26, 0, 1, 2);
+    layout.addWidget(checkLlvmObf, 27, 1, 1, 1);
+    layout.addWidget(labelLlvmCompiler, 28, 0, 1, 1);
+    layout.addWidget(textLlvmCompiler, 28, 1, 1, 1);
+    layout.addWidget(labelLlvmFlags, 29, 0, 1, 1);
+    layout.addWidget(textLlvmFlags, 29, 1, 1, 1);
+    layout.addWidget(hline7, 30, 0, 1, 2);
+    layout.addWidget(checkGuardrails, 31, 1, 1, 1);
+    layout.addWidget(labelGuardIP, 32, 0, 1, 1);
+    layout.addWidget(textGuardIP, 32, 1, 1, 1);
+    layout.addWidget(labelGuardHost, 33, 0, 1, 1);
+    layout.addWidget(textGuardHost, 33, 1, 1, 1);
+    layout.addWidget(labelGuardUser, 34, 0, 1, 1);
+    layout.addWidget(textGuardUser, 34, 1, 1, 1);
+    layout.addWidget(labelGuardDomain, 35, 0, 1, 1);
+    layout.addWidget(textGuardDomain, 35, 1, 1, 1);
 
     let container = form.create_container()
     container.put("arch", comboArch)
@@ -544,8 +553,9 @@ function GenerateUI(listeners_type)
     container.put("patch_amsi", checkPatchAMSI)
     container.put("ppid_spoof", checkPPIDSpoof)
     container.put("block_dlls", checkBlockDLLs)
-    container.put("obfuscation", checkObfuscation)
-    container.put("ollvm_seed", textOllvmSeed)
+    container.put("llvm_obf", checkLlvmObf)
+    container.put("llvm_compiler", textLlvmCompiler)
+    container.put("llvm_flags", textLlvmFlags)
     container.put("guardrails", checkGuardrails)
     container.put("guard_ip", textGuardIP)
     container.put("guard_hostname", textGuardHost)

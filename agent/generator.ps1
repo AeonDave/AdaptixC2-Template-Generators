@@ -616,7 +616,7 @@ function Process-EvasionMarkers {
 	if err := gate.Init(); err != nil {
 		os.Exit(1)
 	}
-	_ = gate // TODO: pass gate to agent or store globally
+	agent.Gate = gate
 "@
                         $content = $content -replace '\s*// __EVASION_INIT__', "`n$initBlock"
                         $modified = $true
@@ -671,10 +671,13 @@ function Process-EvasionMarkers {
                 }
             }
         } else {
-            # Strip all evasion markers
+            # Strip all evasion markers (only rewrite if markers actually existed)
+            $original = $content
             $content = $content -replace '(?m)^\s*// __EVASION_[A-Z_]+__\s*\r?\n', ''
             $content = $content -replace '(?m)^\s*# __EVASION_[A-Z_]+__\s*\r?\n', ''
-            $modified = $true
+            if ($content -ne $original) {
+                $modified = $true
+            }
         }
 
         if ($modified) {

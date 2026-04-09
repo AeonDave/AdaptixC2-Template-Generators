@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -20,6 +22,10 @@ type GenerateConfig struct {
 	SvcName       string `json:"svc_name"`
 	ReconnTimeout string `json:"reconn_timeout"`
 	ReconnCount   int    `json:"reconn_count"`
+	// LLVM Obfuscation — set via "LLVM Obfuscation" checkbox in ax_config UI.
+	LlvmObf      bool   `json:"llvm_obf"`
+	LlvmCompiler string `json:"llvm_compiler"`
+	LlvmFlags    string `json:"llvm_flags"`
 }
 
 var SrcPath = "src___NAME__"
@@ -250,10 +256,46 @@ func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentPro
 
 	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO, "Compiling and linking...")
 
-	err = Ts.TsAgentBuildExecute(profile.BuilderId, srcDir, "make", makeTarget,
+	makeArgs := []string{makeTarget,
 		fmt.Sprintf("FORMAT=%s", makeFormat),
 		fmt.Sprintf("BEACON=%s/__NAME__", tempDir),
-		fmt.Sprintf("PROFILE_HEADER=%s", headerPath))
+		fmt.Sprintf("PROFILE_HEADER=%s", headerPath)}
+	if generateConfig.LlvmObf {
+		compiler := strings.TrimSpace(generateConfig.LlvmCompiler)
+		if compiler == "" {
+			_ = os.RemoveAll(tempDir)
+			return nil, "", fmt.Errorf("LLVM obfuscation enabled but no compiler specified")
+		}
+		if filepath.IsAbs(compiler) {
+			if _, err := os.Stat(compiler); err != nil {
+				_ = os.RemoveAll(tempDir)
+				return nil, "", fmt.Errorf("LLVM compiler not found: %s", compiler)
+			}
+		} else {
+			if _, err := exec.LookPath(compiler); err != nil {
+				_ = os.RemoveAll(tempDir)
+				return nil, "", fmt.Errorf("LLVM compiler not found in PATH: %s", compiler)
+			}
+		}
+		makeArgs = append(makeArgs, fmt.Sprintf("LLVM_COMPILER=%s", compiler))
+		if generateConfig.LlvmFlags != "" {
+			makeArgs = append(makeArgs, fmt.Sprintf("LLVM_FLAGS=%s", generateConfig.LlvmFlags))
+		}
+		var llvmTarget string
+		switch generateConfig.Arch {
+		case "x64":
+			llvmTarget = "x86_64-w64-mingw32"
+		case "x86":
+			llvmTarget = "i686-w64-mingw32"
+		}
+		if llvmTarget != "" {
+			makeArgs = append(makeArgs, fmt.Sprintf("LLVM_TARGET=%s", llvmTarget))
+		}
+		_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
+			fmt.Sprintf("LLVM obfuscation: compiler=%s", compiler))
+	}
+
+	err = Ts.TsAgentBuildExecute(profile.BuilderId, srcDir, "make", makeArgs...)
 	if err != nil {
 		_ = os.RemoveAll(tempDir)
 		return nil, "", err

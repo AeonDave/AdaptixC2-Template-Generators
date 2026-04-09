@@ -1,11 +1,11 @@
 .idea/
 .idea_modules/
-.learnings/
-
+.vscode/
+binaries/
 out/
 docs/
-tools/
-TOOL_USAGE.md
+.research/
+/.gitmodules
 
 cmake-build-*/
 *.iws
@@ -33,3 +33,4 @@ protocols/_crypto/*/
 !protocols/_crypto/xchacha20.tmpl
 !protocols/adaptix_default/
 !protocols/adaptix_gopher/
+

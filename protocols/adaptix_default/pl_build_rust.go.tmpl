@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -21,6 +23,10 @@ type GenerateConfig struct {
 	SvcName       string `json:"svc_name"`
 	ReconnTimeout string `json:"reconn_timeout"`
 	ReconnCount   int    `json:"reconn_count"`
+	// LLVM Obfuscation — set via "LLVM Obfuscation" checkbox in ax_config UI.
+	LlvmObf      bool   `json:"llvm_obf"`
+	LlvmCompiler string `json:"llvm_compiler"`
+	LlvmFlags    string `json:"llvm_flags"`
 }
 
 var SrcPath = "src___NAME__"
@@ -272,8 +278,53 @@ func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentPro
 
 	_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO, "Starting cargo build...")
 
+	// ── LLVM obfuscation: prepend RUSTFLAGS with linker-plugin-lto ─────
+	var rustEnvPrefix string
+	if generateConfig.LlvmObf {
+		compiler := strings.TrimSpace(generateConfig.LlvmCompiler)
+		if compiler == "" {
+			_ = os.RemoveAll(tempDir)
+			return nil, "", fmt.Errorf("LLVM obfuscation enabled but no compiler specified")
+		}
+		if filepath.IsAbs(compiler) {
+			if _, err := os.Stat(compiler); err != nil {
+				_ = os.RemoveAll(tempDir)
+				return nil, "", fmt.Errorf("LLVM compiler not found: %s", compiler)
+			}
+		} else {
+			if _, err := exec.LookPath(compiler); err != nil {
+				_ = os.RemoveAll(tempDir)
+				return nil, "", fmt.Errorf("LLVM compiler not found in PATH: %s", compiler)
+			}
+		}
+		var rfParts []string
+		rfParts = append(rfParts, "-C linker-plugin-lto")
+		rfParts = append(rfParts, fmt.Sprintf("-C linker=%s", compiler))
+		rfParts = append(rfParts, "-C link-arg=-fuse-ld=lld")
+		flags := strings.Fields(generateConfig.LlvmFlags)
+		for i := 0; i < len(flags); i++ {
+			if flags[i] == "-mllvm" && i+1 < len(flags) {
+				rfParts = append(rfParts, fmt.Sprintf("-C link-arg=-Wl,-mllvm,%s", flags[i+1]))
+				i++
+			} else {
+				rfParts = append(rfParts, fmt.Sprintf("-C link-arg=%s", flags[i]))
+			}
+		}
+		switch target {
+		case "x86_64-pc-windows-gnu":
+			rfParts = append(rfParts, "-C link-arg=--target=x86_64-w64-mingw32")
+		case "aarch64-unknown-linux-gnu":
+			rfParts = append(rfParts, "-C link-arg=--target=aarch64-unknown-linux-gnu")
+		}
+		rustEnvPrefix = fmt.Sprintf(`RUSTFLAGS="%s" `, strings.Join(rfParts, " "))
+		_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
+			fmt.Sprintf("LLVM obfuscation: compiler=%s, pipeline=linker-plugin-lto", compiler))
+		_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
+			"Note: linker-plugin-lto requires matching LLVM versions (rustc --version --verbose → llvm-version)")
+	}
+
 	cmdBuild := fmt.Sprintf("__BUILD_TOOL__ --target %s --target-dir %s%s", target, tempDir, cargoFlags)
-	shellCmd := fmt.Sprintf(`[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"; %s`, cmdBuild)
+	shellCmd := fmt.Sprintf(`[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"; %s%s`, rustEnvPrefix, cmdBuild)
 	err = Ts.TsAgentBuildExecute(profile.BuilderId, srcDir, "sh", "-c", shellCmd)
 	if err != nil {
 		_ = os.RemoveAll(tempDir)

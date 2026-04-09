@@ -56,6 +56,20 @@ public:
     // Implementations may route through a spoofed call-stack trampoline.
     virtual uintptr_t Call(uintptr_t fn, uintptr_t* args, int argCount) = 0;
 
+    // Resolve System Service Number by API hash.
+    // Returns true and sets outSsn/outAddr on success, false if unavailable.
+    virtual bool ResolveSsn(uint32_t apiHash, uint16_t* outSsn, uintptr_t* outAddr) {
+        (void)apiHash; (void)outSsn; (void)outAddr; return false;
+    }
+
     // Release any resources acquired during Init.
     virtual void Close() = 0;
+
+    // Configure sleep obfuscation (region base/size, timing).
+    virtual bool ConfigureSleep(uintptr_t regionBase, uintptr_t regionSize,
+                                uint32_t sleepMs, uint32_t jitter) { (void)regionBase; (void)regionSize; (void)sleepMs; (void)jitter; return false; }
+
+    // Sleep with memory encryption/decryption (e.g. timer-based sleep obfuscation).
+    // Default: plain Sleep(). Override with your own sleep masking implementation.
+    virtual void SleepMasked(DWORD ms) { Sleep(ms); }
 };

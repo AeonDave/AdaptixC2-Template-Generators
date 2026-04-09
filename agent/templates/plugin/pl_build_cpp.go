@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 
 	adaptix "github.com/Adaptix-Framework/axc2"
@@ -30,9 +32,10 @@ type GenerateConfig struct {
 	IsWorkTime bool   `json:"is_workingtime"`
 	StartTime  string `json:"start_time"`
 	EndTime    string `json:"end_time"`
-	// OLLVM Obfuscation — set via "OLLVM Obfuscation" checkbox in ax_config UI.
-	Obfuscation bool   `json:"obfuscation"`
-	OllvmSeed   string `json:"ollvm_seed"`
+	// LLVM Obfuscation — set via "LLVM Obfuscation" checkbox in ax_config UI.
+	LlvmObf      bool   `json:"llvm_obf"`
+	LlvmCompiler string `json:"llvm_compiler"`
+	LlvmFlags    string `json:"llvm_flags"`
 }
 
 var SrcPath = "src___NAME__"
@@ -168,16 +171,39 @@ func (p *__NAME_CAP__Plugin) BuildPayload(profile adaptix.BuildProfile, agentPro
 		fmt.Sprintf("FORMAT=%s", makeFormat),
 		fmt.Sprintf("BEACON=%s/__NAME__", tempDir),
 		fmt.Sprintf("PROFILE_HEADER=%s", headerPath)}
-	if generateConfig.Obfuscation {
-		if _, err := exec.LookPath("x86_64-w64-mingw32-clang++"); err != nil {
+	if generateConfig.LlvmObf {
+		compiler := strings.TrimSpace(generateConfig.LlvmCompiler)
+		if compiler == "" {
 			_ = os.RemoveAll(tempDir)
-			return nil, "", fmt.Errorf("OLLVM obfuscation enabled but x86_64-w64-mingw32-clang++ not found in PATH")
+			return nil, "", fmt.Errorf("LLVM obfuscation enabled but no compiler specified")
 		}
-		makeArgs = append(makeArgs, "OLLVM=1")
-		if generateConfig.OllvmSeed != "" {
-			makeArgs = append(makeArgs, fmt.Sprintf("OLLVM_SEED=%s", generateConfig.OllvmSeed))
+		if filepath.IsAbs(compiler) {
+			if _, err := os.Stat(compiler); err != nil {
+				_ = os.RemoveAll(tempDir)
+				return nil, "", fmt.Errorf("LLVM compiler not found: %s", compiler)
+			}
+		} else {
+			if _, err := exec.LookPath(compiler); err != nil {
+				_ = os.RemoveAll(tempDir)
+				return nil, "", fmt.Errorf("LLVM compiler not found in PATH: %s", compiler)
+			}
 		}
-		_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO, "OLLVM obfuscation enabled")
+		makeArgs = append(makeArgs, fmt.Sprintf("LLVM_COMPILER=%s", compiler))
+		if generateConfig.LlvmFlags != "" {
+			makeArgs = append(makeArgs, fmt.Sprintf("LLVM_FLAGS=%s", generateConfig.LlvmFlags))
+		}
+		var llvmTarget string
+		switch generateConfig.Arch {
+		case "x64":
+			llvmTarget = "x86_64-w64-mingw32"
+		case "x86":
+			llvmTarget = "i686-w64-mingw32"
+		}
+		if llvmTarget != "" {
+			makeArgs = append(makeArgs, fmt.Sprintf("LLVM_TARGET=%s", llvmTarget))
+		}
+		_ = Ts.TsAgentBuildLog(profile.BuilderId, adaptix.BUILD_LOG_INFO,
+			fmt.Sprintf("LLVM obfuscation: compiler=%s", compiler))
 	}
 
 	err = Ts.TsAgentBuildExecute(profile.BuilderId, srcDir, "make", makeArgs...)

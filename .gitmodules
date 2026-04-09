@@ -1,0 +1,3 @@
+[submodule "output/AdaptixC2-Extenders"]
+	path = output/AdaptixC2-Extenders
+	url = https://git.redline.net/General/AdaptixC2-Extenders.git

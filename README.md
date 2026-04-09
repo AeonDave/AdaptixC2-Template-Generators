@@ -38,6 +38,10 @@ Generators produce **interface stubs and template structures** -- you fill in th
 | C++ | MinGW (`x86_64-w64-mingw32-g++`) | Cross-compile Windows PE/DLL/shellcode |
 | Rust | `cargo build` | Install via rustup; add cross-compile targets |
 
+**Optional:** LLVM obfuscation for C++ and Rust agents. Set compiler path and flags in the Adaptix UI
+("LLVM Obfuscation" checkbox). Works with any LLVM-based obfuscator (Arkari, OLLVM, Pluto, etc.).
+Rust uses `linker-plugin-lto` pipeline; requires matching LLVM versions between `rustc` and the obfuscator.
+
 ---
 
 ## Project Structure
