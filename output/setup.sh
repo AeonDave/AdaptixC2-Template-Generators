@@ -409,14 +409,15 @@ copy_extender() {
     cp -r "$INPUT_DIR/$name" "$EXTENDERS_DIR/" || error_exit "Failed to copy $name"
 }
 
-# Deploy only runtime files for compiled-mode targets.
+# Deploy runtime files for compiled-mode targets.
+# Builds from source in a temp directory if no pre-built .so is found.
 deploy_extender_compiled() {
     local name="$1"
     [[ -d "$INPUT_DIR/$name" ]] || { warn_msg "$name: not found (skipping)"; return 1; }
 
     local src="$INPUT_DIR/$name"
 
-    # Compiled mode requires pre-built .so (or a dist/ with one)
+    # Check for pre-built .so
     local has_so=false
     if [[ -d "$src/dist" ]]; then
         ls "$src/dist/"*.so &>/dev/null && has_so=true
@@ -424,13 +425,35 @@ deploy_extender_compiled() {
         ls "$src/"*.so &>/dev/null && has_so=true
     fi
 
-    if ! $has_so; then
-        warn_msg "$name: no .so found — must be built first (skipping)"
+    if $has_so; then
+        # Pre-built: just deploy runtime files
+        rm -rf "${EXTENDERS_DIR:?}/$name"
+        copy_runtime_files "$src" "$EXTENDERS_DIR/$name"
+    elif [[ -f "$src/Makefile" && -f "$src/go.mod" ]]; then
+        # Source: build in a temp directory, then deploy runtime files
+        local tmpdir
+        tmpdir="$(mktemp -d)" || error_exit "Failed to create temp build directory"
+
+        cp -r "$src" "$tmpdir/$name"
+
+        # Patch -trimpath if needed
+        [[ -z "$SERVER_TRIMPATH" ]] && sed -i 's/-trimpath //g' "$tmpdir/$name/Makefile"
+
+        step_msg "Building ${BOLD}$name${NC}..."
+        local build_log
+        build_log="$(GOWORK=off make --no-print-directory -C "$tmpdir/$name" plugin \
+            GO="$GO_BIN" TRIMPATH="$SERVER_TRIMPATH" 2>&1)" || \
+            { echo "$build_log"; rm -rf "$tmpdir"; error_exit "Failed to build $name"; }
+        echo "$build_log" | grep -vE '^\[\*\]|^cd |^\[\+\]|^$' || true
+
+        rm -rf "${EXTENDERS_DIR:?}/$name"
+        copy_runtime_files "$tmpdir/$name" "$EXTENDERS_DIR/$name"
+        rm -rf "$tmpdir"
+    else
+        warn_msg "$name: no .so found and no buildable source (skipping)"
         return 1
     fi
 
-    rm -rf "${EXTENDERS_DIR:?}/$name"
-    copy_runtime_files "$src" "$EXTENDERS_DIR/$name"
     info_msg "$name ${DIM}✓${NC}"
 }
 
@@ -739,11 +762,9 @@ fi
 # ── 4. Discover extenders in input directory ────────────────────────────────
 discover_extenders
 
-# ── 5. Detect Go toolchain & verify compatibility (source mode only) ───────
-if [[ "$TARGET_MODE" == "source" ]]; then
-    detect_go_bin
-    verify_go_compatibility
-fi
+# ── 5. Detect Go toolchain & verify compatibility ─────────────────────────
+detect_go_bin
+verify_go_compatibility
 
 # ── 6. Git pull (optional) ──────────────────────────────────────────────────
 if $PULL_CHANGES; then
