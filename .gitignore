@@ -5,7 +5,7 @@ binaries/
 out/
 docs/
 .research/
-/.gitmodules
+.gitmodules
 
 cmake-build-*/
 *.iws
