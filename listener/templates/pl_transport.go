@@ -298,10 +298,20 @@ func (t *Transport__NAME_CAP__) handleConnection(conn net.Conn, ts Teamserver) {
 			}
 		} else {
 			emptyMark := ""
-			_ = Ts.TsAgentUpdateDataPartial(agentId, struct {
-				Mark     *string `json:"mark"`
-				Listener *string `json:"listener"`
-			}{Mark: &emptyMark, Listener: &t.Name})
+			var si SessionInfo
+			if parseErr := Unmarshal(initPack.Data, &si); parseErr == nil && len(si.EncryptKey) > 0 {
+				sk := si.EncryptKey
+				_ = Ts.TsAgentUpdateDataPartial(agentId, struct {
+					Mark       *string `json:"mark"`
+					Listener   *string `json:"listener"`
+					SessionKey *[]byte `json:"session_key"`
+				}{Mark: &emptyMark, Listener: &t.Name, SessionKey: &sk})
+			} else {
+				_ = Ts.TsAgentUpdateDataPartial(agentId, struct {
+					Mark     *string `json:"mark"`
+					Listener *string `json:"listener"`
+				}{Mark: &emptyMark, Listener: &t.Name})
+			}
 		}
 
 		t.AgentConnects.Put(agentId, connection)
